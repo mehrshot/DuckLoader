@@ -5,8 +5,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo, InputMediaAudio
 import admin
 import ads
 import platforms
@@ -405,33 +404,59 @@ def register_features(bot):
             if thumb_url:
                 markup.add(InlineKeyboardButton(text=t['dl_cover'], callback_data=f"thumb_{post_id}"))
 
-            for j, filepath in enumerate(files):
-                if not os.path.exists(filepath):
-                    continue
+            valid_files = [f for f in files if os.path.exists(f)]
 
+            if len(valid_files) == 1:
+                filepath = valid_files[0]
                 kind = platforms.media_kind(filepath)
-                caption_to_send = caption if j == 0 else ""
-                current_markup = markup if j == 0 else None
-
+                
                 if kind == "audio":
-                    platforms.tag_audio_file(
-                        filepath,
-                        title=metadata_source.get('title', ''),
-                        artist=metadata_source.get('uploader') or metadata_source.get('channel', ''),
-                        cover_url=thumb_url,
-                    )
-
+                    platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
+                
                 bot.send_chat_action(chat_id_int, 'upload_video' if kind == 'video' else 'upload_audio' if kind == 'audio' else 'upload_photo')
-
+                
                 try:
                     with open(filepath, "rb") as media_file:
                         if kind == "video":
-                            bot.send_video(chat_id_int, media_file, caption=caption_to_send, reply_markup=current_markup, reply_to_message_id=message.message_id, timeout=600)
+                            bot.send_video(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=message.message_id, timeout=600)
                         elif kind == "audio":
-                            bot.send_audio(chat_id_int, media_file, caption=caption_to_send, reply_markup=current_markup, reply_to_message_id=message.message_id, timeout=600)
+                            bot.send_audio(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=message.message_id, timeout=600)
                         else:
-                            bot.send_photo(chat_id_int, media_file, caption=caption_to_send, reply_markup=current_markup, reply_to_message_id=message.message_id)
+                            bot.send_photo(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=message.message_id)
                 finally:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                        
+            elif len(valid_files) > 1:
+                chunks = [valid_files[idx:idx + 10] for idx in range(0, len(valid_files), 10)]
+                
+                for chunk_idx, chunk in enumerate(chunks):
+                    media_group = []
+                    open_files = []
+                    
+                    try:
+                        for item_idx, filepath in enumerate(chunk):
+                            kind = platforms.media_kind(filepath)
+                            f = open(filepath, "rb")
+                            open_files.append(f)
+                            
+                            item_caption = caption if chunk_idx == 0 and item_idx == 0 else ""
+                            
+                            if kind == "video":
+                                media_group.append(InputMediaVideo(f, caption=item_caption))
+                            elif kind == "audio":
+                                platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
+                                media_group.append(InputMediaAudio(f, caption=item_caption))
+                            else:
+                                media_group.append(InputMediaPhoto(f, caption=item_caption))
+                        
+                        bot.send_chat_action(chat_id_int, 'upload_document')
+                        bot.send_media_group(chat_id_int, media_group, reply_to_message_id=message.message_id if chunk_idx == 0 else None, timeout=600)
+                    finally:
+                        for f in open_files:
+                            f.close()
+                            
+                for filepath in valid_files:
                     if os.path.exists(filepath):
                         os.remove(filepath)
 

@@ -18,6 +18,7 @@ touches Spotify's protected streams.
 import json
 import os
 import re
+import random
 
 import yt_dlp
 
@@ -48,8 +49,8 @@ VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov"}
 QUALITY_LADDER = ["best", "720p", "audio"]
 
 QUALITY_FORMATS = {
-    "best": "best",
-    "720p": "best[height<=720]/best",
+    "best": "bestvideo+bestaudio/best/all",
+    "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best/all",
     "audio": "bestaudio/best",
 }
 
@@ -149,22 +150,29 @@ def _youtube_extra_opts(clients) -> dict:
         opts["cookiesfrombrowser"] = (browser,)
     return opts
 
+def _get_random_proxy():
+    proxies_env = os.environ.get("ROTATING_PROXIES")
+    if proxies_env:
+        proxy_list = [p.strip() for p in proxies_env.split(",")]
+        return random.choice(proxy_list)
+    return None
 
-def _extract_resilient(ydl_opts_base: dict, target: str, download: bool):
-    """Runs yt-dlp's extraction, retrying with different YouTube
-    player-client identities if an attempt fails with what looks like one
-    of YouTube's bot/token checks. Non-YouTube extractions (Instagram,
-    SoundCloud) just succeed on the first attempt, since player_client only
-    affects youtube.com/youtu.be URLs and ytsearch: queries — this wrapper
-    is used for every extraction rather than only YouTube ones so there's
-    one code path to reason about."""
+def _extract_resilient(ydl_opts_base: dict, target: str, download: bool, process: bool = True):
     last_error = None
     for clients in _client_attempts():
         opts = dict(ydl_opts_base)
         opts.update(_youtube_extra_opts(clients))
+        
+        try:
+            proxy = _get_random_proxy()
+            if proxy:
+                opts["proxy"] = proxy
+        except NameError:
+            pass
+
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(target, download=download)
+                info = ydl.extract_info(target, download=download, process=process)
                 return info, ydl
         except Exception as e:
             if any(hint in str(e).lower() for hint in _RETRYABLE_ERROR_HINTS):
@@ -175,18 +183,30 @@ def _extract_resilient(ydl_opts_base: dict, target: str, download: bool):
 
 
 def _probe_size(url: str, format_selector: str):
-    """Returns the estimated size in bytes for this format selector, or None
-    if yt-dlp can't tell in advance. Raises FileTooLargeError if it's
-    definitely over the configured cap."""
     probe_opts = {
-        "quiet": True, "no_warnings": True, "socket_timeout": 30,
-        "noplaylist": False, "format": format_selector,
+        "quiet": True, 
+        "no_warnings": True, 
+        "socket_timeout": 30,
+        "noplaylist": False, 
+        "format": format_selector,
+        "ignoreerrors": True
     }
-    info, _ = _extract_resilient(probe_opts, url, download=False)
-
+    
+    ffmpeg_location = _ffmpeg_location()
+    if ffmpeg_location:
+        probe_opts["ffmpeg_location"] = ffmpeg_location
+        
+    info, _ = _extract_resilient(probe_opts, url, download=False, process=True)
+    
+    if not info:
+        raise Exception("Media info not found.")
+        
     entries = info.get("entries") or [info]
     total, known = 0, False
+    
     for entry in entries:
+        if not entry:
+            continue
         size = entry.get("filesize") or entry.get("filesize_approx")
         if size:
             total += size
@@ -196,8 +216,10 @@ def _probe_size(url: str, format_selector: str):
         raise FileTooLargeError(format_size(total))
     return total if known else None
 
-
 def _download_with_selector(url: str, format_selector: str, extract_audio: bool, progress_hook=None):
+    import urllib.request
+    import random
+    
     ydl_opts = {
         "format": format_selector,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
@@ -205,54 +227,114 @@ def _download_with_selector(url: str, format_selector: str, extract_audio: bool,
         "no_warnings": True,
         "color": "never",
         "noplaylist": False,
-        "socket_timeout": 30,
+        "socket_timeout": 30
     }
+    
     if extract_audio:
         ydl_opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
+        
     ffmpeg_location = _ffmpeg_location()
     if ffmpeg_location:
         ydl_opts["ffmpeg_location"] = ffmpeg_location
+        
     if progress_hook:
         ydl_opts["progress_hooks"] = [progress_hook]
 
-    info, ydl = _extract_resilient(ydl_opts, url, download=True)
-    entries = info["entries"] if info.get("_type") == "playlist" else [info]
-
+    info_raw, ydl = _extract_resilient(ydl_opts, url, download=False, process=False)
+    
+    if not info_raw:
+        raise Exception("Media info not found.")
+        
+    entries_raw = info_raw.get("entries") or [info_raw]
     filepaths = []
-    for entry in entries:
-        raw_path = ydl.prepare_filename(entry)
-        if extract_audio:
-            mp3_path = os.path.splitext(raw_path)[0] + ".mp3"
-            filepaths.append(mp3_path if os.path.exists(mp3_path) else raw_path)
-        else:
-            filepaths.append(raw_path)
+    valid_entries = []
+    
+    for raw_entry in entries_raw:
+        if not raw_entry:
+            continue
+            
+        if "extractor" not in raw_entry and "extractor" in info_raw:
+            raw_entry["extractor"] = info_raw["extractor"]
+        if "extractor_key" not in raw_entry and "extractor_key" in info_raw:
+            raw_entry["extractor_key"] = info_raw["extractor_key"]
+        if "webpage_url" not in raw_entry and "webpage_url" in info_raw:
+            raw_entry["webpage_url"] = info_raw["webpage_url"]
+        
+        downloaded_path = None
+        
+        try:
+            processed = ydl.process_ie_result(raw_entry, download=True)
+            if processed:
+                downloaded_path = ydl.prepare_filename(processed)
+                valid_entries.append(processed)
+        except Exception as e:
+            img_url = raw_entry.get("url")
+            if not img_url and raw_entry.get("thumbnails"):
+                img_url = raw_entry["thumbnails"][-1]["url"]
+                
+            if img_url:
+                ext = "jpg"
+                if ".png" in img_url: 
+                    ext = "png"
+                elif ".webp" in img_url: 
+                    ext = "webp"
+                    
+                safe_id = raw_entry.get("id", str(random.randint(1000, 9999)))
+                downloaded_path = f"{DOWNLOAD_DIR}/{safe_id}.{ext}"
+                try:
+                    urllib.request.urlretrieve(img_url, downloaded_path)
+                    valid_entries.append(raw_entry)
+                except Exception:
+                    downloaded_path = None
+            else:
+                raise e
+        
+        if downloaded_path and os.path.exists(downloaded_path):
+            if extract_audio and not downloaded_path.endswith((".jpg", ".png", ".webp")):
+                mp3_path = os.path.splitext(downloaded_path)[0] + ".mp3"
+                filepaths.append(mp3_path if os.path.exists(mp3_path) else downloaded_path)
+            else:
+                filepaths.append(downloaded_path)
 
-    return info, entries, filepaths
+    return info_raw, valid_entries, filepaths
 
 
 def download_direct(url: str, quality: str = "best", allow_fallback: bool = False, progress_hook=None):
-    """Instagram / YouTube / SoundCloud — yt-dlp handles these natively.
-    Returns (info, entries, filepaths, quality_used). If allow_fallback is
-    True and the requested quality is too large, steps down the ladder
-    (best -> 720p -> audio) until one fits, and reports which tier it
-    actually used."""
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
+    
     start = QUALITY_LADDER.index(quality) if quality in QUALITY_LADDER else 0
     tiers_to_try = QUALITY_LADDER[start:] if allow_fallback else [quality]
+    
+    is_youtube = "youtube" in url.lower() or "youtu.be" in url.lower()
 
     last_error = None
     for tier in tiers_to_try:
+        if is_youtube:
+            if tier == "best":
+                fmt = "bestvideo+bestaudio/best/all"
+            elif tier == "720p":
+                fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best/all"
+            else:
+                fmt = "bestaudio/best"
+        else:
+            if tier == "best":
+                fmt = "best/all"
+            elif tier == "720p":
+                fmt = "best[height<=720]/best/all"
+            else:
+                fmt = "bestaudio/best"
+                
         try:
-            _probe_size(url, QUALITY_FORMATS[tier])
+            _probe_size(url, fmt)
         except FileTooLargeError as e:
             last_error = e
             continue
-        info, entries, filepaths = _download_with_selector(url, QUALITY_FORMATS[tier], tier == "audio", progress_hook)
+            
+        info, entries, filepaths = _download_with_selector(url, fmt, tier == "audio", progress_hook)
         return info, entries, filepaths, tier
 
     raise last_error or FileTooLargeError("unknown size")
