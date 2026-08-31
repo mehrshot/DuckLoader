@@ -1,0 +1,8 @@
+{
+    "instagram": true,
+    "soundcloud": true,
+    "spotify": true,
+    "youtube": true,
+    "auto_quality_fallback": false,
+    "sponsor_message": false
+}
