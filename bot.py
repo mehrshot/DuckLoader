@@ -27,6 +27,11 @@ included, just open it and fill in your own values:
     SPOTIFY_CLIENT_SECRET=...
     FFMPEG_LOCATION=...          # optional — only needed if ffmpeg isn't found on PATH
 
+ROTATING_PROXIES (optional): one or more proxy URLs, comma-separated, e.g.
+a local rotating SOCKS5 gateway. Used only for lightweight probing/search
+calls, not for the actual file transfer — see the docstring on
+_get_random_proxy() in platforms.py for why.
+
 Admin commands (work only for OWNER_ID)
 -----------------------------------------
     /lock <platform>       e.g. /lock youtube

@@ -22,6 +22,37 @@ MAX_CONCURRENT_DOWNLOADS = 3  # how many downloads run at once, bot-wide
 _recent_downloads = defaultdict(list)  # user_id -> [timestamps]
 _download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
+# If this many requests are already waiting for a download slot, new ones
+# get turned away immediately instead of growing an unbounded queue — keeps
+# a burst of traffic (organic growth or abuse) from piling up memory and
+# giving everyone a worse wait.
+MAX_QUEUE_WAITING = 15
+_queue_waiting_count = 0
+_queue_lock = threading.Lock()
+
+
+def _acquire_download_slot(bot, chat_id_int, status_msg, t) -> bool:
+    """Returns True once a download slot is acquired. Returns False (and
+    already told the user) if the wait queue is already too deep — caller
+    should stop immediately without touching the semaphore."""
+    global _queue_waiting_count
+
+    if _download_semaphore.acquire(blocking=False):
+        return True
+
+    with _queue_lock:
+        if _queue_waiting_count >= MAX_QUEUE_WAITING:
+            bot.edit_message_text(t['server_busy'], chat_id_int, status_msg.message_id)
+            return False
+        _queue_waiting_count += 1
+
+    bot.edit_message_text(t['queued'], chat_id_int, status_msg.message_id)
+    _download_semaphore.acquire()
+
+    with _queue_lock:
+        _queue_waiting_count -= 1
+    return True
+
 
 def _is_rate_limited(user_id) -> bool:
     now = time.time()
@@ -53,6 +84,7 @@ TEXTS = {
         'quality_reduced': "ℹ️ به‌خاطر محدودیت حجم تلگرام، کیفیت به‌صورت خودکار به «{quality}» کاهش یافت.",
         'rate_limited': "⏳ توی یک دقیقه‌ی اخیر بیش از حد مجاز ({limit} تا) دانلود کرده‌ای. کمی صبر کن و دوباره امتحان کن.",
         'queued': "📋 صف دانلود پر است — به‌محض آزاد شدن ظرفیت شروع می‌شود...",
+        'server_busy': "🚦 سرور الان خیلی شلوغه. چند دقیقه‌ی دیگه دوباره امتحان کن.",
         'spotify_searching': "🔎 در حال جست‌وجو ({i}/{total}): {name}",
         'view_link': "🔗 مشاهده در پلتفرم اصلی",
         'dl_cover': "🖼 دانلود کاور",
@@ -104,6 +136,7 @@ TEXTS = {
         'quality_reduced': "ℹ️ Quality was automatically reduced to \"{quality}\" to stay under Telegram's size limit.",
         'rate_limited': "⏳ You've hit the download limit ({limit}) for the last minute. Please wait a bit and try again.",
         'queued': "📋 The download queue is full — this will start as soon as a slot frees up...",
+        'server_busy': "🚦 The server is very busy right now. Please try again in a few minutes.",
         'spotify_searching': "🔎 Searching ({i}/{total}): {name}",
         'view_link': "🔗 View Original",
         'dl_cover': "🖼 Download Cover",
@@ -350,10 +383,8 @@ def register_features(bot):
                         pass
                     last_edit_time = now
 
-        acquired = _download_semaphore.acquire(blocking=False)
-        if not acquired:
-            bot.edit_message_text(t['queued'], chat_id_int, status_msg.message_id)
-            _download_semaphore.acquire()
+        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+            return
 
         try:
             if platform == "spotify":
@@ -530,10 +561,8 @@ def register_features(bot):
                         pass
                     last_edit_time = now
 
-        acquired = _download_semaphore.acquire(blocking=False)
-        if not acquired:
-            bot.edit_message_text(t['queued'], chat_id_int, status_msg.message_id)
-            _download_semaphore.acquire()
+        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+            return
 
         try:
             info, entries, files = platforms.download_youtube_quality(video_id, choice, progress_hook)
