@@ -80,6 +80,12 @@ TEXTS = {
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
         'uploading': "✅ دانلود تکمیل شد! در حال آپلود...",
         'failed': "❌ خطا: {error}",
+        'download_failed': "❌ دانلود این لینک در حال حاضر انجام نشد. لطفاً مطمئن شو لینک قابل دسترسیه و دوباره امتحان کن.",
+        'instagram_failed': "❌ دریافت محتوای اینستاگرام انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
+        'instagram_unavailable': "❌ این استوری اینستاگرام در حال حاضر برای ربات قابل دسترسی نیست. ممکنه نیاز به ورود به اینستاگرام داشته باشه یا استوری دیگه در دسترس نباشه.",
+        'youtube_failed': "❌ دریافت این ویدیوی یوتیوب در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
+        'soundcloud_failed': "❌ دریافت این ترک ساندکلاد در حال حاضر انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
+        'spotify_failed': "❌ دریافت این ترک اسپاتیفای در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
         'not_launched': "🚧 دانلود از {platform} هنوز لانچ نشده. به‌زودی فعال می‌شود!",
         'too_large': "⚠️ حجم این فایل حدود {size} است و از سقف مجاز بیشتره، پس امکان ارسالش نیست.\n\nمی‌تونی از /settings کیفیت پایین‌تر یا «فقط صدا» رو انتخاب کنی.",
         'quality_reduced': "ℹ️ به‌خاطر محدودیت حجم تلگرام، کیفیت به‌صورت خودکار به «{quality}» کاهش یافت.",
@@ -133,6 +139,9 @@ TEXTS = {
         'adm_ads': "📢 تبلیغات",
         'adm_users': "👥 کاربران",
         'adm_stats': "📊 آمار",
+        'adm_errors': "🚨 خطاهای دانلود",
+        'adm_errors_title': "🚨 آخرین خطاهای دانلود:",
+        'adm_errors_empty': "✅ هیچ خطای ثبت‌شده‌ای وجود نداره.",
         'adm_mysettings': "🌐 تنظیمات شخصی من",
         'back': "⬅️ بازگشت",
         'adm_platforms_title': "کدوم پلتفرم رو می‌خوای قفل/باز کنی؟",
@@ -160,6 +169,12 @@ TEXTS = {
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
         'uploading': "✅ Download complete! Preparing upload...",
         'failed': "❌ Failed: {error}",
+        'download_failed': "❌ We couldn't download this link right now. Please check the link and try again.",
+        'instagram_failed': "❌ We couldn't download this Instagram content right now. Please check the link and try again.",
+        'instagram_unavailable': "❌ This Instagram story isn't currently accessible to the bot. It may require an Instagram login or may no longer be available.",
+        'youtube_failed': "❌ We couldn't download this YouTube video right now. Please try again in a moment.",
+        'soundcloud_failed': "❌ We couldn't download this SoundCloud track right now. Please check the link and try again.",
+        'spotify_failed': "❌ We couldn't download this Spotify track right now. Please try again in a moment.",
         'not_launched': "🚧 Downloading from {platform} hasn't launched yet. Stay tuned!",
         'too_large': "⚠️ This file is about {size}, over the allowed limit, so it can't be sent.\n\nYou can pick a lower quality or \"audio only\" in /settings.",
         'quality_reduced': "ℹ️ Quality was automatically reduced to \"{quality}\" to stay under Telegram's size limit.",
@@ -213,6 +228,9 @@ TEXTS = {
         'adm_ads': "📢 Ads",
         'adm_users': "👥 Users",
         'adm_stats': "📊 Stats",
+        'adm_errors': "🚨 Download Errors",
+        'adm_errors_title': "🚨 Recent Download Errors:",
+        'adm_errors_empty': "✅ No recorded download errors.",
         'adm_mysettings': "🌐 My Own Settings",
         'back': "⬅️ Back",
         'adm_platforms_title': "Which platform do you want to lock/unlock?",
@@ -274,6 +292,58 @@ def _build_caption(entry: dict) -> str:
         lines.append(f"\n📝 {description}")
     lines.append("\n🤖 @DropShotDLBot")
     return "\n".join(lines)
+
+def _friendly_download_error(
+    platform: str,
+    error: Exception,
+    t: dict,
+) -> str:
+    """
+    Convert internal downloader errors into a short,
+    human-readable message.
+
+    Never expose yt-dlp's raw exception text to the user.
+    """
+
+    error_text = str(error).lower()
+
+    if platform == "instagram":
+
+        if (
+            "login" in error_text
+            or "cookies" in error_text
+            or "authentication" in error_text
+            or "unreachable" in error_text
+        ):
+            return t[
+                "instagram_unavailable"
+            ]
+
+        return t[
+            "instagram_failed"
+        ]
+
+    if platform == "youtube":
+
+        return t[
+            "youtube_failed"
+        ]
+
+    if platform == "soundcloud":
+
+        return t[
+            "soundcloud_failed"
+        ]
+
+    if platform == "spotify":
+
+        return t[
+            "spotify_failed"
+        ]
+
+    return t[
+        "download_failed"
+    ]
 
 
 def _settings_markup(user: dict, t: dict) -> InlineKeyboardMarkup:
@@ -544,15 +614,10 @@ def register_features(bot):
         status_msg,
     ):
         """
-        Download one media item with a bounded processing slot.
+        Shared direct-download worker.
 
-        The slot covers:
-            yt-dlp
-            FFmpeg
-            local post-processing
-
-        The slot is released BEFORE the Telegram upload, because
-        Telegram upload is network I/O rather than CPU-heavy processing.
+        Technical errors are logged for the admin but never exposed
+        directly to the user.
         """
 
         progress_hook = _make_progress_hook(
@@ -569,37 +634,32 @@ def register_features(bot):
         ):
             return
 
-        slot_held = True
+        platform = (
+            platforms.detect_platform(url)
+            or "unknown"
+        )
 
         try:
-
-            platform = (
-                platforms.detect_platform(url)
-                or "unknown"
-            )
 
             allow_fallback = flags.get(
                 "auto_quality_fallback",
                 False,
             )
 
-            info, entries, files, quality_used = (
-                platforms.download_direct(
-                    url,
-                    quality=quality,
-                    allow_fallback=allow_fallback,
-                    progress_hook=progress_hook,
-                )
+            (
+                info,
+                entries,
+                files,
+                quality_used,
+            ) = platforms.download_direct(
+                url,
+                quality=quality,
+                allow_fallback=allow_fallback,
+                progress_hook=progress_hook,
             )
 
-            # The CPU/network download work is now finished.
-            # Allow the next job to begin while Telegram receives
-            # this already-prepared file.
-            _download_semaphore.release()
-            slot_held = False
-
             bot.edit_message_text(
-                t['uploading'],
+                t["uploading"],
                 chat_id_int,
                 status_msg.message_id,
             )
@@ -622,31 +682,51 @@ def register_features(bot):
                 status_msg.message_id,
             )
 
-            _maybe_send_ad(chat_id_int)
+            _maybe_send_ad(
+                chat_id_int
+            )
 
         except platforms.FileTooLargeError as e:
 
-            store.record_error()
+            store.record_error(
+                platform=platform,
+                url=url,
+                user_id=chat_id_int,
+                error=str(e),
+            )
 
             try:
                 bot.edit_message_text(
-                    t['too_large'].format(
+                    t["too_large"].format(
                         size=str(e)
                     ),
                     chat_id_int,
                     status_msg.message_id,
-                )
+                )   
             except Exception:
                 pass
 
         except Exception as e:
 
-            store.record_error()
+            store.record_error(
+                platform=platform,
+                url=url,
+                user_id=chat_id_int,
+                error=str(e),
+            )
+
+            logger.exception(
+                "Download failed | platform=%s | url=%s",
+                platform,
+                url,
+            )
 
             try:
                 bot.edit_message_text(
-                    t['failed'].format(
-                        error=str(e)
+                    _friendly_download_error(
+                        platform,
+                        e,
+                        t,
                     ),
                     chat_id_int,
                     status_msg.message_id,
@@ -656,55 +736,178 @@ def register_features(bot):
 
         finally:
 
-            if slot_held:
-                _download_semaphore.release()
+            _download_semaphore.release()
 
-    def _send_youtube_quality_picker(message, t, lang):
-        chat_id_int = message.chat.id
-        status_msg = bot.reply_to(message, t['init'])
+    def _send_youtube_quality_picker(
+        message,
+        t,
+        lang,
+    ):
+        hat_id_int = message.chat.id
+        url = message.text.strip()
+
+        status_msg = bot.reply_to(
+            message,
+            t["init"],
+        )
 
         try:
-            probe = platforms.probe_youtube_qualities(message.text.strip())
+
+            probe = (
+                platforms.probe_youtube_qualities(
+                    url
+                )
+            )
+
         except Exception as e:
-            store.record_error()
-            bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+
+            store.record_error(
+                platform="youtube",
+                url=url,
+                user_id=message.from_user.id,
+                error=str(e),
+            )
+
+            logger.exception(
+                "YouTube quality probe failed | url=%s",
+                url,
+            )
+
+            bot.edit_message_text(
+                t["youtube_failed"],
+                chat_id_int,
+                status_msg.message_id,
+            )
+
             return
 
-        if not probe['options']:
-            bot.edit_message_text(t['yt_no_quality'], chat_id_int, status_msg.message_id)
+        if not probe["options"]:
+
+            bot.edit_message_text(
+                t["yt_no_quality"],
+                chat_id_int,
+                status_msg.message_id,
+            )
+
             return
 
-        digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-        markup = InlineKeyboardMarkup(row_width=2)
+        digits = str.maketrans(
+            "0123456789",
+            "۰۱۲۳۴۵۶۷۸۹",
+        )
+
+        markup = InlineKeyboardMarkup(
+            row_width=2
+        )
+
         buttons = []
-        for opt in probe['options']:
-            if opt['size_bytes'] == 0:
-                size_label = "Unknown Size" if lang == 'en' else "حجم نامشخص"
-            else:
-                size_label = f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
-                if lang == 'fa':
-                    size_label = size_label.replace("MB", "مگابایت").translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
 
-            if opt['kind'] == 'audio':
-                text = f"🎵 Audio — {size_label}" if lang == 'en' else f"🎵 صوت — {size_label}"
-                cb = f"ytq_{probe['id']}_audio"
-            else:
-                height_str = str(opt['height'])
-                if lang == 'fa':
-                    height_str = height_str.translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
-                text = f"🎬 {height_str}p — {size_label}"
-                cb = f"ytq_{probe['id']}_{opt['height']}"
-            buttons.append(InlineKeyboardButton(text=text, callback_data=cb))
-        markup.add(*buttons)
+        for opt in probe["options"]:
 
-        bot.delete_message(chat_id_int, status_msg.message_id)
-        caption = t['yt_choose_quality'].format(title=(probe['title'] or '')[:200])
-        if probe['thumbnail']:
-            bot.send_photo(chat_id_int, probe['thumbnail'], caption=caption, reply_markup=markup, reply_to_message_id=message.message_id)
+            if opt["size_bytes"] == 0:
+
+                size_label = (
+                    "Unknown Size"
+                    if lang == "en"
+                    else "حجم نامشخص"
+                )
+
+            else:
+
+                size_label = (
+                    f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
+                )
+
+               if lang == "fa":
+                   size_label = (
+                       size_label
+                       .replace(
+                           "MB",
+                            "مگابایت",
+                        )
+                        .translate(digits)
+                    )
+
+         if opt["kind"] == "audio":
+
+                text = (
+                   f"🎵 Audio — {size_label}"
+                   if lang == "en"
+                  else f"🎵 صوت — {size_label}"
+                )
+
+                cb = (
+                    f"ytq_{probe['id']}_audio"
+                )
+
+          else:
+
+               height_str = str(
+                   opt["height"]
+               )
+
+              if lang == "fa":
+                  height_str = (
+                      height_str.translate(
+                           digits
+                      )
+                    )
+
+             text = (
+                    f"🎬 {height_str}p — {size_label}"
+              )
+
+             cb = (
+                  f"ytq_{probe['id']}_{opt['height']}"
+               )
+
+         buttons.append(
+               InlineKeyboardButton(
+                   text=text,
+                   callback_data=cb,
+                )
+           )
+
+      markup.add(*buttons)
+
+     bot.delete_message(
+         chat_id_int,
+         status_msg.message_id,
+       )
+
+        caption = (
+            t["yt_choose_quality"].format(
+                title=(
+                    probe["title"] or ""
+                )[:200]
+            )
+        )
+
+        if probe["thumbnail"]:
+
+            bot.send_photo(
+                chat_id_int,
+                probe["thumbnail"],
+                caption=caption,
+                reply_markup=markup,
+                reply_to_message_id=(
+                    message.message_id
+                ),
+            )
+
         else:
-            bot.send_message(chat_id_int, caption, reply_markup=markup, reply_to_message_id=message.message_id)
+
+            bot.send_message(
+                chat_id_int,
+                caption,
+                reply_markup=markup,
+                reply_to_message_id=(
+                    message.message_id
+                ),
+            )
 
     @bot.message_handler(commands=["start", "help"])
+
     def send_welcome(message):
         store.track_user(message.chat.id)
         t = _texts_for(message.chat.id)
@@ -819,9 +1022,25 @@ def register_features(bot):
                 bot.delete_message(chat_id_int, status_msg.message_id)
                 _maybe_send_ad(chat_id_int)
             except Exception as e:
-                store.record_error()
+
+                store.record_error(
+                    platform="spotify",
+                    url=url,
+                    user_id=message.from_user.id,
+                    error=str(e),
+                )
+
+                logger.exception(
+                    "Spotify download failed | url=%s",
+                    url,
+                )
+
                 try:
-                    bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+                    bot.edit_message_text(
+                        t["spotify_failed"],
+                        chat_id_int,
+                        status_msg.message_id,
+                    )
                 except Exception:
                     pass
             finally:
