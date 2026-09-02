@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import threading
@@ -10,6 +11,8 @@ import admin
 import ads
 import platforms
 import store
+
+logger = logging.getLogger(__name__)
 
 thumb_cache = {}
 audio_source_cache = {}  # post_id -> original url, for the "get audio" button under video posts
@@ -616,8 +619,8 @@ def register_features(bot):
         """
         Shared direct-download worker.
 
-        Technical errors are logged for the admin but never exposed
-        directly to the user.
+        Technical errors are stored for the administrator and
+        are never shown directly to the user.
         """
 
         progress_hook = _make_progress_hook(
@@ -702,7 +705,7 @@ def register_features(bot):
                     ),
                     chat_id_int,
                     status_msg.message_id,
-                )   
+                )
             except Exception:
                 pass
 
@@ -743,7 +746,7 @@ def register_features(bot):
         t,
         lang,
     ):
-        hat_id_int = message.chat.id
+        chat_id_int = message.chat.id
         url = message.text.strip()
 
         status_msg = bot.reply_to(
@@ -752,15 +755,11 @@ def register_features(bot):
         )
 
         try:
-
-            probe = (
-                platforms.probe_youtube_qualities(
-                    url
-                )
+            probe = platforms.probe_youtube_qualities(
+                url
             )
 
         except Exception as e:
-
             store.record_error(
                 platform="youtube",
                 url=url,
@@ -781,14 +780,12 @@ def register_features(bot):
 
             return
 
-        if not probe["options"]:
-
+        if not probe.get("options"):
             bot.edit_message_text(
                 t["yt_no_quality"],
                 chat_id_int,
                 status_msg.message_id,
             )
-
             return
 
         digits = str.maketrans(
@@ -804,8 +801,7 @@ def register_features(bot):
 
         for opt in probe["options"]:
 
-            if opt["size_bytes"] == 0:
-
+            if opt.get("size_bytes", 0) <= 0:
                 size_label = (
                     "Unknown Size"
                     if lang == "en"
@@ -813,77 +809,79 @@ def register_features(bot):
                 )
 
             else:
-
                 size_label = (
                     f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
                 )
 
-               if lang == "fa":
-                   size_label = (
-                       size_label
-                       .replace(
-                           "MB",
+                if lang == "fa":
+                    size_label = (
+                        size_label
+                        .replace(
+                            "MB",
                             "مگابایت",
                         )
                         .translate(digits)
                     )
 
-         if opt["kind"] == "audio":
+            if opt["kind"] == "audio":
 
                 text = (
-                   f"🎵 Audio — {size_label}"
-                   if lang == "en"
-                  else f"🎵 صوت — {size_label}"
+                    f"🎵 Audio — {size_label}"
+                    if lang == "en"
+                    else f"🎵 صوت — {size_label}"
                 )
 
-                cb = (
+                callback_data = (
                     f"ytq_{probe['id']}_audio"
                 )
 
-          else:
+            else:
 
-               height_str = str(
-                   opt["height"]
-               )
+                height = opt.get("height")
+                height_str = str(height)
 
-              if lang == "fa":
-                  height_str = (
-                      height_str.translate(
-                           digits
-                      )
+                if lang == "fa":
+                    height_str = (
+                        height_str.translate(
+                            digits
+                        )
                     )
 
-             text = (
+                text = (
                     f"🎬 {height_str}p — {size_label}"
-              )
-
-             cb = (
-                  f"ytq_{probe['id']}_{opt['height']}"
-               )
-
-         buttons.append(
-               InlineKeyboardButton(
-                   text=text,
-                   callback_data=cb,
                 )
-           )
 
-      markup.add(*buttons)
+                callback_data = (
+                    f"ytq_{probe['id']}_{height}"
+                )
 
-     bot.delete_message(
-         chat_id_int,
-         status_msg.message_id,
-       )
+            buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=callback_data,
+                )
+            )
+
+        markup.add(*buttons)
+
+        try:
+            bot.delete_message(
+                chat_id_int,
+                status_msg.message_id,
+            )
+        except Exception:
+            pass
 
         caption = (
             t["yt_choose_quality"].format(
                 title=(
-                    probe["title"] or ""
+                    probe.get("title")
+                    or ""
                 )[:200]
             )
         )
 
-        if probe["thumbnail"]:
+        if probe.get("thumbnail"):
 
             bot.send_photo(
                 chat_id_int,
@@ -1088,49 +1086,174 @@ def register_features(bot):
         status_msg = bot.send_message(chat_id_int, t['init'])
         _run_direct_download(chat_id_int, None, url, 'audio', t, status_msg)
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith('ytq_'))
+    @bot.callback_query_handler(
+        func=lambda call: call.data.startswith("ytq_")
+    )
     def handle_youtube_quality_pick(call):
-        chat_id_str = str(call.message.chat.id)
+        chat_id_str = str(
+            call.message.chat.id
+        )
         chat_id_int = call.message.chat.id
         user_id = call.from_user.id
-        t = _texts_for(chat_id_str)
+
+        t = _texts_for(
+            chat_id_str
+        )
 
         if store.is_banned(user_id):
-            bot.answer_callback_query(call.id)
+            bot.answer_callback_query(
+                call.id
+            )
             return
 
         if _is_rate_limited(user_id):
-            bot.answer_callback_query(call.id, t['rate_limited'].format(limit=RATE_LIMIT_COUNT), show_alert=True)
-            return
-
-        _, video_id, choice = call.data.split('_', 2)
-        bot.answer_callback_query(call.id)
-
-        bot.delete_message(chat_id_int, call.message.message_id)
-        status_msg = bot.send_message(chat_id_int, t['init'])
-        progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
-
-        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+            bot.answer_callback_query(
+                call.id,
+                t["rate_limited"].format(
+                    limit=RATE_LIMIT_COUNT
+                ),
+                show_alert=True,
+            )
             return
 
         try:
-            info, entries, files = platforms.download_youtube_quality(video_id, choice, progress_hook)
-            bot.edit_message_text(t['uploading'], chat_id_int, status_msg.message_id)
+            _, video_id, choice = (
+                call.data.split("_", 2)
+            )
+        except ValueError:
+            bot.answer_callback_query(
+                call.id,
+                "Invalid selection.",
+                show_alert=True,
+            )
+            return
 
-            source_url = f"https://www.youtube.com/watch?v={video_id}"
-            _send_download_result(chat_id_int, None, source_url, "youtube", choice, choice, info, entries, files, t)
+        bot.answer_callback_query(
+            call.id
+        )
 
-            bot.delete_message(chat_id_int, status_msg.message_id)
-            _maybe_send_ad(chat_id_int)
+        try:
+            bot.delete_message(
+                chat_id_int,
+                call.message.message_id,
+            )
+        except Exception:
+            pass
 
-        except platforms.FileTooLargeError as e:
-            store.record_error()
-            bot.edit_message_text(t['too_large'].format(size=str(e)), chat_id_int, status_msg.message_id)
-        except Exception as e:
-            store.record_error()
+        status_msg = bot.send_message(
+            chat_id_int,
+            t["init"],
+        )
+
+        progress_hook = _make_progress_hook(
+            chat_id_int,
+            status_msg,
+            t,
+        )
+
+        if not _acquire_download_slot(
+            bot,
+            chat_id_int,
+            status_msg,
+            t,
+        ):
+            return
+
+        try:
+
+            info, entries, files = (
+                platforms.download_youtube_quality(
+                    video_id,
+                    choice,
+                    progress_hook,
+                )
+            )
+
+            bot.edit_message_text(
+                t["uploading"],
+                chat_id_int,
+                status_msg.message_id,
+            )
+
+            source_url = (
+                f"https://www.youtube.com/watch?v={video_id}"
+            )
+
+            _send_download_result(
+                chat_id_int,
+                None,
+                source_url,
+                "youtube",
+                choice,
+                choice,
+                info,
+                entries,
+                files,
+                t,
+            )
+
             try:
-                bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+                bot.delete_message(
+                    chat_id_int,
+                    status_msg.message_id,
+                )
             except Exception:
                 pass
+
+            _maybe_send_ad(
+                chat_id_int
+            )
+
+        except platforms.FileTooLargeError as e:
+
+            store.record_error(
+                platform="youtube",
+                url=(
+                    f"https://www.youtube.com/watch?v={video_id}"
+                ),
+                user_id=user_id,
+                error=str(e),
+            )
+
+            try:
+                bot.edit_message_text(
+                    t["too_large"].format(
+                        size=str(e)
+                    ),
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+
+            source_url = (
+                f"https://www.youtube.com/watch?v={video_id}"
+            )
+
+            store.record_error(
+                platform="youtube",
+                url=source_url,
+                user_id=user_id,
+                error=str(e),
+            )
+
+            logger.exception(
+                "YouTube quality download failed | url=%s | choice=%s",
+                source_url,
+                choice,
+            )
+
+            try:
+                bot.edit_message_text(
+                    t["youtube_failed"],
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
+
         finally:
+
             _download_semaphore.release()
