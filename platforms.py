@@ -22,9 +22,9 @@ import logging
 import os
 import random
 import re
-import uuid
 import shutil
 import subprocess
+import uuid
 
 import yt_dlp
 
@@ -309,34 +309,132 @@ def _extract_resilient(ydl_opts_base: dict, target: str, download: bool, process
 
 
 def _probe_size(url: str, format_selector: str):
-    """Returns the estimated size in bytes for this format selector, or None
-    if yt-dlp can't tell in advance. Raises FileTooLargeError if it's
-    definitely over the configured cap."""
+    """
+    Probe the exact yt-dlp format selector that will be downloaded.
+
+    For merged video+audio formats, sum the sizes of the exact
+    requested video/audio streams rather than estimating them from
+    unrelated formats.
+    """
+
     probe_opts = {
-        "quiet": True, "no_warnings": True, "socket_timeout": 30,
-        "noplaylist": False, "format": format_selector, "ignoreerrors": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "noplaylist": False,
+        "format": format_selector,
+        "ignoreerrors": False,
     }
+
     ffmpeg_location = _ffmpeg_location()
+
     if ffmpeg_location:
         probe_opts["ffmpeg_location"] = ffmpeg_location
 
-    info, _ = _extract_resilient(probe_opts, url, download=False, process=True)
+    info, _ = _extract_resilient(
+        probe_opts,
+        url,
+        download=False,
+        process=True,
+    )
+
     if not info:
         raise Exception("Media info not found.")
 
     entries = info.get("entries") or [info]
-    total, known = 0, False
+
+    total = 0
+    all_known = True
+
     for entry in entries:
+
         if not entry:
             continue
-        size = entry.get("filesize") or entry.get("filesize_approx")
-        if size:
-            total += size
-            known = True
 
-    if known and total > MAX_TELEGRAM_BYTES:
+        # When yt-dlp selected separate video + audio streams,
+        # they are exposed here.
+        requested_formats = entry.get("requested_formats") or []
+
+        if requested_formats:
+            entry_total = 0
+            entry_known = True
+
+            for fmt in requested_formats:
+
+                size = (
+                    fmt.get("filesize")
+                    or fmt.get("filesize_approx")
+                )
+
+                if size:
+                    entry_total += int(size)
+                    continue
+
+                # If filesize metadata isn't available, estimate
+                # this EXACT selected stream from its bitrate.
+                duration = (
+                    entry.get("duration")
+                    or info.get("duration")
+                    or 0
+                )
+
+                bitrate = (
+                    fmt.get("vbr")
+                    or fmt.get("abr")
+                    or fmt.get("tbr")
+                )
+
+                if bitrate and duration:
+                    entry_total += int(
+                        float(bitrate) * 1000 / 8 * duration
+                    )
+                else:
+                    entry_known = False
+
+            if entry_known and entry_total > 0:
+                total += entry_total
+            else:
+                all_known = False
+
+            continue
+
+        # Progressive format: one selected file.
+        size = (
+            entry.get("filesize")
+            or entry.get("filesize_approx")
+        )
+
+        if size:
+            total += int(size)
+            continue
+
+        duration = (
+            entry.get("duration")
+            or info.get("duration")
+            or 0
+        )
+
+        bitrate = (
+            entry.get("tbr")
+            or entry.get("vbr")
+            or entry.get("abr")
+        )
+
+        if bitrate and duration:
+            total += int(
+                float(bitrate) * 1000 / 8 * duration
+            )
+        else:
+            all_known = False
+
+    if total > MAX_TELEGRAM_BYTES:
         raise FileTooLargeError(format_size(total))
-    return total if known else None
+
+    if total <= 0:
+        return None
+
+    # Return the real/estimated size of the exact selector.
+    return total
 
 
 def _is_probably_photo_entry(info_raw: dict, raw_entry: dict) -> bool:
@@ -416,6 +514,8 @@ def _download_with_selector(
     }
 
     if extract_audio:
+    # Download the original thumbnail so it can be embedded
+    # into the final MP3.
         ydl_opts["writethumbnail"] = True
 
         ydl_opts["postprocessors"] = [
@@ -595,6 +695,9 @@ def _download_with_selector(
                 else:
                     path = raw_path
 
+                    if path.lower().endswith(".mp4"):
+                        path = _faststart_mp4(path)
+
                 # Make the MP4 streamable without changing quality.
                 path = _faststart_mp4(path)
 
@@ -652,26 +755,72 @@ def _format_for(url: str, tier: str) -> str:
     return table[tier]
 
 
-def download_direct(url: str, quality: str = "best", allow_fallback: bool = False, progress_hook=None):
-    """Instagram / YouTube / SoundCloud — yt-dlp handles these natively.
-    Returns (info, entries, filepaths, quality_used). If allow_fallback is
-    True and the requested quality is too large, steps down the ladder
-    (best -> 720p -> audio) until one fits, and reports which tier it
-    actually used."""
+def download_direct(
+    url: str,
+    quality: str = "best",
+    allow_fallback: bool = False,
+    progress_hook=None,
+):
+    """
+    Download media from Instagram / YouTube / SoundCloud.
+
+    SoundCloud is always converted to MP3 because it is an audio platform.
+    YouTube keeps its requested video quality unless audio-only was requested.
+    """
+
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-    start = QUALITY_LADDER.index(quality) if quality in QUALITY_LADDER else 0
-    tiers_to_try = QUALITY_LADDER[start:] if allow_fallback else [quality]
+    is_soundcloud = "soundcloud.com" in url.lower()
+
+    # SoundCloud should ALWAYS produce MP3.
+    if is_soundcloud:
+        fmt = "bestaudio/best"
+
+        try:
+            _probe_size(url, fmt)
+        except FileTooLargeError:
+            raise
+
+        info, entries, filepaths = _download_with_selector(
+            url,
+            fmt,
+            True,
+            progress_hook,
+        )
+
+        return info, entries, filepaths, "audio"
+
+    # Normal behavior for YouTube / Instagram / other platforms.
+    start = (
+        QUALITY_LADDER.index(quality)
+        if quality in QUALITY_LADDER
+        else 0
+    )
+
+    tiers_to_try = (
+        QUALITY_LADDER[start:]
+        if allow_fallback
+        else [quality]
+    )
 
     last_error = None
+
     for tier in tiers_to_try:
         fmt = _format_for(url, tier)
+
         try:
             _probe_size(url, fmt)
         except FileTooLargeError as e:
             last_error = e
             continue
-        info, entries, filepaths = _download_with_selector(url, fmt, tier == "audio", progress_hook)
+
+        info, entries, filepaths = _download_with_selector(
+            url,
+            fmt,
+            tier == "audio",
+            progress_hook,
+        )
+
         return info, entries, filepaths, tier
 
     raise last_error or FileTooLargeError("unknown size")
@@ -834,41 +983,157 @@ def _bucket_youtube_formats(info: dict) -> list:
     return results
 
 def probe_youtube_qualities(url: str) -> dict:
-    """Fetches metadata for one YouTube video and returns its title,
-    thumbnail, id, and the list of quality options small enough to send
-    (options over MAX_TELEGRAM_BYTES are left out entirely). If the first
-    successful client's format list looks unusually thin (some clients,
-    the TV client especially, sometimes expose fewer formats than the
-    video actually has), tries once more with a client that typically
-    reports the fuller list."""
-    probe_opts = {"quiet": True, "no_warnings": True, "socket_timeout": 30, "noplaylist": True}
-    info, _ = _extract_resilient(probe_opts, url, download=False)
-    options = _bucket_youtube_formats(info)
+    """
+    Fetch YouTube metadata and calculate the size for each quality
+    using the EXACT same yt-dlp selector used by the downloader.
 
-    max_height = max((o["height"] for o in options if o["kind"] == "video"), default=0)
-    if 0 < max_height <= MIN_ACCEPTABLE_MAX_HEIGHT:
-        try:
-            richer_opts = dict(probe_opts)
-            richer_opts.update(_youtube_extra_opts(PROBE_RICH_FALLBACK_CLIENTS))
-            proxy = _get_random_proxy()
-            if proxy:
-                richer_opts["proxy"] = proxy
-            with yt_dlp.YoutubeDL(richer_opts) as ydl:
-                richer_info = ydl.extract_info(url, download=False)
-            richer_options = _bucket_youtube_formats(richer_info)
-            if len(richer_options) > len(options):
-                info, options = richer_info, richer_options
-        except Exception:
-            pass  # keep whatever we already had — better than nothing
+    This keeps the displayed size and the actual downloaded file
+    consistent.
+    """
 
-    options = [o for o in options if o["size_bytes"] <= MAX_TELEGRAM_BYTES]
-    return {
-        "id": info.get("id"),
-        "title": info.get("title", ""),
-        "thumbnail": info.get("thumbnail"),
-        "options": options,
+    probe_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "noplaylist": True,
     }
 
+    info, _ = _extract_resilient(
+        probe_opts,
+        url,
+        download=False,
+    )
+
+    if not info:
+        raise Exception("Media info not found.")
+
+    video_id = info.get("id")
+    title = info.get("title", "")
+    thumbnail = info.get("thumbnail")
+
+    options = []
+
+    # Probe every quality using the SAME selector the download uses.
+    for height in YOUTUBE_RESOLUTION_TIERS:
+
+        selector = (
+            f"bestvideo[ext=mp4]"
+            f"[vcodec^=avc1]"
+            f"[height<={height}]"
+            f"+"
+            f"bestaudio[ext=m4a]"
+            f"[acodec^=mp4a]/"
+            f"best[ext=mp4]"
+            f"[vcodec^=avc1]"
+            f"[height<={height}]"
+        )
+
+        try:
+            size_bytes = _probe_size(
+                url,
+                selector,
+            )
+
+        except FileTooLargeError:
+            # This quality is definitely over Telegram's limit.
+            continue
+
+        except Exception:
+            # This selector was unavailable for this video.
+            continue
+
+        if not size_bytes:
+            continue
+
+        # Make sure the displayed quality corresponds to the
+        # requested height rather than an accidentally lower format.
+        try:
+            height_info, _ = _extract_resilient(
+                {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "socket_timeout": 30,
+                    "noplaylist": True,
+                    "format": selector,
+                },
+                url,
+                download=False,
+                process=True,
+            )
+
+            selected_height = (
+                height_info.get("height")
+                if height_info
+                else None
+            )
+
+            if not selected_height:
+                requested_formats = (
+                    height_info.get("requested_formats") or []
+                    if height_info
+                    else []
+                )
+
+                heights = [
+                    f.get("height")
+                    for f in requested_formats
+                    if f.get("height")
+                ]
+
+                if heights:
+                    selected_height = max(heights)
+
+            if selected_height and selected_height < height:
+                # Don't label a 720p file as 1080p.
+                actual_label = f"{selected_height}p"
+            else:
+                actual_label = f"{height}p"
+
+        except Exception:
+            actual_label = f"{height}p"
+
+        # Avoid duplicate resolutions.
+        if any(
+            o["label"] == actual_label
+            for o in options
+        ):
+            continue
+
+        options.append(
+            {
+                "kind": "video",
+                "label": actual_label,
+                "height": height,
+                "size_bytes": size_bytes,
+            }
+        )
+
+    # Audio uses the same selector as the actual audio download.
+    try:
+        audio_size = _probe_size(
+            url,
+            "bestaudio/best",
+        )
+
+        if audio_size:
+            options.append(
+                {
+                    "kind": "audio",
+                    "label": "Audio",
+                    "height": 0,
+                    "size_bytes": audio_size,
+                }
+            )
+
+    except Exception:
+        pass
+
+    return {
+        "id": video_id,
+        "title": title,
+        "thumbnail": thumbnail,
+        "options": options,
+    }
 
 def download_youtube_quality(
     video_id: str,
@@ -876,25 +1141,38 @@ def download_youtube_quality(
     progress_hook=None,
 ):
     """
-    Download one specific YouTube resolution as MP4,
-    or audio as MP3.
+    Download one specific YouTube resolution.
+
+    Video:
+        H.264/AVC video + AAC audio in MP4.
+        This is intentionally chosen for broad Telegram/iPhone
+        streaming compatibility.
+
+    Audio:
+        MP3 with metadata and embedded thumbnail.
     """
 
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     if height_or_audio == "audio":
+
         selector = "bestaudio/best"
         extract_audio = True
 
     else:
+
         height = int(height_or_audio)
 
         selector = (
-            f"bestvideo[ext=mp4][height<={height}]+"
-            f"bestaudio[ext=m4a]/"
-            f"best[ext=mp4][height<={height}]/"
-            f"best[height<={height}]/"
-            f"best"
+            f"bestvideo[ext=mp4]"
+            f"[vcodec^=avc1]"
+            f"[height<={height}]"
+            f"+"
+            f"bestaudio[ext=m4a]"
+            f"[acodec^=mp4a]/"
+            f"best[ext=mp4]"
+            f"[vcodec^=avc1]"
+            f"[height<={height}]"
         )
 
         extract_audio = False
