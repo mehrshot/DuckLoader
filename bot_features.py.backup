@@ -535,129 +535,40 @@ def register_features(bot):
 
         store.record_download(platform)
 
-    def _run_direct_download(
-        chat_id_int,
-        reply_to_id,
-        url,
-        quality,
-        t,
-        status_msg,
-    ):
-        """
-        Download one media item with a bounded processing slot.
+    def _run_direct_download(chat_id_int, reply_to_id, url, quality, t, status_msg):
+        """Instagram / SoundCloud / YouTube-with-audio-preference: acquires
+        a download slot, downloads at `quality`, sends the result, and
+        handles errors consistently. Shared by the main link handler and
+        the 'get audio' button."""
+        progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
 
-        The slot covers:
-            yt-dlp
-            FFmpeg
-            local post-processing
-
-        The slot is released BEFORE the Telegram upload, because
-        Telegram upload is network I/O rather than CPU-heavy processing.
-        """
-
-        progress_hook = _make_progress_hook(
-            chat_id_int,
-            status_msg,
-            t,
-        )
-
-        if not _acquire_download_slot(
-            bot,
-            chat_id_int,
-            status_msg,
-            t,
-        ):
+        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
             return
 
-        slot_held = True
-
         try:
-
-            platform = (
-                platforms.detect_platform(url)
-                or "unknown"
+            platform = platforms.detect_platform(url) or "unknown"
+            allow_fallback = flags.get('auto_quality_fallback', False)
+            info, entries, files, quality_used = platforms.download_direct(
+                url, quality=quality, allow_fallback=allow_fallback, progress_hook=progress_hook,
             )
+            bot.edit_message_text(t['uploading'], chat_id_int, status_msg.message_id)
 
-            allow_fallback = flags.get(
-                "auto_quality_fallback",
-                False,
-            )
+            _send_download_result(chat_id_int, reply_to_id, url, platform, quality, quality_used, info, entries, files, t)
 
-            info, entries, files, quality_used = (
-                platforms.download_direct(
-                    url,
-                    quality=quality,
-                    allow_fallback=allow_fallback,
-                    progress_hook=progress_hook,
-                )
-            )
-
-            # The CPU/network download work is now finished.
-            # Allow the next job to begin while Telegram receives
-            # this already-prepared file.
-            _download_semaphore.release()
-            slot_held = False
-
-            bot.edit_message_text(
-                t['uploading'],
-                chat_id_int,
-                status_msg.message_id,
-            )
-
-            _send_download_result(
-                chat_id_int,
-                reply_to_id,
-                url,
-                platform,
-                quality,
-                quality_used,
-                info,
-                entries,
-                files,
-                t,
-            )
-
-            bot.delete_message(
-                chat_id_int,
-                status_msg.message_id,
-            )
-
+            bot.delete_message(chat_id_int, status_msg.message_id)
             _maybe_send_ad(chat_id_int)
 
         except platforms.FileTooLargeError as e:
-
             store.record_error()
-
-            try:
-                bot.edit_message_text(
-                    t['too_large'].format(
-                        size=str(e)
-                    ),
-                    chat_id_int,
-                    status_msg.message_id,
-                )
-            except Exception:
-                pass
-
+            bot.edit_message_text(t['too_large'].format(size=str(e)), chat_id_int, status_msg.message_id)
         except Exception as e:
-
             store.record_error()
-
             try:
-                bot.edit_message_text(
-                    t['failed'].format(
-                        error=str(e)
-                    ),
-                    chat_id_int,
-                    status_msg.message_id,
-                )
+                bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
             except Exception:
                 pass
-
         finally:
-
-            if slot_held:
-                _download_semaphore.release()
+            _download_semaphore.release()
 
     def _send_youtube_quality_picker(message, t, lang):
         chat_id_int = message.chat.id
