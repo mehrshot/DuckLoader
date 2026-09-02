@@ -475,6 +475,123 @@ def _download_image_entry(raw_entry: dict) -> str | None:
     urllib.request.urlretrieve(img_url, path)
     return path
 
+def _ensure_h264_mp4(
+    filepath: str,
+    ffmpeg_location: str | None = None,
+) -> str:
+    """
+    Make sure a video file is H.264/AAC-compatible MP4.
+
+    H.264 files are not re-encoded.
+    VP9/AV1/other codecs are converted to H.264.
+    """
+
+    if not filepath or not os.path.exists(filepath):
+        return filepath
+
+    if not filepath.lower().endswith(".mp4"):
+        return filepath
+
+    ffmpeg_exe = None
+
+    if ffmpeg_location:
+        candidate = os.path.join(
+            ffmpeg_location,
+            "ffmpeg.exe" if os.name == "nt" else "ffmpeg",
+        )
+
+        if os.path.isfile(candidate):
+            ffmpeg_exe = candidate
+
+    if not ffmpeg_exe:
+        ffmpeg_exe = shutil.which("ffmpeg")
+
+    if not ffmpeg_exe:
+        logger.warning(
+            "ffmpeg not found; H.264 conversion skipped for %s",
+            filepath,
+        )
+        return filepath
+
+    try:
+        probe = subprocess.run(
+            [
+                ffmpeg_exe,
+                "-i",
+                filepath,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        probe_text = probe.stderr.lower()
+
+    except Exception as e:
+        logger.warning(
+            "Could not inspect video codec for %s: %s",
+            filepath,
+            e,
+        )
+        return filepath
+
+    already_h264 = "video: h264" in probe_text
+
+    if already_h264:
+        return filepath
+
+    temp_path = filepath + ".h264.mp4"
+
+    try:
+        subprocess.run(
+            [
+                ffmpeg_exe,
+                "-y",
+                "-i",
+                filepath,
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-threads",
+                "2",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
+                temp_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        os.replace(temp_path, filepath)
+
+    except Exception as e:
+        logger.warning(
+            "H.264 conversion failed for %s: %s",
+            filepath,
+            e,
+        )
+
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    return filepath
+
 def _download_with_selector(
     url: str,
     format_selector: str,
@@ -522,7 +639,7 @@ def _download_with_selector(
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "192",
+                "preferredquality": "320",
             },
             {
                 "key": "FFmpegMetadata",
@@ -695,10 +812,14 @@ def _download_with_selector(
                 else:
                     path = raw_path
 
-                    if path.lower().endswith(".mp4"):
-                        path = _faststart_mp4(path)
+                # Make sure the video is H.264/AAC MP4 when necessary.
+                path = _ensure_h264_mp4(
+                    path,
+                    ffmpeg_location,
+                )
 
-                # Make the MP4 streamable without changing quality.
+                # Move the MP4 metadata (moov atom) to the beginning
+                # so Telegram/iPhone can stream the video immediately.
                 path = _faststart_mp4(path)
 
             if (
@@ -984,11 +1105,13 @@ def _bucket_youtube_formats(info: dict) -> list:
 
 def probe_youtube_qualities(url: str) -> dict:
     """
-    Fetch YouTube metadata and calculate the size for each quality
-    using the EXACT same yt-dlp selector used by the downloader.
+    Probe YouTube ONCE and build the available quality list.
 
-    This keeps the displayed size and the actual downloaded file
-    consistent.
+    The format list is inspected locally instead of making a separate
+    yt-dlp network extraction for every resolution.
+
+    This is much faster and allows high resolutions even when YouTube
+    only provides VP9/AV1 at those resolutions.
     """
 
     probe_opts = {
@@ -1002,6 +1125,7 @@ def probe_youtube_qualities(url: str) -> dict:
         probe_opts,
         url,
         download=False,
+        process=False,
     )
 
     if not info:
@@ -1011,122 +1135,146 @@ def probe_youtube_qualities(url: str) -> dict:
     title = info.get("title", "")
     thumbnail = info.get("thumbnail")
 
-    options = []
+    formats = info.get("formats") or []
 
-    # Probe every quality using the SAME selector the download uses.
-    for height in YOUTUBE_RESOLUTION_TIERS:
+    video_formats = [
+        f for f in formats
+        if f.get("vcodec") not in (None, "none")
+        and f.get("height")
+    ]
 
-        selector = (
-            f"bestvideo[ext=mp4]"
-            f"[vcodec^=avc1]"
-            f"[height<={height}]"
-            f"+"
-            f"bestaudio[ext=m4a]"
-            f"[acodec^=mp4a]/"
-            f"best[ext=mp4]"
-            f"[vcodec^=avc1]"
-            f"[height<={height}]"
+    audio_formats = [
+        f for f in formats
+        if f.get("vcodec") in (None, "none")
+        and f.get("acodec") not in (None, "none")
+    ]
+
+    best_audio = None
+
+    if audio_formats:
+        best_audio = max(
+            audio_formats,
+            key=lambda f: (
+                f.get("abr") or 0,
+                f.get("asr") or 0,
+                f.get("filesize") or f.get("filesize_approx") or 0,
+            ),
         )
 
-        try:
-            size_bytes = _probe_size(
-                url,
-                selector,
+    duration = info.get("duration") or 0
+
+    def estimate_size(fmt):
+        if not fmt:
+            return 0
+
+        size = (
+            fmt.get("filesize")
+            or fmt.get("filesize_approx")
+        )
+
+        if size:
+            return int(size)
+
+        if duration:
+            bitrate = (
+                fmt.get("vbr")
+                or fmt.get("abr")
+                or fmt.get("tbr")
             )
 
-        except FileTooLargeError:
-            # This quality is definitely over Telegram's limit.
-            continue
-
-        except Exception:
-            # This selector was unavailable for this video.
-            continue
-
-        if not size_bytes:
-            continue
-
-        # Make sure the displayed quality corresponds to the
-        # requested height rather than an accidentally lower format.
-        try:
-            height_info, _ = _extract_resilient(
-                {
-                    "quiet": True,
-                    "no_warnings": True,
-                    "socket_timeout": 30,
-                    "noplaylist": True,
-                    "format": selector,
-                },
-                url,
-                download=False,
-                process=True,
-            )
-
-            selected_height = (
-                height_info.get("height")
-                if height_info
-                else None
-            )
-
-            if not selected_height:
-                requested_formats = (
-                    height_info.get("requested_formats") or []
-                    if height_info
-                    else []
+            if bitrate:
+                return int(
+                    float(bitrate) * 1000 / 8 * duration
                 )
 
-                heights = [
-                    f.get("height")
-                    for f in requested_formats
-                    if f.get("height")
-                ]
+        return 0
 
-                if heights:
-                    selected_height = max(heights)
+    audio_size = estimate_size(best_audio)
 
-            if selected_height and selected_height < height:
-                # Don't label a 720p file as 1080p.
-                actual_label = f"{selected_height}p"
-            else:
-                actual_label = f"{height}p"
+    options = []
+    seen_heights = set()
 
-        except Exception:
-            actual_label = f"{height}p"
+    for target_height in YOUTUBE_RESOLUTION_TIERS:
 
-        # Avoid duplicate resolutions.
-        if any(
-            o["label"] == actual_label
-            for o in options
-        ):
+        candidates = [
+            f for f in video_formats
+            if (f.get("height") or 0) <= target_height
+        ]
+
+        if not candidates:
             continue
+
+        # Prefer H.264 when available at this resolution.
+        h264_candidates = [
+            f for f in candidates
+            if (f.get("vcodec") or "").startswith("avc1")
+        ]
+
+        if h264_candidates:
+            candidates = h264_candidates
+
+        best = max(
+            candidates,
+            key=lambda f: (
+                f.get("height") or 0,
+                f.get("fps") or 0,
+                f.get("quality") or 0,
+                f.get("vbr") or 0,
+                f.get("tbr") or 0,
+            ),
+        )
+
+        actual_height = best.get("height")
+
+        if not actual_height:
+            continue
+
+        if actual_height in seen_heights:
+            continue
+
+        video_size = estimate_size(best)
+
+        if not video_size:
+            continue
+
+        # Video-only + audio.
+        has_audio = (
+            best.get("acodec")
+            not in (None, "none")
+        )
+
+        if has_audio:
+            total_size = video_size
+        else:
+            total_size = video_size + audio_size
+
+        if total_size <= 0:
+            continue
+
+        if total_size > MAX_TELEGRAM_BYTES:
+            continue
+
+        seen_heights.add(actual_height)
 
         options.append(
             {
                 "kind": "video",
-                "label": actual_label,
-                "height": height,
-                "size_bytes": size_bytes,
+                "label": f"{actual_height}p",
+                "height": actual_height,
+                "size_bytes": total_size,
             }
         )
 
-    # Audio uses the same selector as the actual audio download.
-    try:
-        audio_size = _probe_size(
-            url,
-            "bestaudio/best",
+    # Audio option
+    if audio_size > 0 and audio_size <= MAX_TELEGRAM_BYTES:
+        options.append(
+            {
+                "kind": "audio",
+                "label": "Audio",
+                "height": 0,
+                "size_bytes": audio_size,
+            }
         )
-
-        if audio_size:
-            options.append(
-                {
-                    "kind": "audio",
-                    "label": "Audio",
-                    "height": 0,
-                    "size_bytes": audio_size,
-                }
-            )
-
-    except Exception:
-        pass
 
     return {
         "id": video_id,
@@ -1144,9 +1292,9 @@ def download_youtube_quality(
     Download one specific YouTube resolution.
 
     Video:
-        H.264/AVC video + AAC audio in MP4.
-        This is intentionally chosen for broad Telegram/iPhone
-        streaming compatibility.
+        Prefer H.264/AVC + AAC for Telegram/iPhone compatibility.
+        If H.264 is unavailable at the requested resolution, allow
+        another video codec and transcode it to H.264 later.
 
     Audio:
         MP3 with metadata and embedded thumbnail.
@@ -1164,15 +1312,10 @@ def download_youtube_quality(
         height = int(height_or_audio)
 
         selector = (
-            f"bestvideo[ext=mp4]"
-            f"[vcodec^=avc1]"
-            f"[height<={height}]"
-            f"+"
-            f"bestaudio[ext=m4a]"
-            f"[acodec^=mp4a]/"
-            f"best[ext=mp4]"
-            f"[vcodec^=avc1]"
-            f"[height<={height}]"
+            f"bestvideo[height<={height}]"
+            f"+bestaudio/"
+            f"best[height<={height}]"
+            f"/best"
         )
 
         extract_audio = False

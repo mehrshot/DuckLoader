@@ -18,7 +18,7 @@ user_settings = store.load_user_settings()
 # --- rate limiting + concurrency cap ---
 RATE_LIMIT_COUNT = 5          # max downloads...
 RATE_LIMIT_WINDOW = 60        # ...per this many seconds, per user
-MAX_CONCURRENT_DOWNLOADS = 3  # how many downloads run at once, bot-wide
+MAX_CONCURRENT_DOWNLOADS = 1  # how many downloads run at once, bot-wide
 
 _recent_downloads = defaultdict(list)  # user_id -> [timestamps]
 _download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
