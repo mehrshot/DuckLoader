@@ -23,6 +23,8 @@ import os
 import random
 import re
 import uuid
+import shutil
+import subprocess
 
 import yt_dlp
 
@@ -83,8 +85,7 @@ YOUTUBE_RESOLUTION_TIERS = [2160, 1440, 1080, 720, 480, 360]
 # list than others for reasons that have nothing to do with what the video
 # actually offers.
 MIN_ACCEPTABLE_MAX_HEIGHT = 480
-PROBE_RICH_FALLBACK_CLIENTS = ["android", "web"]
-
+PROBE_RICH_FALLBACK_CLIENTS = ["default", "web_embedded"]
 
 class FileTooLargeError(Exception):
     pass
@@ -249,8 +250,8 @@ def _get_random_proxy():
 # (comma-separated — that becomes a single attempt using all of them
 # together, not tried separately).
 PLAYER_CLIENT_ATTEMPTS = [
-    ["tv", "web_safari"],
-    ["android_vr"],
+    ["default", "web_embedded"],
+    ["web_safari"],
     ["ios"],
     ["mweb"],
 ]
@@ -376,97 +377,275 @@ def _download_image_entry(raw_entry: dict) -> str | None:
     urllib.request.urlretrieve(img_url, path)
     return path
 
+def _download_with_selector(
+    url: str,
+    format_selector: str,
+    extract_audio: bool,
+    progress_hook=None,
+    use_proxy: bool = False,
+):
+    """
+    Download media with yt-dlp.
 
-def _download_with_selector(url: str, format_selector: str, extract_audio: bool, progress_hook=None, use_proxy: bool = False):
-    """Downloads `url` (or a search query like 'ytsearch1:...') at the given
-    format selector. Handles multi-entry posts (Instagram carousels can mix
-    photos and videos in one post) and retries the WHOLE operation — raw
-    fetch, per-entry download, and postprocessing — with a different
-    YouTube client identity if any part of it fails. use_proxy defaults to
-    False here on purpose: see _get_random_proxy's docstring for why the
-    actual file transfer avoids the rotating proxy even though probing uses
-    it."""
+    Video:
+        - Prefer MP4 output
+        - Merge video/audio
+        - Move MP4 metadata (moov atom) to the front with faststart
+
+    Audio:
+        - Convert to MP3
+        - Embed yt-dlp metadata
+        - Embed downloaded thumbnail
+    """
+
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     ydl_opts = {
         "format": format_selector,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
-        "quiet": True, "no_warnings": True, "color": "never",
-        "noplaylist": False, "socket_timeout": 30,
-        'cookiefile': 'cookies.txt'
+
+        # Always make video output MP4 after merging.
+        "merge_output_format": "mp4",
+
+        "quiet": True,
+        "no_warnings": True,
+        "color": "never",
+        "noplaylist": False,
+        "socket_timeout": 30,
+        "cookiefile": "cookies.txt",
     }
+
     if extract_audio:
-        ydl_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192",
-        }]
+        ydl_opts["writethumbnail"] = True
+
+        ydl_opts["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            },
+            {
+                "key": "FFmpegMetadata",
+            },
+            {
+                "key": "EmbedThumbnail",
+            },
+        ]
+
     ffmpeg_location = _ffmpeg_location()
+
     if ffmpeg_location:
         ydl_opts["ffmpeg_location"] = ffmpeg_location
+
     if progress_hook:
         ydl_opts["progress_hooks"] = [progress_hook]
 
+    def _faststart_mp4(filepath: str) -> str:
+        """
+        Rewrite an MP4 without re-encoding.
+
+        -c copy = NO quality loss
+        -movflags +faststart = puts the MP4 index at the beginning
+        """
+
+        if not filepath.lower().endswith(".mp4"):
+            return filepath
+
+        if not os.path.exists(filepath):
+            return filepath
+
+        ffmpeg_exe = None
+
+        if ffmpeg_location:
+            candidate = os.path.join(
+                ffmpeg_location,
+                "ffmpeg.exe" if os.name == "nt" else "ffmpeg",
+            )
+
+            if os.path.isfile(candidate):
+                ffmpeg_exe = candidate
+
+        if not ffmpeg_exe:
+            ffmpeg_exe = shutil.which("ffmpeg")
+
+        if not ffmpeg_exe:
+            logger.warning(
+                "ffmpeg not found; MP4 faststart was skipped for %s",
+                filepath,
+            )
+            return filepath
+
+        temp_path = filepath + ".faststart.mp4"
+
+        try:
+            subprocess.run(
+                [
+                    ffmpeg_exe,
+                    "-y",
+                    "-i",
+                    filepath,
+                    "-map",
+                    "0",
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    temp_path,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+
+            os.replace(temp_path, filepath)
+
+        except Exception as e:
+            logger.warning(
+                "MP4 faststart failed for %s: %s",
+                filepath,
+                e,
+            )
+
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        return filepath
+
     def _attempt(ydl):
-        info_raw = ydl.extract_info(url, download=False, process=False)
+        info_raw = ydl.extract_info(
+            url,
+            download=False,
+            process=False,
+        )
+
         if not info_raw:
             raise Exception("Media info not found.")
+
         entries_raw = info_raw.get("entries") or [info_raw]
 
-        filepaths, valid_entries = [], []
+        filepaths = []
+        valid_entries = []
+
         for raw_entry in entries_raw:
             if not raw_entry:
                 continue
+
             for key in ("extractor", "extractor_key", "webpage_url"):
                 if key not in raw_entry and key in info_raw:
                     raw_entry[key] = info_raw[key]
 
             if _is_probably_photo_entry(info_raw, raw_entry):
                 path = _download_image_entry(raw_entry)
+
                 if path:
                     filepaths.append(path)
                     valid_entries.append(raw_entry)
+
                 continue
 
             entry_id = raw_entry.get("id")
-            processed = ydl.process_ie_result(raw_entry, download=True)
+
+            processed = ydl.process_ie_result(
+                raw_entry,
+                download=True,
+            )
+
             if not processed:
                 continue
 
             raw_path = ydl.prepare_filename(processed)
+
             if extract_audio:
                 mp3_path = os.path.splitext(raw_path)[0] + ".mp3"
-                path = mp3_path if os.path.exists(mp3_path) else raw_path
-            else:
-                path = raw_path
 
-            if not os.path.exists(path) or os.path.getsize(path) < MIN_VALID_FILE_BYTES:
+                path = (
+                    mp3_path
+                    if os.path.exists(mp3_path)
+                    else raw_path
+                )
+
+            else:
+                # After yt-dlp merges video + audio, the final file
+                # should be MP4. Find it explicitly.
+                mp4_candidates = []
+
+                if entry_id and os.path.isdir(DOWNLOAD_DIR):
+                    prefix = f"{entry_id}."
+
+                    for name in os.listdir(DOWNLOAD_DIR):
+                        if (
+                            name.startswith(prefix)
+                            and name.lower().endswith(".mp4")
+                        ):
+                            mp4_candidates.append(
+                                os.path.join(
+                                    DOWNLOAD_DIR,
+                                    name,
+                                )
+                            )
+
+                if mp4_candidates:
+                    path = max(
+                        mp4_candidates,
+                        key=os.path.getmtime,
+                    )
+                else:
+                    path = raw_path
+
+                # Make the MP4 streamable without changing quality.
+                path = _faststart_mp4(path)
+
+            if (
+                not os.path.exists(path)
+                or os.path.getsize(path) < MIN_VALID_FILE_BYTES
+            ):
                 _cleanup_id(entry_id)
-                raise Exception(f"incomplete download: {path}")
+                raise Exception(
+                    f"incomplete download: {path}"
+                )
 
             filepaths.append(path)
             valid_entries.append(processed)
 
         if not filepaths:
-            raise Exception("Nothing could be downloaded from this link.")
+            raise Exception(
+                "Nothing could be downloaded from this link."
+            )
+
         return info_raw, valid_entries, filepaths
 
     last_error = None
+
     for clients in _client_attempts():
+
         opts = dict(ydl_opts)
         opts.update(_youtube_extra_opts(clients))
+
         if use_proxy:
             proxy = _get_random_proxy()
+
             if proxy:
                 opts["proxy"] = proxy
+
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return _attempt(ydl)
+
         except Exception as e:
-            if any(hint in str(e).lower() for hint in _RETRYABLE_ERROR_HINTS):
+
+            if any(
+                hint in str(e).lower()
+                for hint in _RETRYABLE_ERROR_HINTS
+            ):
                 last_error = e
                 continue
-            raise
-    raise last_error
 
+            raise
+
+    raise last_error
 
 def _format_for(url: str, tier: str) -> str:
     table = YOUTUBE_QUALITY_FORMATS if _is_youtube_url(url) else QUALITY_FORMATS
@@ -501,44 +680,158 @@ def download_direct(url: str, quality: str = "best", allow_fallback: bool = Fals
 # --- per-video YouTube quality picker (thumbnail + buttons) ---
 
 def _bucket_youtube_formats(info: dict) -> list:
-    """From one extract_info() result, builds a list of {label, height,
-    size_bytes} for the best available format at each standard resolution
-    the video actually has, plus an audio-only entry — skipping tiers that
-    don't exist or whose size can't be estimated at all. This is only an
-    estimate for the button labels; the real download still uses yt-dlp's
-    own format selection."""
-    formats = info.get("formats") or []
-    video_formats = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("height")]
-    audio_formats = [f for f in formats if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none")]
+    """
+    Build the YouTube quality buttons with a realistic size estimate.
 
-    audio_sizes = [f.get("filesize") or f.get("filesize_approx") or 0 for f in audio_formats]
-    best_audio_size = max(audio_sizes, default=0)
+    Priority:
+    1. Exact filesize
+    2. Approximate filesize
+    3. Video bitrate (vbr) × duration
+    4. Audio bitrate (abr) × duration
+
+    The calculation is based on the same MP4/M4A types that the actual
+    downloader prefers.
+    """
+
+    formats = info.get("formats") or []
+    duration = info.get("duration") or 0
+
+    video_formats = [
+        f for f in formats
+        if f.get("vcodec") not in (None, "none")
+        and f.get("height")
+    ]
+
+    audio_formats = [
+        f for f in formats
+        if f.get("vcodec") in (None, "none")
+        and f.get("acodec") not in (None, "none")
+    ]
+
+    def estimate_size(fmt: dict) -> int:
+        if not fmt:
+            return 0
+
+        exact = fmt.get("filesize")
+        if exact:
+            return int(exact)
+
+        approximate = fmt.get("filesize_approx")
+        if approximate:
+            return int(approximate)
+
+        if duration:
+            # Video-only streams: use VIDEO bitrate.
+            vbr = fmt.get("vbr")
+            if vbr:
+                return int(float(vbr) * 1000 / 8 * duration)
+
+            # Audio-only streams: use AUDIO bitrate.
+            abr = fmt.get("abr")
+            if abr:
+                return int(float(abr) * 1000 / 8 * duration)
+
+            # Final fallback.
+            tbr = fmt.get("tbr")
+            if tbr:
+                return int(float(tbr) * 1000 / 8 * duration)
+
+        return 0
+
+    # Prefer the M4A audio stream because that is what the downloader uses.
+    preferred_audio = [
+        f for f in audio_formats
+        if f.get("ext") == "m4a"
+    ]
+
+    if preferred_audio:
+        audio_formats = preferred_audio
+
+    best_audio = None
+
+    if audio_formats:
+        best_audio = max(
+            audio_formats,
+            key=lambda f: (
+                f.get("abr") or 0,
+                f.get("asr") or 0,
+                f.get("filesize") or f.get("filesize_approx") or 0,
+            ),
+        )
+
+    best_audio_size = estimate_size(best_audio)
 
     results = []
     seen_heights = set()
+
     for tier in YOUTUBE_RESOLUTION_TIERS:
-        candidates = [f for f in video_formats if f["height"] <= tier]
+
+        candidates = [
+            f for f in video_formats
+            if f.get("height", 0) <= tier
+        ]
+
         if not candidates:
             continue
-        best = max(candidates, key=lambda f: f["height"])
-        height = best["height"]
-        if height in seen_heights:
+
+        # Prefer MP4 video streams because the final output is MP4.
+        mp4_candidates = [
+            f for f in candidates
+            if f.get("ext") == "mp4"
+        ]
+
+        if mp4_candidates:
+            candidates = mp4_candidates
+
+        best = max(
+            candidates,
+            key=lambda f: (
+                f.get("height") or 0,
+                f.get("fps") or 0,
+                f.get("vbr") or 0,
+                f.get("tbr") or 0,
+            ),
+        )
+
+        height = best.get("height")
+
+        if not height or height in seen_heights:
             continue
+
         seen_heights.add(height)
 
-        video_size = best.get("filesize") or best.get("filesize_approx") or 0
-        has_audio = best.get("acodec") not in (None, "none")
-        total_size = video_size if has_audio else (video_size + best_audio_size)
-        """if not total_size:
-            continue  # can't estimate — leave it out rather than show a misleading button
-"""
-        results.append({"kind": "video", "label": f"{height}p", "height": height, "size_bytes": total_size})
+        video_size = estimate_size(best)
 
-    if audio_formats:
-        results.append({"kind": "audio", "label": "Audio", "height": 0, "size_bytes": best_audio_size})
+        # If the selected video stream already contains audio,
+        # don't add audio again.
+        has_audio = best.get("acodec") not in (None, "none")
+
+        if has_audio:
+            total_size = video_size
+        else:
+            total_size = video_size + best_audio_size
+
+        # Unknown size: don't show "0 MB".
+        if total_size <= 0:
+            continue
+
+        results.append({
+            "kind": "video",
+            "label": f"{height}p",
+            "height": height,
+            "size_bytes": total_size,
+        })
+
+    if best_audio:
+        if best_audio_size > 0:
+            results.append({
+                "kind": "audio",
+                "label": "Audio",
+                "height": 0,
+                "size_bytes": best_audio_size,
+            })
 
     return results
-
 
 def probe_youtube_qualities(url: str) -> dict:
     """Fetches metadata for one YouTube video and returns its title,
@@ -577,22 +870,41 @@ def probe_youtube_qualities(url: str) -> dict:
     }
 
 
-def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=None):
-    """Downloads one specific resolution (or "audio") for a YouTube video,
-    identified by video_id — used by the quality-picker buttons. Returns
-    (info, entries, filepaths)."""
+def download_youtube_quality(
+    video_id: str,
+    height_or_audio: str,
+    progress_hook=None,
+):
+    """
+    Download one specific YouTube resolution as MP4,
+    or audio as MP3.
+    """
+
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     if height_or_audio == "audio":
         selector = "bestaudio/best"
         extract_audio = True
+
     else:
         height = int(height_or_audio)
-        selector = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best/all"
+
+        selector = (
+            f"bestvideo[ext=mp4][height<={height}]+"
+            f"bestaudio[ext=m4a]/"
+            f"best[ext=mp4][height<={height}]/"
+            f"best[height<={height}]/"
+            f"best"
+        )
+
         extract_audio = False
 
-    return _download_with_selector(url, selector, extract_audio, progress_hook)
-
+    return _download_with_selector(
+        url,
+        selector,
+        extract_audio,
+        progress_hook,
+    )
 
 def get_spotify_client():
     import spotipy
@@ -605,15 +917,35 @@ def get_spotify_client():
     return spotipy.Spotify(client_credentials_manager=auth)
 
 
-def _track_info(t: dict, album: dict | None = None) -> dict:
+def _track_info(
+    t: dict,
+    album: dict | None = None,
+) -> dict:
     album_data = album or t.get("album") or {}
+
     images = album_data.get("images") or []
+
+    album_artists = ", ".join(
+        a["name"]
+        for a in album_data.get("artists", [])
+        if a.get("name")
+    )
+
     return {
         "name": t["name"],
-        "artists": ", ".join(a["name"] for a in t.get("artists", [])),
+        "artists": ", ".join(
+            a["name"]
+            for a in t.get("artists", [])
+            if a.get("name")
+        ),
         "album": album_data.get("name", ""),
+        "album_artist": album_artists,
         "cover_url": images[0]["url"] if images else None,
         "duration_ms": t.get("duration_ms", 0),
+        "track_number": t.get("track_number"),
+        "disc_number": t.get("disc_number"),
+        "total_tracks": album_data.get("total_tracks"),
+        "release_date": album_data.get("release_date", ""),
     }
 
 
@@ -674,19 +1006,58 @@ def download_spotify_track(track: dict, progress_hook=None) -> str:
     if not filepath:
         raise last_error or Exception("No matching audio found on SoundCloud or YouTube.")
 
-    tag_audio_file(filepath, title=track["name"], artist=track["artists"],
-                    album=track["album"], cover_url=track["cover_url"])
+    tag_audio_file(
+        filepath,
+        title=track["name"],
+        artist=track["artists"],
+        album=track["album"],
+        cover_url=track["cover_url"],
+        album_artist=track.get("album_artist", ""),
+        release_date=track.get("release_date", ""),
+        track_number=track.get("track_number"),
+        total_tracks=track.get("total_tracks"),
+        disc_number=track.get("disc_number"),
+    )
     return filepath
 
 
-def tag_audio_file(filepath: str, title: str = "", artist: str = "", album: str = "", cover_url: str | None = None) -> None:
-    """Writes ID3 tags (and cover art, if a URL is given) directly into an
-    mp3 file. Best-effort: tagging failures are swallowed rather than
-    breaking a download that otherwise succeeded."""
+def tag_audio_file(
+    filepath: str,
+    title: str = "",
+    artist: str = "",
+    album: str = "",
+    cover_url: str | None = None,
+    album_artist: str = "",
+    release_date: str = "",
+    track_number: int | None = None,
+    total_tracks: int | None = None,
+    disc_number: int | None = None,
+    total_discs: int | None = None,
+) -> None:
+    """
+    Write professional ID3 metadata and embedded cover art
+    into an MP3 file.
+    """
+
     if not filepath.lower().endswith(".mp3"):
         return
+
     try:
-        from mutagen.id3 import ID3, ID3NoHeaderError, TIT2, TPE1, TALB, APIC
+        import mimetypes
+        import urllib.request
+
+        from mutagen.id3 import (
+            ID3,
+            ID3NoHeaderError,
+            TIT2,
+            TPE1,
+            TALB,
+            TPE2,
+            TDRC,
+            TRCK,
+            TPOS,
+            APIC,
+        )
 
         try:
             tags = ID3(filepath)
@@ -694,18 +1065,120 @@ def tag_audio_file(filepath: str, title: str = "", artist: str = "", album: str 
             tags = ID3()
 
         if title:
-            tags["TIT2"] = TIT2(encoding=3, text=title)
+            tags["TIT2"] = TIT2(
+                encoding=3,
+                text=[title],
+            )
+
         if artist:
-            tags["TPE1"] = TPE1(encoding=3, text=artist)
+            tags["TPE1"] = TPE1(
+                encoding=3,
+                text=[artist],
+            )
+
         if album:
-            tags["TALB"] = TALB(encoding=3, text=album)
+            tags["TALB"] = TALB(
+                encoding=3,
+                text=[album],
+            )
+
+        if album_artist:
+            tags["TPE2"] = TPE2(
+                encoding=3,
+                text=[album_artist],
+            )
+
+        if release_date:
+            tags["TDRC"] = TDRC(
+                encoding=3,
+                text=[str(release_date)],
+            )
+
+        if track_number:
+            track_text = str(track_number)
+
+            if total_tracks:
+                track_text = f"{track_number}/{total_tracks}"
+
+            tags["TRCK"] = TRCK(
+                encoding=3,
+                text=[track_text],
+            )
+
+        if disc_number:
+            disc_text = str(disc_number)
+
+            if total_discs:
+                disc_text = f"{disc_number}/{total_discs}"
+
+            tags["TPOS"] = TPOS(
+                encoding=3,
+                text=[disc_text],
+            )
 
         if cover_url:
-            import urllib.request
-            with urllib.request.urlopen(cover_url, timeout=10) as resp:
-                cover_bytes = resp.read()
-            tags["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover_bytes)
+            try:
+                request = urllib.request.Request(
+                    cover_url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 "
+                            "(Windows NT 10.0; Win64; x64)"
+                        )
+                    },
+                )
 
-        tags.save(filepath)
-    except Exception:
-        pass
+                with urllib.request.urlopen(
+                    request,
+                    timeout=15,
+                ) as response:
+                    cover_bytes = response.read()
+                    content_type = (
+                        response.headers.get("Content-Type")
+                        or ""
+                    ).split(";")[0].lower()
+
+                if content_type not in {
+                    "image/jpeg",
+                    "image/png",
+                }:
+                    guessed_type, _ = mimetypes.guess_type(
+                        cover_url
+                    )
+
+                    if guessed_type in {
+                        "image/jpeg",
+                        "image/png",
+                    }:
+                        content_type = guessed_type
+                    else:
+                        content_type = "image/jpeg"
+
+                tags.delall("APIC")
+
+                tags["APIC"] = APIC(
+                    encoding=3,
+                    mime=content_type,
+                    type=3,
+                    desc="Cover",
+                    data=cover_bytes,
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "Could not embed cover art into %s: %s",
+                    filepath,
+                    e,
+                )
+
+        tags.save(
+            filepath,
+            v2_version=3,
+        )
+
+    except Exception as e:
+        logger.exception(
+            "MP3 tagging failed for %s: %s",
+            filepath,
+            e,
+        )

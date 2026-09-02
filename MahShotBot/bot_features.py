@@ -12,6 +12,7 @@ import platforms
 import store
 
 thumb_cache = {}
+audio_source_cache = {}  # post_id -> original url, for the "get audio" button under video posts
 user_settings = store.load_user_settings()
 
 # --- rate limiting + concurrency cap ---
@@ -88,6 +89,8 @@ TEXTS = {
         'spotify_searching': "🔎 در حال جست‌وجو ({i}/{total}): {name}",
         'view_link': "🔗 مشاهده در پلتفرم اصلی",
         'dl_cover': "🖼 دانلود کاور",
+        'get_audio_btn': "🎵 دریافت صدا",
+        'audio_expired': "⚠️ این دکمه دیگه معتبر نیست (بات ری‌استارت شده). لینک رو دوباره بفرست.",
         'cover_loading': "⏳ در حال دریافت کاور...",
         'cover_error': "⚠️ کاور این پست یافت نشد.",
         'settings_msg': "⚙️ **تنظیمات ربات**\n\nزبان و کیفیت دانلود دلخواهت رو انتخاب کن:",
@@ -166,6 +169,8 @@ TEXTS = {
         'spotify_searching': "🔎 Searching ({i}/{total}): {name}",
         'view_link': "🔗 View Original",
         'dl_cover': "🖼 Download Cover",
+        'get_audio_btn': "🎵 Get Audio",
+        'audio_expired': "⚠️ This button is no longer valid (the bot restarted). Please resend the link.",
         'cover_loading': "⏳ Fetching cover...",
         'cover_error': "⚠️ Cover not found.",
         'settings_msg': "⚙️ **Bot Settings**\n\nChoose your language and preferred download quality:",
@@ -309,7 +314,160 @@ def register_features(bot):
             except Exception:
                 pass
 
-    def _send_youtube_quality_picker(message, t):
+    def _make_progress_hook(chat_id_int, status_msg, t):
+        """Shared by every download path (direct, spotify, YouTube quality
+        picker) so there's one place that decides how often to update the
+        status message and what it looks like."""
+        state = {"last_edit": 0}
+
+        def progress_hook(d):
+            if d.get('status') == 'downloading':
+                now = time.time()
+                if now - state["last_edit"] > 2.0:
+                    percent = (d.get('_percent_str') or 'N/A').strip()
+                    eta = (d.get('_eta_str') or 'N/A').strip()
+                    size = d.get('_total_bytes_str') or d.get('_estimated_total_bytes_str', 'N/A')
+                    if isinstance(size, str):
+                        size = size.strip()
+                    log_text = t['downloading'].format(bar=_render_bar(percent), percent=percent, size=size, eta=eta)
+                    try:
+                        bot.edit_message_text(log_text, chat_id_int, status_msg.message_id, parse_mode="Markdown")
+                    except Exception:
+                        pass
+                    state["last_edit"] = now
+
+        return progress_hook
+
+    def _send_download_result(chat_id_int, reply_to_id, url, platform, quality_requested, quality_used, info, entries, files, t):
+        """Builds the caption/buttons and sends the downloaded file(s) —
+        one file directly, or a chunked media group for multi-item posts
+        (Instagram carousels). Adds the "get audio" button when the result
+        includes a video and the user didn't already request audio-only.
+        Shared by the direct-download flow and the 'get audio' button."""
+        if quality_used != quality_requested:
+            bot.send_message(chat_id_int, t['quality_reduced'].format(quality=t[f'quality_{quality_used}']))
+
+        metadata_source = entries[0] if entries else info
+        caption = _build_caption(metadata_source)
+
+        thumb_url = metadata_source.get('thumbnail')
+        post_id = metadata_source.get('id', str(time.time()))
+        if thumb_url:
+            thumb_cache[post_id] = thumb_url
+
+        valid_files = [f for f in files if os.path.exists(f)]
+        any_video = any(platforms.media_kind(f) == 'video' for f in valid_files)
+        offer_audio_button = any_video and quality_requested != 'audio'
+        if offer_audio_button:
+            audio_source_cache[post_id] = url
+
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(text=t['view_link'], url=url))
+        if thumb_url:
+            markup.add(InlineKeyboardButton(text=t['dl_cover'], callback_data=f"thumb_{post_id}"))
+        if offer_audio_button:
+            markup.add(InlineKeyboardButton(text=t['get_audio_btn'], callback_data=f"audio_{post_id}"))
+
+        if len(valid_files) == 1:
+            filepath = valid_files[0]
+            kind = platforms.media_kind(filepath)
+
+            if kind == "audio":
+                platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
+
+            bot.send_chat_action(chat_id_int, 'upload_video' if kind == 'video' else 'upload_audio' if kind == 'audio' else 'upload_photo')
+
+            try:
+                with open(filepath, "rb") as media_file:
+                    if kind == "video":
+                        bot.send_video(
+                            chat_id_int,
+                            media_file,
+                            caption=caption,
+                            reply_markup=markup,
+                            reply_to_message_id=reply_to_id,
+                            supports_streaming=True,
+                            timeout=600,
+                        )
+                    elif kind == "audio":
+                        bot.send_audio(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
+                    else:
+                        bot.send_photo(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id)
+            finally:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
+        elif len(valid_files) > 1:
+            chunks = [valid_files[idx:idx + 10] for idx in range(0, len(valid_files), 10)]
+
+            for chunk_idx, chunk in enumerate(chunks):
+                media_group = []
+                open_files = []
+
+                try:
+                    for item_idx, filepath in enumerate(chunk):
+                        kind = platforms.media_kind(filepath)
+                        f = open(filepath, "rb")
+                        open_files.append(f)
+
+                        item_caption = caption if chunk_idx == 0 and item_idx == 0 else ""
+
+                        if kind == "video":
+                            media_group.append(InputMediaVideo(f, caption=item_caption))
+                        elif kind == "audio":
+                            platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
+                            media_group.append(InputMediaAudio(f, caption=item_caption))
+                        else:
+                            media_group.append(InputMediaPhoto(f, caption=item_caption))
+
+                    bot.send_chat_action(chat_id_int, 'upload_document')
+                    bot.send_media_group(chat_id_int, media_group, reply_to_message_id=reply_to_id if chunk_idx == 0 else None, timeout=600)
+                finally:
+                    for f in open_files:
+                        f.close()
+
+            for filepath in valid_files:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
+        store.record_download(platform)
+
+    def _run_direct_download(chat_id_int, reply_to_id, url, quality, t, status_msg):
+        """Instagram / SoundCloud / YouTube-with-audio-preference: acquires
+        a download slot, downloads at `quality`, sends the result, and
+        handles errors consistently. Shared by the main link handler and
+        the 'get audio' button."""
+        progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
+
+        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+            return
+
+        try:
+            platform = platforms.detect_platform(url) or "unknown"
+            allow_fallback = flags.get('auto_quality_fallback', False)
+            info, entries, files, quality_used = platforms.download_direct(
+                url, quality=quality, allow_fallback=allow_fallback, progress_hook=progress_hook,
+            )
+            bot.edit_message_text(t['uploading'], chat_id_int, status_msg.message_id)
+
+            _send_download_result(chat_id_int, reply_to_id, url, platform, quality, quality_used, info, entries, files, t)
+
+            bot.delete_message(chat_id_int, status_msg.message_id)
+            _maybe_send_ad(chat_id_int)
+
+        except platforms.FileTooLargeError as e:
+            store.record_error()
+            bot.edit_message_text(t['too_large'].format(size=str(e)), chat_id_int, status_msg.message_id)
+        except Exception as e:
+            store.record_error()
+            try:
+                bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+            except Exception:
+                pass
+        finally:
+            _download_semaphore.release()
+
+    def _send_youtube_quality_picker(message, t, lang):
         chat_id_int = message.chat.id
         status_msg = bot.reply_to(message, t['init'])
 
@@ -328,13 +486,21 @@ def register_features(bot):
         markup = InlineKeyboardMarkup(row_width=2)
         buttons = []
         for opt in probe['options']:
-            size_label = platforms.format_size(opt['size_bytes'])
+            if opt['size_bytes'] == 0:
+                size_label = "Unknown Size" if lang == 'en' else "حجم نامشخص"
+            else:
+                size_label = f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
+                if lang == 'fa':
+                    size_label = size_label.replace("MB", "مگابایت").translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
             if opt['kind'] == 'audio':
-                text = f"🎵 صوت — {size_label}"
+                text = f"🎵 Audio — {size_label}" if lang == 'en' else f"🎵 صوت — {size_label}"
                 cb = f"ytq_{probe['id']}_audio"
             else:
-                height_fa = str(opt['height']).translate(digits)
-                text = f"🎬 {height_fa}p — {size_label}"
+                height_str = str(opt['height'])
+                if lang == 'fa':
+                    height_str = height_str.translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+                text = f"🎬 {height_str}p — {size_label}"
                 cb = f"ytq_{probe['id']}_{opt['height']}"
             buttons.append(InlineKeyboardButton(text=text, callback_data=cb))
         markup.add(*buttons)
@@ -415,8 +581,12 @@ def register_features(bot):
             bot.reply_to(message, t['not_launched'].format(platform=platforms.PLATFORM_NAMES[platform]))
             return
 
-        if platform == "youtube":
-            _send_youtube_quality_picker(message, t)
+        # YouTube gets the thumbnail+buttons quality picker EXCEPT when the
+        # user has already told us (via /settings) that they always want
+        # audio only — in that case there's nothing to pick, so it goes
+        # through the same direct-download path as every other platform.
+        if platform == "youtube" and user['quality'] != 'audio':
+            _send_youtube_quality_picker(message, t, user['lang'])
             return
 
         if _is_rate_limited(user_id):
@@ -426,31 +596,13 @@ def register_features(bot):
         status_msg = bot.reply_to(message, t['init'])
         bot.send_chat_action(chat_id_int, 'typing')
 
-        last_edit_time = 0
+        if platform == "spotify":
+            progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
 
-        def progress_hook(d):
-            nonlocal last_edit_time
-            if d.get('status') == 'downloading':
-                now = time.time()
-                if now - last_edit_time > 2.0:
-                    percent = (d.get('_percent_str') or 'N/A').strip()
-                    eta = (d.get('_eta_str') or 'N/A').strip()
-                    size = d.get('_total_bytes_str') or d.get('_estimated_total_bytes_str', 'N/A')
-                    if isinstance(size, str):
-                        size = size.strip()
+            if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+                return
 
-                    log_text = t['downloading'].format(bar=_render_bar(percent), percent=percent, size=size, eta=eta)
-                    try:
-                        bot.edit_message_text(log_text, chat_id_int, status_msg.message_id, parse_mode="Markdown")
-                    except Exception:
-                        pass
-                    last_edit_time = now
-
-        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
-            return
-
-        try:
-            if platform == "spotify":
+            try:
                 tracks = platforms.resolve_spotify_tracks(url)
                 for i, track in enumerate(tracks):
                     if len(tracks) > 1:
@@ -466,7 +618,7 @@ def register_features(bot):
                             bot.send_audio(
                                 chat_id_int, audio_file,
                                 title=track['name'], performer=track['artists'],
-                                caption=caption, reply_to_message_id=message.message_id, timeout=120,
+                                caption=caption, reply_to_message_id=message.message_id, timeout=600,
                             )
                     finally:
                         if os.path.exists(filepath):
@@ -474,101 +626,17 @@ def register_features(bot):
                     store.record_download("spotify")
                 bot.delete_message(chat_id_int, status_msg.message_id)
                 _maybe_send_ad(chat_id_int)
-                return
-
-            allow_fallback = flags.get('auto_quality_fallback', False)
-            info, entries, files, quality_used = platforms.download_direct(
-                url, quality=user['quality'], allow_fallback=allow_fallback, progress_hook=progress_hook,
-            )
-            bot.edit_message_text(t['uploading'], chat_id_int, status_msg.message_id)
-
-            if quality_used != user['quality']:
-                bot.send_message(chat_id_int, t['quality_reduced'].format(quality=t[f'quality_{quality_used}']))
-
-            metadata_source = entries[0] if entries else info
-            caption = _build_caption(metadata_source)
-
-            thumb_url = metadata_source.get('thumbnail')
-            post_id = metadata_source.get('id', str(time.time()))
-            if thumb_url:
-                thumb_cache[post_id] = thumb_url
-
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton(text=t['view_link'], url=url))
-            if thumb_url:
-                markup.add(InlineKeyboardButton(text=t['dl_cover'], callback_data=f"thumb_{post_id}"))
-
-            valid_files = [f for f in files if os.path.exists(f)]
-
-            if len(valid_files) == 1:
-                filepath = valid_files[0]
-                kind = platforms.media_kind(filepath)
-                
-                if kind == "audio":
-                    platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
-                
-                bot.send_chat_action(chat_id_int, 'upload_video' if kind == 'video' else 'upload_audio' if kind == 'audio' else 'upload_photo')
-                
+            except Exception as e:
+                store.record_error()
                 try:
-                    with open(filepath, "rb") as media_file:
-                        if kind == "video":
-                            bot.send_video(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=message.message_id, timeout=600)
-                        elif kind == "audio":
-                            bot.send_audio(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=message.message_id, timeout=600)
-                        else:
-                            bot.send_photo(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=message.message_id)
-                finally:
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
-                        
-            elif len(valid_files) > 1:
-                chunks = [valid_files[idx:idx + 10] for idx in range(0, len(valid_files), 10)]
-                
-                for chunk_idx, chunk in enumerate(chunks):
-                    media_group = []
-                    open_files = []
-                    
-                    try:
-                        for item_idx, filepath in enumerate(chunk):
-                            kind = platforms.media_kind(filepath)
-                            f = open(filepath, "rb")
-                            open_files.append(f)
-                            
-                            item_caption = caption if chunk_idx == 0 and item_idx == 0 else ""
-                            
-                            if kind == "video":
-                                media_group.append(InputMediaVideo(f, caption=item_caption))
-                            elif kind == "audio":
-                                platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
-                                media_group.append(InputMediaAudio(f, caption=item_caption))
-                            else:
-                                media_group.append(InputMediaPhoto(f, caption=item_caption))
-                        
-                        bot.send_chat_action(chat_id_int, 'upload_document')
-                        bot.send_media_group(chat_id_int, media_group, reply_to_message_id=message.message_id if chunk_idx == 0 else None, timeout=600)
-                    finally:
-                        for f in open_files:
-                            f.close()
-                            
-                for filepath in valid_files:
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
+                    bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+                except Exception:
+                    pass
+            finally:
+                _download_semaphore.release()
+            return
 
-            store.record_download(platform)
-            bot.delete_message(chat_id_int, status_msg.message_id)
-            _maybe_send_ad(chat_id_int)
-
-        except platforms.FileTooLargeError as e:
-            store.record_error()
-            bot.edit_message_text(t['too_large'].format(size=str(e)), chat_id_int, status_msg.message_id)
-        except Exception as e:
-            store.record_error()
-            try:
-                bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
-            except Exception:
-                pass
-        finally:
-            _download_semaphore.release()
+        _run_direct_download(chat_id_int, message.message_id, url, user['quality'], t, status_msg)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('thumb_'))
     def handle_thumbnail_callback(call):
@@ -583,6 +651,31 @@ def register_features(bot):
             bot.send_photo(int(chat_id), thumb_url, reply_to_message_id=call.message.message_id)
         else:
             bot.answer_callback_query(call.id, t['cover_error'], show_alert=True)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('audio_'))
+    def handle_get_audio_callback(call):
+        chat_id_str = str(call.message.chat.id)
+        chat_id_int = call.message.chat.id
+        user_id = call.from_user.id
+        t = _texts_for(chat_id_str)
+
+        if store.is_banned(user_id):
+            bot.answer_callback_query(call.id)
+            return
+
+        post_id = call.data.split('audio_', 1)[1]
+        url = audio_source_cache.get(post_id)
+        if not url:
+            bot.answer_callback_query(call.id, t['audio_expired'], show_alert=True)
+            return
+
+        if _is_rate_limited(user_id):
+            bot.answer_callback_query(call.id, t['rate_limited'].format(limit=RATE_LIMIT_COUNT), show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id)
+        status_msg = bot.send_message(chat_id_int, t['init'])
+        _run_direct_download(chat_id_int, None, url, 'audio', t, status_msg)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('ytq_'))
     def handle_youtube_quality_pick(call):
@@ -604,25 +697,7 @@ def register_features(bot):
 
         bot.delete_message(chat_id_int, call.message.message_id)
         status_msg = bot.send_message(chat_id_int, t['init'])
-
-        last_edit_time = 0
-
-        def progress_hook(d):
-            nonlocal last_edit_time
-            if d.get('status') == 'downloading':
-                now = time.time()
-                if now - last_edit_time > 2.0:
-                    percent = (d.get('_percent_str') or 'N/A').strip()
-                    eta = (d.get('_eta_str') or 'N/A').strip()
-                    size = d.get('_total_bytes_str') or d.get('_estimated_total_bytes_str', 'N/A')
-                    if isinstance(size, str):
-                        size = size.strip()
-                    log_text = t['downloading'].format(bar=_render_bar(percent), percent=percent, size=size, eta=eta)
-                    try:
-                        bot.edit_message_text(log_text, chat_id_int, status_msg.message_id, parse_mode="Markdown")
-                    except Exception:
-                        pass
-                    last_edit_time = now
+        progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
 
         if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
             return
@@ -631,51 +706,9 @@ def register_features(bot):
             info, entries, files = platforms.download_youtube_quality(video_id, choice, progress_hook)
             bot.edit_message_text(t['uploading'], chat_id_int, status_msg.message_id)
 
-            metadata_source = entries[0] if entries else info
-            caption = _build_caption(metadata_source)
             source_url = f"https://www.youtube.com/watch?v={video_id}"
+            _send_download_result(chat_id_int, None, source_url, "youtube", choice, choice, info, entries, files, t)
 
-            thumb_url = metadata_source.get('thumbnail')
-            post_id = metadata_source.get('id', str(time.time()))
-            if thumb_url:
-                thumb_cache[post_id] = thumb_url
-
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton(text=t['view_link'], url=source_url))
-            if thumb_url:
-                markup.add(InlineKeyboardButton(text=t['dl_cover'], callback_data=f"thumb_{post_id}"))
-
-            for j, filepath in enumerate(files):
-                if not os.path.exists(filepath):
-                    continue
-
-                kind = platforms.media_kind(filepath)
-                caption_to_send = caption if j == 0 else ""
-                current_markup = markup if j == 0 else None
-
-                if kind == "audio":
-                    platforms.tag_audio_file(
-                        filepath,
-                        title=metadata_source.get('title', ''),
-                        artist=metadata_source.get('uploader') or metadata_source.get('channel', ''),
-                        cover_url=thumb_url,
-                    )
-
-                bot.send_chat_action(chat_id_int, 'upload_video' if kind == 'video' else 'upload_audio' if kind == 'audio' else 'upload_photo')
-
-                try:
-                    with open(filepath, "rb") as media_file:
-                        if kind == "video":
-                            bot.send_video(chat_id_int, media_file, caption=caption_to_send, reply_markup=current_markup, timeout=600)
-                        elif kind == "audio":
-                            bot.send_audio(chat_id_int, media_file, caption=caption_to_send, reply_markup=current_markup, timeout=600)
-                        else:
-                            bot.send_photo(chat_id_int, media_file, caption=caption_to_send, reply_markup=current_markup)
-                finally:
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
-
-            store.record_download("youtube")
             bot.delete_message(chat_id_int, status_msg.message_id)
             _maybe_send_ad(chat_id_int)
 

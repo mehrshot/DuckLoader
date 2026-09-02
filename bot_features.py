@@ -380,7 +380,15 @@ def register_features(bot):
             try:
                 with open(filepath, "rb") as media_file:
                     if kind == "video":
-                        bot.send_video(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
+                        bot.send_video(
+                            chat_id_int,
+                            media_file,
+                            caption=caption,
+                            reply_markup=markup,
+                            reply_to_message_id=reply_to_id,
+                            supports_streaming=True,
+                            timeout=600,
+                        )
                     elif kind == "audio":
                         bot.send_audio(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
                     else:
