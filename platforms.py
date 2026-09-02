@@ -18,12 +18,15 @@ happens to return first. This never touches Spotify's protected streams.
 """
 
 import json
+import logging
 import os
 import random
 import re
 import uuid
 
 import yt_dlp
+
+logger = logging.getLogger(__name__)
 
 DOWNLOAD_DIR = "downloads"
 
@@ -151,12 +154,71 @@ def format_size(num_bytes: int) -> str:
     return text.translate(digits)
 
 
+def check_dependencies() -> None:
+    """Logs the state of external dependencies once at startup, so problems
+    show up immediately in `journalctl` instead of only surfacing as a
+    confusing error the first time someone tries to download something."""
+    import shutil
+
+    _ffmpeg_location()  # logs its own found/not-found line
+
+    if shutil.which("deno") or shutil.which("node") or shutil.which("bun") or shutil.which("qjs"):
+        logger.info("YouTube JS challenge solver: an external JS runtime is available.")
+    else:
+        logger.warning(
+            "YouTube JS challenge solver: no external JS runtime found (deno/node/bun/qjs). "
+            "Since yt-dlp 2025.11, this is required for full YouTube support — without it, "
+            "some formats are unavailable and downloads can fail with errors like "
+            "'HTTP Error 403: Forbidden' even though metadata extraction succeeds. "
+            "Install Deno (recommended): curl -fsSL https://deno.land/install.sh | sh "
+            "then also run: pip install -U yt-dlp yt-dlp-ejs"
+        )
+
+
 def _ffmpeg_location():
-    """Optional explicit path to ffmpeg/ffprobe (set FFMPEG_LOCATION in .env).
-    yt-dlp normally finds ffmpeg on PATH by itself; this is only needed when
-    that lookup fails (e.g. PATH was updated but the terminal running the
-    bot wasn't restarted)."""
-    return os.environ.get("FFMPEG_LOCATION") or None
+    """Path to the ffmpeg/ffprobe folder, resolved once and reused.
+
+    Preference order: an explicit FFMPEG_LOCATION in .env, then Python's own
+    shutil.which() (not yt-dlp's internal PATH search) — this exists
+    because "ffmpeg is installed but yt-dlp still can't find it" usually
+    means the *process* yt-dlp is running in doesn't see it on PATH, even
+    though an interactive SSH session does. This is common under systemd:
+    a service's PATH is whatever systemd itself sets, not your shell's
+    .bashrc/.profile PATH. Resolving it ourselves with shutil.which() (run
+    in this exact process) and handing yt-dlp the answer directly sidesteps
+    that mismatch entirely, and logs a clear, unambiguous line either way
+    instead of leaving you to guess from yt-dlp's generic error."""
+    global _FFMPEG_LOCATION_CACHE
+    if _FFMPEG_LOCATION_CACHE is not None:
+        return _FFMPEG_LOCATION_CACHE or None
+
+    explicit = os.environ.get("FFMPEG_LOCATION")
+    if explicit:
+        logger.info("ffmpeg: using explicit FFMPEG_LOCATION=%s", explicit)
+        _FFMPEG_LOCATION_CACHE = explicit
+        return explicit
+
+    import shutil
+    found = shutil.which("ffmpeg")
+    if found:
+        folder = os.path.dirname(found)
+        logger.info("ffmpeg: auto-detected at %s (this process's PATH)", found)
+        _FFMPEG_LOCATION_CACHE = folder
+        return folder
+
+    logger.warning(
+        "ffmpeg: shutil.which('ffmpeg') found nothing in this process's PATH (%s). "
+        "This is the exact environment yt-dlp runs in — if `which ffmpeg` over SSH "
+        "finds it but this log line doesn't, the process (systemd service) has a "
+        "different PATH than your shell. Fix: set FFMPEG_LOCATION in .env to the "
+        "folder containing the ffmpeg binary (e.g. /usr/bin).",
+        os.environ.get("PATH", "<unset>"),
+    )
+    _FFMPEG_LOCATION_CACHE = ""
+    return None
+
+
+_FFMPEG_LOCATION_CACHE = None
 
 
 def _get_random_proxy():
