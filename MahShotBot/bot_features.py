@@ -124,6 +124,32 @@ TEXTS = {
         'sponsor_gate_retry': "بعد از عضویت، همون لینک رو دوباره بفرست.",
         'yt_choose_quality': "🎬 {title}\n\nکیفیت مورد نظر رو انتخاب کن:",
         'yt_no_quality': "⚠️ متأسفانه هیچ کیفیتی از این ویدیو زیر سقف مجاز نیست.",
+        'adm_title': "🛠 **پنل مدیریت**",
+        'adm_platforms': "🔒 پلتفرم‌ها",
+        'adm_toggles': "⚙️ تنظیمات کلی",
+        'adm_ads': "📢 تبلیغات",
+        'adm_users': "👥 کاربران",
+        'adm_stats': "📊 آمار",
+        'adm_mysettings': "🌐 تنظیمات شخصی من",
+        'back': "⬅️ بازگشت",
+        'adm_platforms_title': "کدوم پلتفرم رو می‌خوای قفل/باز کنی؟",
+        'adm_toggles_title': "کدوم تنظیم رو می‌خوای روشن/خاموش کنی؟",
+        'adm_ads_title': "بخش تبلیغات:",
+        'adm_users_title': "مدیریت کاربران:",
+        'adm_setad_btn': "✏️ تنظیم متن تبلیغ",
+        'adm_addsponsor_btn': "➕ افزودن کانال حامی",
+        'adm_removesponsor_btn': "➖ حذف کانال حامی",
+        'adm_sponsorlist_btn': "📋 لیست کانال‌های حامی",
+        'adm_ban_btn': "🚫 مسدودکردن کاربر",
+        'adm_unban_btn': "✅ رفع مسدودی کاربر",
+        'adm_broadcast_btn': "📣 پیام همگانی",
+        'adm_ask_setad': "متن تبلیغ جدید رو بفرست:",
+        'adm_ask_addsponsor': "به این شکل بفرست: @یوزرنیم نام نمایشی",
+        'adm_ask_removesponsor': "یوزرنیم کانالی که می‌خوای حذف کنی رو بفرست (با @):",
+        'adm_ask_ban': "آی‌دی عددی کاربری که می‌خوای مسدود کنی رو بفرست:",
+        'adm_ask_unban': "آی‌دی عددی کاربری که می‌خوای رفع مسدودیت کنی رو بفرست:",
+        'adm_ask_broadcast': "متنی که می‌خوای برای همه‌ی کاربرها ارسال بشه رو بفرست:",
+        'adm_cancelled': "لغو شد.",
     },
     'en': {
         'welcome': "🎯 **Welcome to DropShot DL!**\n\nSend me a public link from Instagram, SoundCloud, Spotify, or YouTube (coming soon) and I will fetch it in high quality.\n\nSet your preferred quality in /settings.",
@@ -176,6 +202,32 @@ TEXTS = {
         'sponsor_gate_retry': "After joining, just resend your link.",
         'yt_choose_quality': "🎬 {title}\n\nChoose a quality:",
         'yt_no_quality': "⚠️ Unfortunately no quality of this video is under the allowed size limit.",
+        'adm_title': "🛠 **Admin Panel**",
+        'adm_platforms': "🔒 Platforms",
+        'adm_toggles': "⚙️ General Settings",
+        'adm_ads': "📢 Ads",
+        'adm_users': "👥 Users",
+        'adm_stats': "📊 Stats",
+        'adm_mysettings': "🌐 My Own Settings",
+        'back': "⬅️ Back",
+        'adm_platforms_title': "Which platform do you want to lock/unlock?",
+        'adm_toggles_title': "Which setting do you want to turn on/off?",
+        'adm_ads_title': "Ads section:",
+        'adm_users_title': "User management:",
+        'adm_setad_btn': "✏️ Set ad text",
+        'adm_addsponsor_btn': "➕ Add sponsor channel",
+        'adm_removesponsor_btn': "➖ Remove sponsor channel",
+        'adm_sponsorlist_btn': "📋 List sponsor channels",
+        'adm_ban_btn': "🚫 Ban a user",
+        'adm_unban_btn': "✅ Unban a user",
+        'adm_broadcast_btn': "📣 Broadcast message",
+        'adm_ask_setad': "Send the new ad text:",
+        'adm_ask_addsponsor': "Send it like this: @username Display Name",
+        'adm_ask_removesponsor': "Send the channel's username to remove (with @):",
+        'adm_ask_ban': "Send the numeric user ID to ban:",
+        'adm_ask_unban': "Send the numeric user ID to unban:",
+        'adm_ask_broadcast': "Send the message to broadcast to all users:",
+        'adm_cancelled': "Cancelled.",
     }
 }
 
@@ -239,7 +291,13 @@ def _settings_markup(user: dict, t: dict) -> InlineKeyboardMarkup:
 
 def register_features(bot):
     flags = store.load_flags()
-    admin.register_admin(bot, flags, _texts_for)
+
+    def _my_settings_view(chat_id):
+        user = store.get_user(user_settings, chat_id)
+        t = TEXTS[user['lang']]
+        return t['settings_msg'], _settings_markup(user, t)
+
+    admin.register_admin(bot, flags, _texts_for, _my_settings_view)
 
     def _maybe_send_ad(chat_id_int):
         if not flags.get('sponsor_message', False):
@@ -300,6 +358,11 @@ def register_features(bot):
 
     @bot.message_handler(commands=["settings"])
     def open_settings(message):
+        if admin.is_owner(message.from_user.id):
+            text, markup = admin.build_panel(_texts_for(message.chat.id))
+            bot.reply_to(message, text, reply_markup=markup, parse_mode="Markdown")
+            return
+
         user = store.get_user(user_settings, message.chat.id)
         t = TEXTS[user['lang']]
         bot.reply_to(message, t['settings_msg'], reply_markup=_settings_markup(user, t), parse_mode="Markdown")
