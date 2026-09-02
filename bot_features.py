@@ -459,7 +459,7 @@ def register_features(bot):
         finally:
             _download_semaphore.release()
 
-    def _send_youtube_quality_picker(message, t):
+    def _send_youtube_quality_picker(message, t, lang):
         chat_id_int = message.chat.id
         status_msg = bot.reply_to(message, t['init'])
 
@@ -478,13 +478,21 @@ def register_features(bot):
         markup = InlineKeyboardMarkup(row_width=2)
         buttons = []
         for opt in probe['options']:
-            size_label = platforms.format_size(opt['size_bytes'])
+            if opt['size_bytes'] == 0:
+                size_label = "Unknown Size" if lang == 'en' else "حجم نامشخص"
+            else:
+                size_label = f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
+                if lang == 'fa':
+                    size_label = size_label.replace("MB", "مگابایت").translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
             if opt['kind'] == 'audio':
-                text = f"🎵 صوت — {size_label}"
+                text = f"🎵 Audio — {size_label}" if lang == 'en' else f"🎵 صوت — {size_label}"
                 cb = f"ytq_{probe['id']}_audio"
             else:
-                height_fa = str(opt['height']).translate(digits)
-                text = f"🎬 {height_fa}p — {size_label}"
+                height_str = str(opt['height'])
+                if lang == 'fa':
+                    height_str = height_str.translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+                text = f"🎬 {height_str}p — {size_label}"
                 cb = f"ytq_{probe['id']}_{opt['height']}"
             buttons.append(InlineKeyboardButton(text=text, callback_data=cb))
         markup.add(*buttons)
@@ -570,7 +578,7 @@ def register_features(bot):
         # audio only — in that case there's nothing to pick, so it goes
         # through the same direct-download path as every other platform.
         if platform == "youtube" and user['quality'] != 'audio':
-            _send_youtube_quality_picker(message, t)
+            _send_youtube_quality_picker(message, t, user['lang'])
             return
 
         if _is_rate_limited(user_id):
