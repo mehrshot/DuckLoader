@@ -270,7 +270,10 @@ def _client_attempts():
 
 
 def _youtube_extra_opts(clients) -> dict:
-    opts = {"extractor_args": {"youtube": {"player_client": clients}}}
+    opts = {
+        "extractor_args": {"youtube": {"player_client": clients}},
+        "cookiefile": "cookies.txt"
+    }
     browser = os.environ.get("YTDLP_COOKIES_BROWSER")
     if browser:
         opts["cookiesfrombrowser"] = (browser,)
@@ -390,6 +393,7 @@ def _download_with_selector(url: str, format_selector: str, extract_audio: bool,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
         "quiet": True, "no_warnings": True, "color": "never",
         "noplaylist": False, "socket_timeout": 30,
+        'cookiefile': 'cookies.txt'
     }
     if extract_audio:
         ydl_opts["postprocessors"] = [{
@@ -525,13 +529,13 @@ def _bucket_youtube_formats(info: dict) -> list:
         video_size = best.get("filesize") or best.get("filesize_approx") or 0
         has_audio = best.get("acodec") not in (None, "none")
         total_size = video_size if has_audio else (video_size + best_audio_size)
-        if not total_size:
+        """if not total_size:
             continue  # can't estimate — leave it out rather than show a misleading button
-
+"""
         results.append({"kind": "video", "label": f"{height}p", "height": height, "size_bytes": total_size})
 
-    if best_audio_size:
-        results.append({"kind": "audio", "label": "صوت", "height": 0, "size_bytes": best_audio_size})
+    if audio_formats:
+        results.append({"kind": "audio", "label": "Audio", "height": 0, "size_bytes": best_audio_size})
 
     return results
 
