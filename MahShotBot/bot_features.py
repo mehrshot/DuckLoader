@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import threading
@@ -10,6 +11,8 @@ import admin
 import ads
 import platforms
 import store
+
+logger = logging.getLogger(__name__)
 
 thumb_cache = {}
 audio_source_cache = {}  # post_id -> original url, for the "get audio" button under video posts
@@ -80,6 +83,12 @@ TEXTS = {
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
         'uploading': "✅ دانلود تکمیل شد! در حال آپلود...",
         'failed': "❌ خطا: {error}",
+        'download_failed': "❌ دانلود این لینک در حال حاضر انجام نشد. لطفاً مطمئن شو لینک قابل دسترسیه و دوباره امتحان کن.",
+        'instagram_failed': "❌ دریافت محتوای اینستاگرام انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
+        'instagram_unavailable': "❌ این استوری اینستاگرام در حال حاضر برای ربات قابل دسترسی نیست. ممکنه نیاز به ورود به اینستاگرام داشته باشه یا استوری دیگه در دسترس نباشه.",
+        'youtube_failed': "❌ دریافت این ویدیوی یوتیوب در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
+        'soundcloud_failed': "❌ دریافت این ترک ساندکلاد در حال حاضر انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
+        'spotify_failed': "❌ دریافت این ترک اسپاتیفای در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
         'not_launched': "🚧 دانلود از {platform} هنوز لانچ نشده. به‌زودی فعال می‌شود!",
         'too_large': "⚠️ حجم این فایل حدود {size} است و از سقف مجاز بیشتره، پس امکان ارسالش نیست.\n\nمی‌تونی از /settings کیفیت پایین‌تر یا «فقط صدا» رو انتخاب کنی.",
         'quality_reduced': "ℹ️ به‌خاطر محدودیت حجم تلگرام، کیفیت به‌صورت خودکار به «{quality}» کاهش یافت.",
@@ -133,6 +142,9 @@ TEXTS = {
         'adm_ads': "📢 تبلیغات",
         'adm_users': "👥 کاربران",
         'adm_stats': "📊 آمار",
+        'adm_errors': "🚨 خطاهای دانلود",
+        'adm_errors_title': "🚨 آخرین خطاهای دانلود:",
+        'adm_errors_empty': "✅ هیچ خطای ثبت‌شده‌ای وجود نداره.",
         'adm_mysettings': "🌐 تنظیمات شخصی من",
         'back': "⬅️ بازگشت",
         'adm_platforms_title': "کدوم پلتفرم رو می‌خوای قفل/باز کنی؟",
@@ -160,6 +172,12 @@ TEXTS = {
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
         'uploading': "✅ Download complete! Preparing upload...",
         'failed': "❌ Failed: {error}",
+        'download_failed': "❌ We couldn't download this link right now. Please check the link and try again.",
+        'instagram_failed': "❌ We couldn't download this Instagram content right now. Please check the link and try again.",
+        'instagram_unavailable': "❌ This Instagram story isn't currently accessible to the bot. It may require an Instagram login or may no longer be available.",
+        'youtube_failed': "❌ We couldn't download this YouTube video right now. Please try again in a moment.",
+        'soundcloud_failed': "❌ We couldn't download this SoundCloud track right now. Please check the link and try again.",
+        'spotify_failed': "❌ We couldn't download this Spotify track right now. Please try again in a moment.",
         'not_launched': "🚧 Downloading from {platform} hasn't launched yet. Stay tuned!",
         'too_large': "⚠️ This file is about {size}, over the allowed limit, so it can't be sent.\n\nYou can pick a lower quality or \"audio only\" in /settings.",
         'quality_reduced': "ℹ️ Quality was automatically reduced to \"{quality}\" to stay under Telegram's size limit.",
@@ -213,6 +231,9 @@ TEXTS = {
         'adm_ads': "📢 Ads",
         'adm_users': "👥 Users",
         'adm_stats': "📊 Stats",
+        'adm_errors': "🚨 Download Errors",
+        'adm_errors_title': "🚨 Recent Download Errors:",
+        'adm_errors_empty': "✅ No recorded download errors.",
         'adm_mysettings': "🌐 My Own Settings",
         'back': "⬅️ Back",
         'adm_platforms_title': "Which platform do you want to lock/unlock?",
@@ -274,6 +295,58 @@ def _build_caption(entry: dict) -> str:
         lines.append(f"\n📝 {description}")
     lines.append("\n🤖 @DropShotDLBot")
     return "\n".join(lines)
+
+def _friendly_download_error(
+    platform: str,
+    error: Exception,
+    t: dict,
+) -> str:
+    """
+    Convert internal downloader errors into a short,
+    human-readable message.
+
+    Never expose yt-dlp's raw exception text to the user.
+    """
+
+    error_text = str(error).lower()
+
+    if platform == "instagram":
+
+        if (
+            "login" in error_text
+            or "cookies" in error_text
+            or "authentication" in error_text
+            or "unreachable" in error_text
+        ):
+            return t[
+                "instagram_unavailable"
+            ]
+
+        return t[
+            "instagram_failed"
+        ]
+
+    if platform == "youtube":
+
+        return t[
+            "youtube_failed"
+        ]
+
+    if platform == "soundcloud":
+
+        return t[
+            "soundcloud_failed"
+        ]
+
+    if platform == "spotify":
+
+        return t[
+            "spotify_failed"
+        ]
+
+    return t[
+        "download_failed"
+    ]
 
 
 def _settings_markup(user: dict, t: dict) -> InlineKeyboardMarkup:
@@ -535,87 +608,304 @@ def register_features(bot):
 
         store.record_download(platform)
 
-    def _run_direct_download(chat_id_int, reply_to_id, url, quality, t, status_msg):
-        """Instagram / SoundCloud / YouTube-with-audio-preference: acquires
-        a download slot, downloads at `quality`, sends the result, and
-        handles errors consistently. Shared by the main link handler and
-        the 'get audio' button."""
-        progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
+    def _run_direct_download(
+        chat_id_int,
+        reply_to_id,
+        url,
+        quality,
+        t,
+        status_msg,
+    ):
+        """
+        Shared direct-download worker.
 
-        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+        Technical errors are stored for the administrator and
+        are never shown directly to the user.
+        """
+
+        progress_hook = _make_progress_hook(
+            chat_id_int,
+            status_msg,
+            t,
+        )
+
+        if not _acquire_download_slot(
+            bot,
+            chat_id_int,
+            status_msg,
+            t,
+        ):
             return
 
+        platform = (
+            platforms.detect_platform(url)
+            or "unknown"
+        )
+
         try:
-            platform = platforms.detect_platform(url) or "unknown"
-            allow_fallback = flags.get('auto_quality_fallback', False)
-            info, entries, files, quality_used = platforms.download_direct(
-                url, quality=quality, allow_fallback=allow_fallback, progress_hook=progress_hook,
+
+            allow_fallback = flags.get(
+                "auto_quality_fallback",
+                False,
             )
-            bot.edit_message_text(t['uploading'], chat_id_int, status_msg.message_id)
 
-            _send_download_result(chat_id_int, reply_to_id, url, platform, quality, quality_used, info, entries, files, t)
+            (
+                info,
+                entries,
+                files,
+                quality_used,
+            ) = platforms.download_direct(
+                url,
+                quality=quality,
+                allow_fallback=allow_fallback,
+                progress_hook=progress_hook,
+            )
 
-            bot.delete_message(chat_id_int, status_msg.message_id)
-            _maybe_send_ad(chat_id_int)
+            bot.edit_message_text(
+                t["uploading"],
+                chat_id_int,
+                status_msg.message_id,
+            )
+
+            _send_download_result(
+                chat_id_int,
+                reply_to_id,
+                url,
+                platform,
+                quality,
+                quality_used,
+                info,
+                entries,
+                files,
+                t,
+            )
+
+            bot.delete_message(
+                chat_id_int,
+                status_msg.message_id,
+            )
+
+            _maybe_send_ad(
+                chat_id_int
+            )
 
         except platforms.FileTooLargeError as e:
-            store.record_error()
-            bot.edit_message_text(t['too_large'].format(size=str(e)), chat_id_int, status_msg.message_id)
-        except Exception as e:
-            store.record_error()
+
+            store.record_error(
+                platform=platform,
+                url=url,
+                user_id=chat_id_int,
+                error=str(e),
+            )
+
             try:
-                bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+                bot.edit_message_text(
+                    t["too_large"].format(
+                        size=str(e)
+                    ),
+                    chat_id_int,
+                    status_msg.message_id,
+                )
             except Exception:
                 pass
+
+        except Exception as e:
+
+            store.record_error(
+                platform=platform,
+                url=url,
+                user_id=chat_id_int,
+                error=str(e),
+            )
+
+            logger.exception(
+                "Download failed | platform=%s | url=%s",
+                platform,
+                url,
+            )
+
+            try:
+                bot.edit_message_text(
+                    _friendly_download_error(
+                        platform,
+                        e,
+                        t,
+                    ),
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
+
         finally:
+
             _download_semaphore.release()
 
-    def _send_youtube_quality_picker(message, t, lang):
+    def _send_youtube_quality_picker(
+        message,
+        t,
+        lang,
+    ):
         chat_id_int = message.chat.id
-        status_msg = bot.reply_to(message, t['init'])
+        url = message.text.strip()
+
+        status_msg = bot.reply_to(
+            message,
+            t["init"],
+        )
 
         try:
-            probe = platforms.probe_youtube_qualities(message.text.strip())
+            probe = platforms.probe_youtube_qualities(
+                url
+            )
+
         except Exception as e:
-            store.record_error()
-            bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+            store.record_error(
+                platform="youtube",
+                url=url,
+                user_id=message.from_user.id,
+                error=str(e),
+            )
+
+            logger.exception(
+                "YouTube quality probe failed | url=%s",
+                url,
+            )
+
+            bot.edit_message_text(
+                t["youtube_failed"],
+                chat_id_int,
+                status_msg.message_id,
+            )
+
             return
 
-        if not probe['options']:
-            bot.edit_message_text(t['yt_no_quality'], chat_id_int, status_msg.message_id)
+        if not probe.get("options"):
+            bot.edit_message_text(
+                t["yt_no_quality"],
+                chat_id_int,
+                status_msg.message_id,
+            )
             return
 
-        digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-        markup = InlineKeyboardMarkup(row_width=2)
+        digits = str.maketrans(
+            "0123456789",
+            "۰۱۲۳۴۵۶۷۸۹",
+        )
+
+        markup = InlineKeyboardMarkup(
+            row_width=2
+        )
+
         buttons = []
-        for opt in probe['options']:
-            if opt['size_bytes'] == 0:
-                size_label = "Unknown Size" if lang == 'en' else "حجم نامشخص"
-            else:
-                size_label = f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
-                if lang == 'fa':
-                    size_label = size_label.replace("MB", "مگابایت").translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
 
-            if opt['kind'] == 'audio':
-                text = f"🎵 Audio — {size_label}" if lang == 'en' else f"🎵 صوت — {size_label}"
-                cb = f"ytq_{probe['id']}_audio"
+        for opt in probe["options"]:
+
+            if opt.get("size_bytes", 0) <= 0:
+                size_label = (
+                    "Unknown Size"
+                    if lang == "en"
+                    else "حجم نامشخص"
+                )
+
             else:
-                height_str = str(opt['height'])
-                if lang == 'fa':
-                    height_str = height_str.translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
-                text = f"🎬 {height_str}p — {size_label}"
-                cb = f"ytq_{probe['id']}_{opt['height']}"
-            buttons.append(InlineKeyboardButton(text=text, callback_data=cb))
+                size_label = (
+                    f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
+                )
+
+                if lang == "fa":
+                    size_label = (
+                        size_label
+                        .replace(
+                            "MB",
+                            "مگابایت",
+                        )
+                        .translate(digits)
+                    )
+
+            if opt["kind"] == "audio":
+
+                text = (
+                    f"🎵 Audio — {size_label}"
+                    if lang == "en"
+                    else f"🎵 صوت — {size_label}"
+                )
+
+                callback_data = (
+                    f"ytq_{probe['id']}_audio"
+                )
+
+            else:
+
+                height = opt.get("height")
+                height_str = str(height)
+
+                if lang == "fa":
+                    height_str = (
+                        height_str.translate(
+                            digits
+                        )
+                    )
+
+                text = (
+                    f"🎬 {height_str}p — {size_label}"
+                )
+
+                callback_data = (
+                    f"ytq_{probe['id']}_{height}"
+                )
+
+            buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=callback_data,
+                )
+            )
+
         markup.add(*buttons)
 
-        bot.delete_message(chat_id_int, status_msg.message_id)
-        caption = t['yt_choose_quality'].format(title=(probe['title'] or '')[:200])
-        if probe['thumbnail']:
-            bot.send_photo(chat_id_int, probe['thumbnail'], caption=caption, reply_markup=markup, reply_to_message_id=message.message_id)
+        try:
+            bot.delete_message(
+                chat_id_int,
+                status_msg.message_id,
+            )
+        except Exception:
+            pass
+
+        caption = (
+            t["yt_choose_quality"].format(
+                title=(
+                    probe.get("title")
+                    or ""
+                )[:200]
+            )
+        )
+
+        if probe.get("thumbnail"):
+
+            bot.send_photo(
+                chat_id_int,
+                probe["thumbnail"],
+                caption=caption,
+                reply_markup=markup,
+                reply_to_message_id=(
+                    message.message_id
+                ),
+            )
+
         else:
-            bot.send_message(chat_id_int, caption, reply_markup=markup, reply_to_message_id=message.message_id)
+
+            bot.send_message(
+                chat_id_int,
+                caption,
+                reply_markup=markup,
+                reply_to_message_id=(
+                    message.message_id
+                ),
+            )
 
     @bot.message_handler(commands=["start", "help"])
+
     def send_welcome(message):
         store.track_user(message.chat.id)
         t = _texts_for(message.chat.id)
@@ -730,9 +1020,25 @@ def register_features(bot):
                 bot.delete_message(chat_id_int, status_msg.message_id)
                 _maybe_send_ad(chat_id_int)
             except Exception as e:
-                store.record_error()
+
+                store.record_error(
+                    platform="spotify",
+                    url=url,
+                    user_id=message.from_user.id,
+                    error=str(e),
+                )
+
+                logger.exception(
+                    "Spotify download failed | url=%s",
+                    url,
+                )
+
                 try:
-                    bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+                    bot.edit_message_text(
+                        t["spotify_failed"],
+                        chat_id_int,
+                        status_msg.message_id,
+                    )
                 except Exception:
                     pass
             finally:
@@ -780,49 +1086,174 @@ def register_features(bot):
         status_msg = bot.send_message(chat_id_int, t['init'])
         _run_direct_download(chat_id_int, None, url, 'audio', t, status_msg)
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith('ytq_'))
+    @bot.callback_query_handler(
+        func=lambda call: call.data.startswith("ytq_")
+    )
     def handle_youtube_quality_pick(call):
-        chat_id_str = str(call.message.chat.id)
+        chat_id_str = str(
+            call.message.chat.id
+        )
         chat_id_int = call.message.chat.id
         user_id = call.from_user.id
-        t = _texts_for(chat_id_str)
+
+        t = _texts_for(
+            chat_id_str
+        )
 
         if store.is_banned(user_id):
-            bot.answer_callback_query(call.id)
+            bot.answer_callback_query(
+                call.id
+            )
             return
 
         if _is_rate_limited(user_id):
-            bot.answer_callback_query(call.id, t['rate_limited'].format(limit=RATE_LIMIT_COUNT), show_alert=True)
-            return
-
-        _, video_id, choice = call.data.split('_', 2)
-        bot.answer_callback_query(call.id)
-
-        bot.delete_message(chat_id_int, call.message.message_id)
-        status_msg = bot.send_message(chat_id_int, t['init'])
-        progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
-
-        if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+            bot.answer_callback_query(
+                call.id,
+                t["rate_limited"].format(
+                    limit=RATE_LIMIT_COUNT
+                ),
+                show_alert=True,
+            )
             return
 
         try:
-            info, entries, files = platforms.download_youtube_quality(video_id, choice, progress_hook)
-            bot.edit_message_text(t['uploading'], chat_id_int, status_msg.message_id)
+            _, video_id, choice = (
+                call.data.split("_", 2)
+            )
+        except ValueError:
+            bot.answer_callback_query(
+                call.id,
+                "Invalid selection.",
+                show_alert=True,
+            )
+            return
 
-            source_url = f"https://www.youtube.com/watch?v={video_id}"
-            _send_download_result(chat_id_int, None, source_url, "youtube", choice, choice, info, entries, files, t)
+        bot.answer_callback_query(
+            call.id
+        )
 
-            bot.delete_message(chat_id_int, status_msg.message_id)
-            _maybe_send_ad(chat_id_int)
+        try:
+            bot.delete_message(
+                chat_id_int,
+                call.message.message_id,
+            )
+        except Exception:
+            pass
 
-        except platforms.FileTooLargeError as e:
-            store.record_error()
-            bot.edit_message_text(t['too_large'].format(size=str(e)), chat_id_int, status_msg.message_id)
-        except Exception as e:
-            store.record_error()
+        status_msg = bot.send_message(
+            chat_id_int,
+            t["init"],
+        )
+
+        progress_hook = _make_progress_hook(
+            chat_id_int,
+            status_msg,
+            t,
+        )
+
+        if not _acquire_download_slot(
+            bot,
+            chat_id_int,
+            status_msg,
+            t,
+        ):
+            return
+
+        try:
+
+            info, entries, files = (
+                platforms.download_youtube_quality(
+                    video_id,
+                    choice,
+                    progress_hook,
+                )
+            )
+
+            bot.edit_message_text(
+                t["uploading"],
+                chat_id_int,
+                status_msg.message_id,
+            )
+
+            source_url = (
+                f"https://www.youtube.com/watch?v={video_id}"
+            )
+
+            _send_download_result(
+                chat_id_int,
+                None,
+                source_url,
+                "youtube",
+                choice,
+                choice,
+                info,
+                entries,
+                files,
+                t,
+            )
+
             try:
-                bot.edit_message_text(t['failed'].format(error=str(e)), chat_id_int, status_msg.message_id)
+                bot.delete_message(
+                    chat_id_int,
+                    status_msg.message_id,
+                )
             except Exception:
                 pass
+
+            _maybe_send_ad(
+                chat_id_int
+            )
+
+        except platforms.FileTooLargeError as e:
+
+            store.record_error(
+                platform="youtube",
+                url=(
+                    f"https://www.youtube.com/watch?v={video_id}"
+                ),
+                user_id=user_id,
+                error=str(e),
+            )
+
+            try:
+                bot.edit_message_text(
+                    t["too_large"].format(
+                        size=str(e)
+                    ),
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+
+            source_url = (
+                f"https://www.youtube.com/watch?v={video_id}"
+            )
+
+            store.record_error(
+                platform="youtube",
+                url=source_url,
+                user_id=user_id,
+                error=str(e),
+            )
+
+            logger.exception(
+                "YouTube quality download failed | url=%s | choice=%s",
+                source_url,
+                choice,
+            )
+
+            try:
+                bot.edit_message_text(
+                    t["youtube_failed"],
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
+
         finally:
+
             _download_semaphore.release()

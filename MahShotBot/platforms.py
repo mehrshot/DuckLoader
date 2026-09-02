@@ -24,11 +24,24 @@ import random
 import re
 import shutil
 import subprocess
+import threading
+import time
 import uuid
 
 import yt_dlp
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Lightweight YouTube probe cache
+# ---------------------------------------------------------------------------
+
+YOUTUBE_PROBE_CACHE_TTL = 300  # 5 minutes
+YOUTUBE_PROBE_CACHE_MAX = 64
+
+_youtube_probe_cache = {}
+_youtube_probe_cache_lock = threading.Lock()
+_youtube_probe_semaphore = threading.Semaphore(1)
 
 DOWNLOAD_DIR = "downloads"
 
@@ -272,41 +285,145 @@ def _client_attempts():
 
 def _youtube_extra_opts(clients) -> dict:
     opts = {
-        "extractor_args": {"youtube": {"player_client": clients}},
-        "cookiefile": "cookies.txt"
+        "extractor_args": {
+            "youtube": {
+                "player_client": clients
+            }
+        }
     }
-    browser = os.environ.get("YTDLP_COOKIES_BROWSER")
+
+    cookiefile = os.environ.get(
+        "YOUTUBE_COOKIE_FILE",
+        "cookies.txt",
+    )
+
+    if cookiefile and os.path.exists(cookiefile):
+        opts["cookiefile"] = cookiefile
+
+    browser = os.environ.get(
+        "YTDLP_COOKIES_BROWSER"
+    )
+
     if browser:
-        opts["cookiesfrombrowser"] = (browser,)
+        opts["cookiesfrombrowser"] = (
+            browser,
+        )
+
     return opts
 
 
-def _extract_resilient(ydl_opts_base: dict, target: str, download: bool, process: bool = True, use_proxy: bool = True):
-    """Runs yt-dlp's extraction, retrying with different YouTube
-    player-client identities if an attempt fails with what looks like one
-    of YouTube's bot/token checks. For lightweight probing/search calls
-    only — see _download_with_selector for actual file downloads, which
-    intentionally does not share this function (it needs its own retry loop
-    that covers the download itself, not just the metadata fetch)."""
+def _instagram_extra_opts() -> dict:
+    """
+    Instagram-specific authentication.
+
+    Instagram stories frequently require an authenticated
+    Instagram session. Keep these cookies separate from the
+    YouTube cookies.
+    """
+
+    opts = {}
+
+    cookiefile = os.environ.get(
+        "INSTAGRAM_COOKIE_FILE",
+        "instagram_cookies.txt",
+    )
+
+    if cookiefile and os.path.exists(cookiefile):
+        opts["cookiefile"] = cookiefile
+
+    browser = os.environ.get(
+        "INSTAGRAM_COOKIES_BROWSER"
+    )
+
+    if browser:
+        opts["cookiesfrombrowser"] = (
+            browser,
+        )
+
+    return opts
+
+def _extract_resilient(
+    ydl_opts_base: dict,
+    target: str,
+    download: bool,
+    process: bool = True,
+    use_proxy: bool = True,
+):
+    """
+    Lightweight yt-dlp extraction with platform-specific
+    authentication.
+
+    YouTube:
+        Uses the configured YouTube player clients/cookies.
+
+    Instagram:
+        Uses the dedicated Instagram cookie file/browser session.
+
+    Other platforms:
+        Use the base options unchanged.
+    """
+
     last_error = None
-    for clients in _client_attempts():
+
+    is_youtube = _is_youtube_url(target)
+
+    is_instagram = (
+        "instagram.com" in target.lower()
+    )
+
+    if is_youtube:
+        attempts = _client_attempts()
+    else:
+        attempts = [None]
+
+    for clients in attempts:
+
         opts = dict(ydl_opts_base)
-        opts.update(_youtube_extra_opts(clients))
+
+        if is_youtube and clients:
+            opts.update(
+                _youtube_extra_opts(clients)
+            )
+
+        elif is_instagram:
+            opts.update(
+                _instagram_extra_opts()
+            )
+
         if use_proxy:
             proxy = _get_random_proxy()
+
             if proxy:
                 opts["proxy"] = proxy
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(target, download=download, process=process)
-                return info, ydl
-        except Exception as e:
-            if any(hint in str(e).lower() for hint in _RETRYABLE_ERROR_HINTS):
-                last_error = e
-                continue
-            raise
-    raise last_error
 
+        try:
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+
+                info = ydl.extract_info(
+                    target,
+                    download=download,
+                    process=process,
+                )
+
+                return info, ydl
+
+        except Exception as e:
+
+            last_error = e
+
+            if is_youtube:
+                retryable = any(
+                    hint in str(e).lower()
+                    for hint in _RETRYABLE_ERROR_HINTS
+                )
+
+                if retryable:
+                    continue
+
+            raise
+
+    raise last_error
 
 def _probe_size(url: str, format_selector: str):
     """
@@ -480,72 +597,231 @@ def _ensure_h264_mp4(
     ffmpeg_location: str | None = None,
 ) -> str:
     """
-    Make sure a video file is H.264/AAC-compatible MP4.
+    Prepare an MP4 for Telegram/iPhone streaming.
 
-    H.264 files are not re-encoded.
-    VP9/AV1/other codecs are converted to H.264.
+    Cases:
+
+    1. H.264 video + AAC audio:
+       -> stream-copy both and apply faststart.
+
+    2. H.264 video + non-AAC audio:
+       -> copy video, convert audio to AAC, apply faststart.
+
+    3. Non-H.264 video:
+       -> convert video to H.264 + audio to AAC
+       -> apply faststart in THE SAME FFmpeg pass.
+
+    This deliberately avoids the old:
+        transcode -> second faststart
+    pipeline.
     """
 
-    if not filepath or not os.path.exists(filepath):
+    if not filepath:
+        return filepath
+
+    if not os.path.exists(filepath):
         return filepath
 
     if not filepath.lower().endswith(".mp4"):
         return filepath
 
     ffmpeg_exe = None
+    ffprobe_exe = None
+
+    # ---------------------------------------------------------------
+    # Resolve ffmpeg / ffprobe
+    # ---------------------------------------------------------------
 
     if ffmpeg_location:
-        candidate = os.path.join(
+
+        ffmpeg_candidate = os.path.join(
             ffmpeg_location,
-            "ffmpeg.exe" if os.name == "nt" else "ffmpeg",
+            "ffmpeg.exe"
+            if os.name == "nt"
+            else "ffmpeg",
         )
 
-        if os.path.isfile(candidate):
-            ffmpeg_exe = candidate
+        ffprobe_candidate = os.path.join(
+            ffmpeg_location,
+            "ffprobe.exe"
+            if os.name == "nt"
+            else "ffprobe",
+        )
+
+        if os.path.isfile(ffmpeg_candidate):
+            ffmpeg_exe = ffmpeg_candidate
+
+        if os.path.isfile(ffprobe_candidate):
+            ffprobe_exe = ffprobe_candidate
 
     if not ffmpeg_exe:
         ffmpeg_exe = shutil.which("ffmpeg")
 
+    if not ffprobe_exe:
+        ffprobe_exe = shutil.which("ffprobe")
+
     if not ffmpeg_exe:
         logger.warning(
-            "ffmpeg not found; H.264 conversion skipped for %s",
+            "ffmpeg not found; MP4 preparation skipped: %s",
             filepath,
         )
         return filepath
 
+    if not ffprobe_exe:
+        logger.warning(
+            "ffprobe not found; MP4 codec inspection skipped: %s",
+            filepath,
+        )
+        return filepath
+
+    # ---------------------------------------------------------------
+    # Inspect codecs once
+    # ---------------------------------------------------------------
+
     try:
-        probe = subprocess.run(
+
+        result = subprocess.run(
             [
-                ffmpeg_exe,
-                "-i",
+                ffprobe_exe,
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
                 filepath,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=False,
+            check=True,
         )
 
-        probe_text = probe.stderr.lower()
+        probe_data = json.loads(
+            result.stdout or "{}"
+        )
 
     except Exception as e:
+
         logger.warning(
-            "Could not inspect video codec for %s: %s",
+            "Could not inspect MP4 codecs for %s: %s",
             filepath,
             e,
         )
+
         return filepath
 
-    already_h264 = "video: h264" in probe_text
+    streams = probe_data.get("streams") or []
 
-    if already_h264:
-        return filepath
+    video_stream = next(
+        (
+            s
+            for s in streams
+            if s.get("codec_type") == "video"
+        ),
+        None,
+    )
 
-    temp_path = filepath + ".h264.mp4"
+    audio_stream = next(
+        (
+            s
+            for s in streams
+            if s.get("codec_type") == "audio"
+        ),
+        None,
+    )
+
+    video_codec = (
+        (video_stream or {}).get("codec_name")
+        or ""
+    ).lower()
+
+    audio_codec = (
+        (audio_stream or {}).get("codec_name")
+        or ""
+    ).lower()
+
+    # ---------------------------------------------------------------
+    # Decide whether transcoding is actually necessary
+    # ---------------------------------------------------------------
+
+    video_is_h264 = video_codec == "h264"
+    audio_is_aac = audio_codec in {
+        "aac",
+        "mp4a",
+    }
+
+    temp_path = filepath + ".telegram.mp4"
 
     try:
-        subprocess.run(
-            [
+
+        # -----------------------------------------------------------
+        # CASE 1:
+        # Already H.264 + AAC
+        #
+        # No re-encoding at all.
+        # One FFmpeg pass only to put moov at the front.
+        # -----------------------------------------------------------
+
+        if video_is_h264 and audio_is_aac:
+
+            command = [
+                ffmpeg_exe,
+                "-y",
+                "-i",
+                filepath,
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                temp_path,
+            ]
+
+        # -----------------------------------------------------------
+        # CASE 2:
+        # H.264 video but audio is not AAC.
+        #
+        # Keep the video untouched.
+        # Only convert audio.
+        # -----------------------------------------------------------
+
+        elif video_is_h264:
+
+            command = [
+                ffmpeg_exe,
+                "-y",
+                "-i",
+                filepath,
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
+                temp_path,
+            ]
+
+        # -----------------------------------------------------------
+        # CASE 3:
+        # VP9 / AV1 / anything else.
+        #
+        # This is the expensive case.
+        # It happens only when YouTube did not provide a suitable
+        # H.264 stream for the selected resolution.
+        # -----------------------------------------------------------
+
+        else:
+
+            command = [
                 ffmpeg_exe,
                 "-y",
                 "-i",
@@ -560,6 +836,8 @@ def _ensure_h264_mp4(
                 "veryfast",
                 "-crf",
                 "23",
+                "-pix_fmt",
+                "yuv420p",
                 "-threads",
                 "2",
                 "-c:a",
@@ -569,17 +847,30 @@ def _ensure_h264_mp4(
                 "-movflags",
                 "+faststart",
                 temp_path,
-            ],
+            ]
+
+            logger.info(
+                "H.264 transcode required for %s (source codec: %s)",
+                filepath,
+                video_codec or "unknown",
+            )
+
+        subprocess.run(
+            command,
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
 
-        os.replace(temp_path, filepath)
+        os.replace(
+            temp_path,
+            filepath,
+        )
 
     except Exception as e:
+
         logger.warning(
-            "H.264 conversion failed for %s: %s",
+            "MP4 Telegram preparation failed for %s: %s",
             filepath,
             e,
         )
@@ -618,21 +909,57 @@ def _download_with_selector(
     ydl_opts = {
         "format": format_selector,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
-
-        # Always make video output MP4 after merging.
         "merge_output_format": "mp4",
-
         "quiet": True,
         "no_warnings": True,
         "color": "never",
         "noplaylist": False,
         "socket_timeout": 30,
-        "cookiefile": "cookies.txt",
     }
 
+    # Use the correct authentication source for each platform.
+    if "instagram.com" in url.lower():
+
+        instagram_opts = (
+            _instagram_extra_opts()
+        )
+
+        ydl_opts.update(
+            instagram_opts
+        )
+
+    else:
+
+        cookiefile = os.environ.get(
+            "YOUTUBE_COOKIE_FILE",
+            "cookies.txt",
+        )
+
+        if cookiefile and os.path.exists(cookiefile):
+            ydl_opts["cookiefile"] = (
+                cookiefile
+            )
+
+        # For YouTube video downloads, prefer:
+    #
+    #   H.264 video
+    #   M4A/AAC audio
+    #
+    # but DO NOT require them.
+    #
+    # This preserves 1440p/2160p options when YouTube only
+    # offers VP9/AV1 at those resolutions.
+    if _is_youtube_url(url) and not extract_audio:
+        ydl_opts["format_sort"] = [
+            "res",
+            "fps",
+            "codec:avc:m4a",
+            "size",
+        ]
+
     if extract_audio:
-    # Download the original thumbnail so it can be embedded
-    # into the final MP3.
+        # Download the original thumbnail so it can be embedded
+        # into the final MP3.
         ydl_opts["writethumbnail"] = True
 
         ydl_opts["postprocessors"] = [
@@ -657,80 +984,7 @@ def _download_with_selector(
     if progress_hook:
         ydl_opts["progress_hooks"] = [progress_hook]
 
-    def _faststart_mp4(filepath: str) -> str:
-        """
-        Rewrite an MP4 without re-encoding.
-
-        -c copy = NO quality loss
-        -movflags +faststart = puts the MP4 index at the beginning
-        """
-
-        if not filepath.lower().endswith(".mp4"):
-            return filepath
-
-        if not os.path.exists(filepath):
-            return filepath
-
-        ffmpeg_exe = None
-
-        if ffmpeg_location:
-            candidate = os.path.join(
-                ffmpeg_location,
-                "ffmpeg.exe" if os.name == "nt" else "ffmpeg",
-            )
-
-            if os.path.isfile(candidate):
-                ffmpeg_exe = candidate
-
-        if not ffmpeg_exe:
-            ffmpeg_exe = shutil.which("ffmpeg")
-
-        if not ffmpeg_exe:
-            logger.warning(
-                "ffmpeg not found; MP4 faststart was skipped for %s",
-                filepath,
-            )
-            return filepath
-
-        temp_path = filepath + ".faststart.mp4"
-
-        try:
-            subprocess.run(
-                [
-                    ffmpeg_exe,
-                    "-y",
-                    "-i",
-                    filepath,
-                    "-map",
-                    "0",
-                    "-c",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    temp_path,
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-
-            os.replace(temp_path, filepath)
-
-        except Exception as e:
-            logger.warning(
-                "MP4 faststart failed for %s: %s",
-                filepath,
-                e,
-            )
-
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-        return filepath
-
+    
     def _attempt(ydl):
         info_raw = ydl.extract_info(
             url,
@@ -812,25 +1066,38 @@ def _download_with_selector(
                 else:
                     path = raw_path
 
-                # Make sure the video is H.264/AAC MP4 when necessary.
+                # Prepare the MP4 for Telegram/iPhone streaming.
+                #
+                # _ensure_h264_mp4() performs the codec conversion
+                # when necessary AND applies faststart in the same
+                # FFmpeg operation, so no second FFmpeg pass is needed.
                 path = _ensure_h264_mp4(
                     path,
                     ffmpeg_location,
                 )
 
-                # Move the MP4 metadata (moov atom) to the beginning
-                # so Telegram/iPhone can stream the video immediately.
-                path = _faststart_mp4(path)
-
-            if (
-                not os.path.exists(path)
-                or os.path.getsize(path) < MIN_VALID_FILE_BYTES
-            ):
+            if not os.path.exists(path):
                 _cleanup_id(entry_id)
+
+                raise Exception(
+                    f"downloaded file does not exist: {path}"
+                )
+
+            actual_size = os.path.getsize(path)
+
+            if actual_size < MIN_VALID_FILE_BYTES:
+                _cleanup_id(entry_id)
+
                 raise Exception(
                     f"incomplete download: {path}"
                 )
 
+            if actual_size > MAX_TELEGRAM_BYTES:
+                _cleanup_id(entry_id)
+
+                raise FileTooLargeError(
+                    format_size(actual_size)
+                )
             filepaths.append(path)
             valid_entries.append(processed)
 
@@ -875,7 +1142,6 @@ def _format_for(url: str, tier: str) -> str:
     table = YOUTUBE_QUALITY_FORMATS if _is_youtube_url(url) else QUALITY_FORMATS
     return table[tier]
 
-
 def download_direct(
     url: str,
     quality: str = "best",
@@ -885,33 +1151,33 @@ def download_direct(
     """
     Download media from Instagram / YouTube / SoundCloud.
 
-    SoundCloud is always converted to MP3 because it is an audio platform.
-    YouTube keeps its requested video quality unless audio-only was requested.
+    Size is checked AFTER the real file exists instead of performing
+    another yt-dlp extraction beforehand.
     """
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     is_soundcloud = "soundcloud.com" in url.lower()
 
-    # SoundCloud should ALWAYS produce MP3.
+    # ---------------------------------------------------------------
+    # SoundCloud
+    # ---------------------------------------------------------------
+
     if is_soundcloud:
+
         fmt = "bestaudio/best"
 
-        try:
-            _probe_size(url, fmt)
-        except FileTooLargeError:
-            raise
-
-        info, entries, filepaths = _download_with_selector(
+        return _download_with_selector(
             url,
             fmt,
             True,
             progress_hook,
-        )
+        ) + ("audio",)
 
-        return info, entries, filepaths, "audio"
+    # ---------------------------------------------------------------
+    # Normal direct-download path
+    # ---------------------------------------------------------------
 
-    # Normal behavior for YouTube / Instagram / other platforms.
     start = (
         QUALITY_LADDER.index(quality)
         if quality in QUALITY_LADDER
@@ -927,25 +1193,40 @@ def download_direct(
     last_error = None
 
     for tier in tiers_to_try:
+
         fmt = _format_for(url, tier)
 
         try:
-            _probe_size(url, fmt)
+
+            info, entries, filepaths = (
+                _download_with_selector(
+                    url,
+                    fmt,
+                    tier == "audio",
+                    progress_hook,
+                )
+            )
+
+            return (
+                info,
+                entries,
+                filepaths,
+                tier,
+            )
+
         except FileTooLargeError as e:
+
             last_error = e
             continue
 
-        info, entries, filepaths = _download_with_selector(
-            url,
-            fmt,
-            tier == "audio",
-            progress_hook,
-        )
+        except Exception as e:
 
-        return info, entries, filepaths, tier
+            last_error = e
+            continue
 
-    raise last_error or FileTooLargeError("unknown size")
-
+    raise last_error or Exception(
+        "Download failed."
+    )
 
 # --- per-video YouTube quality picker (thumbnail + buttons) ---
 
@@ -1105,14 +1386,37 @@ def _bucket_youtube_formats(info: dict) -> list:
 
 def probe_youtube_qualities(url: str) -> dict:
     """
-    Probe YouTube ONCE and build the available quality list.
+    Probe a YouTube URL once and build all quality buttons locally.
 
-    The format list is inspected locally instead of making a separate
-    yt-dlp network extraction for every resolution.
+    No per-resolution yt-dlp requests are made.
 
-    This is much faster and allows high resolutions even when YouTube
-    only provides VP9/AV1 at those resolutions.
+    Format selection mirrors the actual downloader:
+      - resolution first
+      - FPS second
+      - H.264/M4A preferred
+      - bitrate/size used as tie breakers
+
+    Results are cached briefly so repeated requests for the same URL
+    do not cause another YouTube extraction.
     """
+
+    cache_key = url.strip().split("&")[0]
+
+    # ---------------------------------------------------------------
+    # Check cache
+    # ---------------------------------------------------------------
+    now = time.monotonic()
+
+    with _youtube_probe_cache_lock:
+        cached = _youtube_probe_cache.get(cache_key)
+
+        if cached:
+            cached_time, cached_result = cached
+
+            if now - cached_time < YOUTUBE_PROBE_CACHE_TTL:
+                return cached_result
+
+            del _youtube_probe_cache[cache_key]
 
     probe_opts = {
         "quiet": True,
@@ -1121,12 +1425,15 @@ def probe_youtube_qualities(url: str) -> dict:
         "noplaylist": True,
     }
 
-    info, _ = _extract_resilient(
-        probe_opts,
-        url,
-        download=False,
-        process=False,
-    )
+    # Only allow one metadata probe at a time on the 2-core VPS.
+    with _youtube_probe_semaphore:
+
+        info, _ = _extract_resilient(
+            probe_opts,
+            url,
+            download=False,
+            process=False,
+        )
 
     if not info:
         raise Exception("Media info not found.")
@@ -1134,46 +1441,89 @@ def probe_youtube_qualities(url: str) -> dict:
     video_id = info.get("id")
     title = info.get("title", "")
     thumbnail = info.get("thumbnail")
+    duration = info.get("duration") or 0
 
     formats = info.get("formats") or []
 
     video_formats = [
-        f for f in formats
+        f
+        for f in formats
         if f.get("vcodec") not in (None, "none")
         and f.get("height")
     ]
 
     audio_formats = [
-        f for f in formats
+        f
+        for f in formats
         if f.get("vcodec") in (None, "none")
         and f.get("acodec") not in (None, "none")
     ]
 
-    best_audio = None
+    def codec_rank(fmt: dict) -> int:
+        """
+        Prefer codecs in roughly the same order as:
 
-    if audio_formats:
-        best_audio = max(
-            audio_formats,
-            key=lambda f: (
-                f.get("abr") or 0,
-                f.get("asr") or 0,
-                f.get("filesize") or f.get("filesize_approx") or 0,
-            ),
-        )
+            H.264 > H.265 > VP9 > AV1
 
-    duration = info.get("duration") or 0
+        This does NOT remove other codecs.
+        It only makes H.264 preferred when the resolution is equal.
+        """
 
-    def estimate_size(fmt):
+        codec = (fmt.get("vcodec") or "").lower()
+
+        if codec.startswith("avc1"):
+            return 50
+
+        if codec.startswith(("hev1", "hvc1")):
+            return 40
+
+        if codec.startswith("vp9"):
+            return 30
+
+        if codec.startswith("av01"):
+            return 20
+
+        return 10
+
+    def audio_codec_rank(fmt: dict) -> int:
+        codec = (fmt.get("acodec") or "").lower()
+
+        if codec.startswith("mp4a"):
+            return 50
+
+        if codec.startswith("aac"):
+            return 40
+
+        if codec.startswith("opus"):
+            return 30
+
+        if codec.startswith("vorbis"):
+            return 20
+
+        return 10
+
+    def extension_rank(fmt: dict) -> int:
+        ext = (fmt.get("ext") or "").lower()
+
+        if ext == "mp4":
+            return 20
+
+        if ext == "webm":
+            return 10
+
+        return 5
+
+    def estimate_size(fmt: dict) -> int:
         if not fmt:
             return 0
 
-        size = (
+        exact = (
             fmt.get("filesize")
             or fmt.get("filesize_approx")
         )
 
-        if size:
-            return int(size)
+        if exact:
+            return int(exact)
 
         if duration:
             bitrate = (
@@ -1184,12 +1534,45 @@ def probe_youtube_qualities(url: str) -> dict:
 
             if bitrate:
                 return int(
-                    float(bitrate) * 1000 / 8 * duration
+                    float(bitrate)
+                    * 1000
+                    / 8
+                    * duration
                 )
 
         return 0
 
+    # ---------------------------------------------------------------
+    # Select best audio
+    # ---------------------------------------------------------------
+
+    best_audio = None
+
+    if audio_formats:
+        m4a_audio = [
+            f
+            for f in audio_formats
+            if (f.get("ext") or "").lower() == "m4a"
+        ]
+
+        if m4a_audio:
+            audio_formats = m4a_audio
+
+        best_audio = max(
+            audio_formats,
+            key=lambda f: (
+                f.get("abr") or 0,
+                audio_codec_rank(f),
+                f.get("asr") or 0,
+                estimate_size(f),
+            ),
+        )
+
     audio_size = estimate_size(best_audio)
+
+    # ---------------------------------------------------------------
+    # Build video quality buttons
+    # ---------------------------------------------------------------
 
     options = []
     seen_heights = set()
@@ -1197,47 +1580,37 @@ def probe_youtube_qualities(url: str) -> dict:
     for target_height in YOUTUBE_RESOLUTION_TIERS:
 
         candidates = [
-            f for f in video_formats
+            f
+            for f in video_formats
             if (f.get("height") or 0) <= target_height
         ]
 
         if not candidates:
             continue
 
-        # Prefer H.264 when available at this resolution.
-        h264_candidates = [
-            f for f in candidates
-            if (f.get("vcodec") or "").startswith("avc1")
-        ]
-
-        if h264_candidates:
-            candidates = h264_candidates
-
         best = max(
             candidates,
             key=lambda f: (
                 f.get("height") or 0,
                 f.get("fps") or 0,
-                f.get("quality") or 0,
+                codec_rank(f),
+                extension_rank(f),
                 f.get("vbr") or 0,
                 f.get("tbr") or 0,
+                estimate_size(f),
             ),
         )
 
-        actual_height = best.get("height")
+        height = best.get("height")
 
-        if not actual_height:
+        if not height:
             continue
 
-        if actual_height in seen_heights:
+        if height in seen_heights:
             continue
 
         video_size = estimate_size(best)
 
-        if not video_size:
-            continue
-
-        # Video-only + audio.
         has_audio = (
             best.get("acodec")
             not in (None, "none")
@@ -1254,19 +1627,25 @@ def probe_youtube_qualities(url: str) -> dict:
         if total_size > MAX_TELEGRAM_BYTES:
             continue
 
-        seen_heights.add(actual_height)
+        seen_heights.add(height)
 
         options.append(
             {
                 "kind": "video",
-                "label": f"{actual_height}p",
-                "height": actual_height,
+                "label": f"{height}p",
+                "height": height,
                 "size_bytes": total_size,
             }
         )
 
-    # Audio option
-    if audio_size > 0 and audio_size <= MAX_TELEGRAM_BYTES:
+    # ---------------------------------------------------------------
+    # Audio button
+    # ---------------------------------------------------------------
+
+    if (
+        audio_size > 0
+        and audio_size <= MAX_TELEGRAM_BYTES
+    ):
         options.append(
             {
                 "kind": "audio",
@@ -1276,12 +1655,34 @@ def probe_youtube_qualities(url: str) -> dict:
             }
         )
 
-    return {
+    result = {
         "id": video_id,
         "title": title,
         "thumbnail": thumbnail,
         "options": options,
     }
+
+    # ---------------------------------------------------------------
+    # Store cache
+    # ---------------------------------------------------------------
+
+    with _youtube_probe_cache_lock:
+
+        if len(_youtube_probe_cache) >= YOUTUBE_PROBE_CACHE_MAX:
+
+            oldest_key = min(
+                _youtube_probe_cache,
+                key=lambda k: _youtube_probe_cache[k][0],
+            )
+
+            del _youtube_probe_cache[oldest_key]
+
+        _youtube_probe_cache[cache_key] = (
+            time.monotonic(),
+            result,
+        )
+
+    return result
 
 def download_youtube_quality(
     video_id: str,
@@ -1291,13 +1692,8 @@ def download_youtube_quality(
     """
     Download one specific YouTube resolution.
 
-    Video:
-        Prefer H.264/AVC + AAC for Telegram/iPhone compatibility.
-        If H.264 is unavailable at the requested resolution, allow
-        another video codec and transcode it to H.264 later.
-
-    Audio:
-        MP3 with metadata and embedded thumbnail.
+    H.264/AAC is preferred through yt-dlp format sorting,
+    but other codecs remain available when necessary.
     """
 
     url = f"https://www.youtube.com/watch?v={video_id}"
