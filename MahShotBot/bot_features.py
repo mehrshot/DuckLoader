@@ -373,24 +373,127 @@ def register_features(bot):
             kind = platforms.media_kind(filepath)
 
             if kind == "audio":
-                platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
-
+                platforms.tag_audio_file(
+                        filepath,
+                        title=(
+                            metadata_source.get("track")
+                            or metadata_source.get("title")
+                            or ""
+                        ),
+                        artist=(
+                            metadata_source.get("artist")
+                            or metadata_source.get("uploader")
+                            or metadata_source.get("channel")
+                            or ""
+                        ),
+                        album=(
+                            metadata_source.get("album")
+                            or ""
+                        ),
+                        album_artist=(
+                            metadata_source.get("album_artist")
+                            or metadata_source.get("artist")
+                            or metadata_source.get("uploader")
+                            or metadata_source.get("channel")
+                            or ""
+                        ),
+                        release_date=(
+                            metadata_source.get("release_date")
+                            or metadata_source.get("upload_date")
+                            or ""
+                        ),
+                        track_number=metadata_source.get("track_number"),
+                        total_tracks=metadata_source.get("track_count"),
+                        disc_number=metadata_source.get("disc_number"),
+                        total_discs=metadata_source.get("disc_count"),
+                        cover_url=thumb_url,
+                    )
+                
             bot.send_chat_action(chat_id_int, 'upload_video' if kind == 'video' else 'upload_audio' if kind == 'audio' else 'upload_photo')
 
             try:
                 with open(filepath, "rb") as media_file:
                     if kind == "video":
+                        video_info = metadata_source or {}
+
+                        video_width = video_info.get("width")
+                        video_height = video_info.get("height")
+                        video_duration = video_info.get("duration")
+
+                        # yt-dlp can sometimes return floats for duration.
+                        if video_duration is not None:
+                            try:
+                                video_duration = int(round(float(video_duration)))
+                            except (TypeError, ValueError):
+                                video_duration = None
+
+                        if video_width is not None:
+                            try:
+                                video_width = int(video_width)
+                            except (TypeError, ValueError):
+                                video_width = None
+
+                        if video_height is not None:
+                            try:
+                                video_height = int(video_height)
+                            except (TypeError, ValueError):
+                                video_height = None
+
                         bot.send_video(
                             chat_id_int,
                             media_file,
                             caption=caption,
                             reply_markup=markup,
                             reply_to_message_id=reply_to_id,
+
+                            # Tell Telegram that this is a normal streamable MPEG-4 video.
                             supports_streaming=True,
+
+                            # Explicit video metadata.
+                            width=video_width,
+                            height=video_height,
+                            duration=video_duration,
+
                             timeout=600,
                         )
                     elif kind == "audio":
-                        bot.send_audio(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
+                        audio_duration = metadata_source.get("duration") or 0
+
+                        try:
+                            audio_duration = int(float(audio_duration))
+                        except (TypeError, ValueError):
+                            audio_duration = 0
+
+                        audio_title = (
+                            metadata_source.get("track")
+                            or metadata_source.get("title")
+                            or ""
+                        )
+
+                        audio_performer = (
+                            metadata_source.get("artist")
+                            or metadata_source.get("uploader")
+                            or metadata_source.get("channel")
+                            or ""
+                        )
+
+                        bot.send_audio(
+                            chat_id_int,
+                            media_file,
+
+                            # Telegram audio metadata
+                            duration=audio_duration,
+                            title=audio_title,
+                            performer=audio_performer,
+
+                            # YouTube thumbnail as Telegram's audio cover.
+                            thumbnail=thumb_url if thumb_url else None,
+
+                            caption=caption,
+                            reply_markup=markup,
+                            reply_to_message_id=reply_to_id,
+                            timeout=600,
+                        )
                     else:
                         bot.send_photo(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id)
             finally:
