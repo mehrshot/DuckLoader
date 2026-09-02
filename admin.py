@@ -36,20 +36,52 @@ def has_pending_action(user_id) -> bool:
 
 # --- admin panel (shown to the owner instead of the normal /settings menu) ---
 
-def _panel_markup(t) -> InlineKeyboardMarkup:
-    m = InlineKeyboardMarkup(row_width=2)
-    m.add(
-        InlineKeyboardButton(t['adm_platforms'], callback_data='adm_menu_platforms'),
-        InlineKeyboardButton(t['adm_toggles'], callback_data='adm_menu_toggles'),
+def _panel_markup(t):
+    m = InlineKeyboardMarkup(
+        row_width=2
     )
-    m.add(
-        InlineKeyboardButton(t['adm_ads'], callback_data='adm_menu_ads'),
-        InlineKeyboardButton(t['adm_users'], callback_data='adm_menu_users'),
-    )
-    m.add(InlineKeyboardButton(t['adm_stats'], callback_data='adm_menu_stats'))
-    m.add(InlineKeyboardButton(t['adm_mysettings'], callback_data='adm_menu_mysettings'))
-    return m
 
+    m.add(
+        InlineKeyboardButton(
+            t["adm_platforms"],
+            callback_data="adm_menu_platforms",
+        ),
+        InlineKeyboardButton(
+            t["adm_toggles"],
+            callback_data="adm_menu_toggles",
+        ),
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["adm_ads"],
+            callback_data="adm_menu_ads",
+        ),
+        InlineKeyboardButton(
+            t["adm_users"],
+            callback_data="adm_menu_users",
+        ),
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["adm_stats"],
+            callback_data="adm_menu_stats",
+        ),
+        InlineKeyboardButton(
+            t["adm_errors"],
+            callback_data="adm_menu_errors",
+        ),
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["adm_mysettings"],
+            callback_data="adm_menu_mysettings",
+        )
+    )
+
+    return m
 
 def _platforms_markup(flags, t) -> InlineKeyboardMarkup:
     m = InlineKeyboardMarkup(row_width=1)
@@ -283,6 +315,14 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
         def edit(text, markup):
             bot.edit_message_text(text, chat_id_int, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
+        def edit_plain(text, markup):
+            bot.edit_message_text(
+                text,
+                chat_id_int,
+                call.message.message_id,
+                reply_markup=markup,
+            )
+
         if data == 'adm_menu_main':
             edit(t['adm_title'], _panel_markup(t))
         elif data == 'adm_menu_platforms':
@@ -304,6 +344,78 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 lines.append(f"  • {p}: {c}")
             lines.append(f"❌ {t['stats_errors']}: {stats.get('errors', 0)}")
             edit("\n".join(lines), _back_markup('adm_menu_main', t))
+        elif data == "adm_menu_errors":
+
+            errors = (
+                store.load_error_log()
+            )
+
+            if not errors:
+
+                edit_plain(
+                    t["adm_errors_empty"],
+                    _back_markup(
+                        "adm_menu_main",
+                        t,
+                    ),
+                )
+
+            else:
+
+                recent = errors[-20:]
+
+                lines = [
+                    t["adm_errors_title"],
+                    "",
+                ]
+
+                for index, event in enumerate(
+                    reversed(recent),
+                    start=1,
+                ):
+
+                    lines.append(
+                        f"#{index} "
+                        f"{event.get('time', '')}"
+                    )
+
+                    lines.append(
+                        "Platform: "
+                        f"{event.get('platform', 'unknown')}"
+                    )
+
+                    if event.get("user_id") is not None:
+                        lines.append(
+                            "User: "
+                            f"{event.get('user_id')}"
+                        )
+
+                    lines.append(
+                        "Link: "
+                        f"{event.get('url', '')}"
+                    )
+
+                    lines.append(
+                        "Error: "
+                        f"{event.get('error', '')}"
+                    )
+
+                    lines.append(
+                        "────────────────"
+                    )
+
+                text = "\n".join(lines)
+
+                # Telegram message length safety.
+                text = text[:3900]
+
+                edit_plain(
+                    text,
+                    _back_markup(
+                        "adm_menu_main",
+                        t,
+                    ),
+                )
         elif data == 'adm_sponsors_list':
             channels = ads.load_sponsor_channels()
             text = "\n".join(f"• {c['username']} — {c['name']}" for c in channels) if channels else t['sponsors_empty']

@@ -8,12 +8,18 @@ needed.
 
 import json
 import os
+import threading
+import time
 
 SETTINGS_FILE = "user_settings.json"
 FLAGS_FILE = "feature_flags.json"
 USERS_FILE = "known_users.json"
 BANNED_FILE = "banned_users.json"
 STATS_FILE = "stats.json"
+ERROR_LOG_FILE = "error_log.json"
+ERROR_LOG_MAX = 200
+
+_error_log_lock = threading.Lock()
 
 DEFAULT_QUALITY = "best"  # "best" | "720p" | "audio"
 
@@ -132,7 +138,63 @@ def record_download(platform: str) -> None:
     _save(STATS_FILE, stats)
 
 
-def record_error() -> None:
+def record_error(
+    *,
+    platform: str = "unknown",
+    url: str = "",
+    user_id=None,
+    error: str = "",
+) -> None:
+    """
+    Record the total error count and keep a bounded persistent
+    history of the actual failures for the administrator.
+
+    Technical yt-dlp errors are never shown to end users.
+    """
+
+    # Keep the existing global error counter.
     stats = load_stats()
-    stats["errors"] = stats.get("errors", 0) + 1
+    stats["errors"] = (
+        stats.get("errors", 0) + 1
+    )
     _save(STATS_FILE, stats)
+
+    event = {
+        "time": time.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "platform": platform,
+        "user_id": user_id,
+        "url": url,
+        "error": str(error)[:4000],
+    }
+
+    with _error_log_lock:
+
+        errors = _load(
+            ERROR_LOG_FILE,
+            [],
+        )
+
+        errors.append(event)
+
+        if len(errors) > ERROR_LOG_MAX:
+            errors = errors[
+                -ERROR_LOG_MAX:
+            ]
+
+        _save(
+            ERROR_LOG_FILE,
+            errors,
+        )
+
+
+def load_error_log() -> list:
+    """
+    Return the most recent detailed download errors.
+    """
+
+    return _load(
+        ERROR_LOG_FILE,
+        [],
+    )

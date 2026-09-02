@@ -285,41 +285,145 @@ def _client_attempts():
 
 def _youtube_extra_opts(clients) -> dict:
     opts = {
-        "extractor_args": {"youtube": {"player_client": clients}},
-        "cookiefile": "cookies.txt"
+        "extractor_args": {
+            "youtube": {
+                "player_client": clients
+            }
+        }
     }
-    browser = os.environ.get("YTDLP_COOKIES_BROWSER")
+
+    cookiefile = os.environ.get(
+        "YOUTUBE_COOKIE_FILE",
+        "cookies.txt",
+    )
+
+    if cookiefile and os.path.exists(cookiefile):
+        opts["cookiefile"] = cookiefile
+
+    browser = os.environ.get(
+        "YTDLP_COOKIES_BROWSER"
+    )
+
     if browser:
-        opts["cookiesfrombrowser"] = (browser,)
+        opts["cookiesfrombrowser"] = (
+            browser,
+        )
+
     return opts
 
 
-def _extract_resilient(ydl_opts_base: dict, target: str, download: bool, process: bool = True, use_proxy: bool = True):
-    """Runs yt-dlp's extraction, retrying with different YouTube
-    player-client identities if an attempt fails with what looks like one
-    of YouTube's bot/token checks. For lightweight probing/search calls
-    only — see _download_with_selector for actual file downloads, which
-    intentionally does not share this function (it needs its own retry loop
-    that covers the download itself, not just the metadata fetch)."""
+def _instagram_extra_opts() -> dict:
+    """
+    Instagram-specific authentication.
+
+    Instagram stories frequently require an authenticated
+    Instagram session. Keep these cookies separate from the
+    YouTube cookies.
+    """
+
+    opts = {}
+
+    cookiefile = os.environ.get(
+        "INSTAGRAM_COOKIE_FILE",
+        "instagram_cookies.txt",
+    )
+
+    if cookiefile and os.path.exists(cookiefile):
+        opts["cookiefile"] = cookiefile
+
+    browser = os.environ.get(
+        "INSTAGRAM_COOKIES_BROWSER"
+    )
+
+    if browser:
+        opts["cookiesfrombrowser"] = (
+            browser,
+        )
+
+    return opts
+
+def _extract_resilient(
+    ydl_opts_base: dict,
+    target: str,
+    download: bool,
+    process: bool = True,
+    use_proxy: bool = True,
+):
+    """
+    Lightweight yt-dlp extraction with platform-specific
+    authentication.
+
+    YouTube:
+        Uses the configured YouTube player clients/cookies.
+
+    Instagram:
+        Uses the dedicated Instagram cookie file/browser session.
+
+    Other platforms:
+        Use the base options unchanged.
+    """
+
     last_error = None
-    for clients in _client_attempts():
+
+    is_youtube = _is_youtube_url(target)
+
+    is_instagram = (
+        "instagram.com" in target.lower()
+    )
+
+    if is_youtube:
+        attempts = _client_attempts()
+    else:
+        attempts = [None]
+
+    for clients in attempts:
+
         opts = dict(ydl_opts_base)
-        opts.update(_youtube_extra_opts(clients))
+
+        if is_youtube and clients:
+            opts.update(
+                _youtube_extra_opts(clients)
+            )
+
+        elif is_instagram:
+            opts.update(
+                _instagram_extra_opts()
+            )
+
         if use_proxy:
             proxy = _get_random_proxy()
+
             if proxy:
                 opts["proxy"] = proxy
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(target, download=download, process=process)
-                return info, ydl
-        except Exception as e:
-            if any(hint in str(e).lower() for hint in _RETRYABLE_ERROR_HINTS):
-                last_error = e
-                continue
-            raise
-    raise last_error
 
+        try:
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+
+                info = ydl.extract_info(
+                    target,
+                    download=download,
+                    process=process,
+                )
+
+                return info, ydl
+
+        except Exception as e:
+
+            last_error = e
+
+            if is_youtube:
+                retryable = any(
+                    hint in str(e).lower()
+                    for hint in _RETRYABLE_ERROR_HINTS
+                )
+
+                if retryable:
+                    continue
+
+            raise
+
+    raise last_error
 
 def _probe_size(url: str, format_selector: str):
     """
@@ -805,17 +909,36 @@ def _download_with_selector(
     ydl_opts = {
         "format": format_selector,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
-
-        # Always make video output MP4 after merging.
         "merge_output_format": "mp4",
-
         "quiet": True,
         "no_warnings": True,
         "color": "never",
         "noplaylist": False,
         "socket_timeout": 30,
-        "cookiefile": "cookies.txt",
     }
+
+    # Use the correct authentication source for each platform.
+    if "instagram.com" in url.lower():
+
+        instagram_opts = (
+            _instagram_extra_opts()
+        )
+
+        ydl_opts.update(
+            instagram_opts
+        )
+
+    else:
+
+        cookiefile = os.environ.get(
+            "YOUTUBE_COOKIE_FILE",
+            "cookies.txt",
+        )
+
+        if cookiefile and os.path.exists(cookiefile):
+            ydl_opts["cookiefile"] = (
+                cookiefile
+            )
 
         # For YouTube video downloads, prefer:
     #
