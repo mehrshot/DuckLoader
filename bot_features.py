@@ -277,14 +277,19 @@ def _build_caption(
     """
     Build the caption for downloaded media.
 
-    Instagram hashtag rules:
-        - Use the actual Instagram public username.
-        - Prefer the username from the original URL when present.
-        - Otherwise use yt-dlp's username metadata.
-        - Never use a numeric Instagram internal ID.
-        - Preserve the username exactly, except replace characters
-          that are not suitable inside a Telegram hashtag with "_".
-        - Always prefix the hashtag with 🆔.
+    Instagram:
+        - Use the Instagram public username, not the display name.
+        - Prefer yt-dlp's "channel" field because it maps to the
+          Instagram username.
+        - For Story URLs, extract the username directly from the URL
+          when possible.
+        - Never use the numeric uploader_id as a hashtag.
+        - Preserve the username as much as Telegram allows.
+        - Replace unsupported hashtag characters with "_".
+        - Prefix the Instagram hashtag with 🆔.
+
+    Other platforms:
+        - Keep the existing uploader-based hashtag behavior.
     """
 
     platform = (
@@ -292,12 +297,6 @@ def _build_caption(
         or entry.get("extractor")
         or ""
     ).lower()
-
-    uploader = (
-        entry.get("uploader")
-        or entry.get("channel")
-        or "Unknown"
-    )
 
     # ---------------------------------------------------------------
     # Instagram
@@ -308,49 +307,64 @@ def _build_caption(
         instagram_username = ""
 
         # -----------------------------------------------------------
-        # 1. Try to extract the username from the original URL.
+        # 1. yt-dlp's "channel" is the Instagram username.
         #
-        # This works especially well for:
+        # Current yt-dlp Instagram extractor:
         #
-        #   /stories/USERNAME/STORY_ID
+        #   channel      -> user.username
+        #   uploader     -> user.full_name
+        #   uploader_id  -> user.pk (numeric internal ID)
         #
-        # because the username is directly present in the URL.
+        # Therefore channel MUST be preferred.
         # -----------------------------------------------------------
 
-        if source_url:
+        channel = entry.get(
+            "channel"
+        )
 
-            url_match = re.search(
+        if channel:
+            channel = str(
+                channel
+            ).strip()
+
+            if (
+                channel
+                and not channel.isdigit()
+                and "instagram.com" not in channel.lower()
+            ):
+                instagram_username = channel
+
+        # -----------------------------------------------------------
+        # 2. For Story URLs, the username is explicitly present:
+        #
+        #   /stories/USERNAME/STORY_ID/
+        #
+        # Use it when available.
+        # -----------------------------------------------------------
+
+        if (
+            not instagram_username
+            and source_url
+        ):
+
+            story_match = re.search(
                 r"https?://(?:www\.)?instagram\.com/"
+                r"stories/"
                 r"([^/?#]+)/",
                 source_url,
                 re.IGNORECASE,
             )
 
-            if url_match:
+            if story_match:
 
                 possible_username = (
-                    url_match.group(1).strip()
+                    story_match.group(1)
+                    .strip()
+                    .lstrip("@")
                 )
-
-                reserved_paths = {
-                    "p",
-                    "reel",
-                    "reels",
-                    "stories",
-                    "explore",
-                    "accounts",
-                    "direct",
-                    "tv",
-                    "about",
-                    "developers",
-                    "web",
-                    "emails",
-                }
 
                 if (
                     possible_username
-                    and possible_username.lower()
-                    not in reserved_paths
                     and not possible_username.isdigit()
                 ):
                     instagram_username = (
@@ -358,104 +372,96 @@ def _build_caption(
                     )
 
         # -----------------------------------------------------------
-        # 2. Use yt-dlp username metadata if the URL did not give us
-        #    a username.
+        # 3. If channel is unavailable, try uploader only when it
+        #    clearly looks like a username.
         #
-        # Important:
-        # uploader_id may be Instagram's numeric internal account ID,
-        # so never blindly use a numeric value.
+        # Do NOT use uploader if it is a generic value such as
+        # "Instagram" or a numeric ID.
         # -----------------------------------------------------------
 
         if not instagram_username:
 
-            candidates = [
-                entry.get("uploader"),
-                entry.get("channel"),
-                entry.get("uploader_id"),
-                entry.get("channel_id"),
-            ]
+            uploader = entry.get(
+                "uploader"
+            )
 
-            for candidate in candidates:
+            if uploader:
 
-                if not candidate:
-                    continue
-
-                candidate = str(
-                    candidate
+                uploader = str(
+                    uploader
                 ).strip()
 
-                if not candidate:
-                    continue
-
-                if candidate.isdigit():
-                    continue
+                generic_uploader_values = {
+                    "instagram",
+                    "instagram user",
+                    "unknown",
+                }
 
                 if (
-                    "instagram.com"
-                    in candidate.lower()
+                    uploader
+                    and not uploader.isdigit()
+                    and uploader.lower()
+                    not in generic_uploader_values
+                    and "instagram.com"
+                    not in uploader.lower()
                 ):
-                    continue
-
-                instagram_username = (
-                    candidate
-                )
-
-                break
+                    instagram_username = (
+                        uploader
+                    )
 
         # -----------------------------------------------------------
-        # 3. Safe fallback.
+        # 4. Do NOT fall back to uploader_id.
+        #
+        # uploader_id is often a numeric Instagram internal account
+        # identifier such as:
+        #
+        #   123456789
+        #
+        # That is exactly what caused the numeric hashtags before.
         # -----------------------------------------------------------
 
         if not instagram_username:
-
             instagram_username = "Instagram"
 
-        # Remove a leading @ if Instagram metadata included it.
+        # Remove a leading @ if present.
         instagram_username = (
             instagram_username
             .lstrip("@")
+            .strip()
         )
 
         # -----------------------------------------------------------
-        # 4. Convert ONLY characters that cannot safely remain inside
-        #    a Telegram hashtag to "_".
+        # 5. Preserve the username.
         #
-        # IMPORTANT:
-        #   Do NOT lowercase.
-        #   Do NOT capitalize.
-        #   Do NOT translate.
-        #   Do NOT shorten the username.
+        # Only replace characters that aren't safe inside a hashtag.
         #
-        # Examples:
+        # saadati.clothing -> saadati_clothing
+        # trendspersian    -> trendspersian
+        # my-shop          -> my_shop
+        # my_shop          -> my_shop
         #
-        #   saadati.clothing
-        #       -> saadati_clothing
-        #
-        #   trendspersian
-        #       -> trendspersian
-        #
-        #   my-shop
-        #       -> my_shop
+        # No translation.
+        # No capitalization.
+        # No shortening.
         # -----------------------------------------------------------
 
-        hashtag = re.sub(
+        safe_hashtag = re.sub(
             r"[^A-Za-z0-9_]",
             "_",
             instagram_username,
         )
 
-        hashtag = re.sub(
+        safe_hashtag = re.sub(
             r"_+",
             "_",
-            hashtag,
+            safe_hashtag,
         ).strip("_")
 
-        if not hashtag:
-
-            hashtag = "Instagram"
+        if not safe_hashtag:
+            safe_hashtag = "Instagram"
 
         hashtag_line = (
-            f"🆔 #{hashtag}"
+            f"🆔 #{safe_hashtag}"
         )
 
     # ---------------------------------------------------------------
@@ -463,6 +469,12 @@ def _build_caption(
     # ---------------------------------------------------------------
 
     else:
+
+        uploader = (
+            entry.get("uploader")
+            or entry.get("channel")
+            or "Unknown"
+        )
 
         safe_hashtag = re.sub(
             r"\W+",
@@ -491,7 +503,6 @@ def _build_caption(
     if timestamp:
 
         try:
-
             date_str = (
                 datetime.fromtimestamp(
                     timestamp
@@ -499,13 +510,11 @@ def _build_caption(
                     "%Y/%m/%d, %H:%M"
                 )
             )
-
         except (
             TypeError,
             ValueError,
             OSError,
         ):
-
             date_str = None
 
     # ---------------------------------------------------------------
@@ -528,7 +537,6 @@ def _build_caption(
     )
 
     def format_num(n):
-
         return (
             f"{n:,}"
             if isinstance(n, int)
@@ -553,7 +561,6 @@ def _build_caption(
     max_length = 750
 
     if len(description) > max_length:
-
         description = (
             description[:max_length]
             + "..."
@@ -565,11 +572,10 @@ def _build_caption(
 
     lines = [
         hashtag_line,
-        f"👤 {uploader}",
+        f"👤 {entry.get('uploader') or entry.get('channel') or 'Unknown'}",
     ]
 
     if date_str:
-
         lines.append(
             f"📅 {date_str}"
         )
@@ -579,13 +585,13 @@ def _build_caption(
     )
 
     if description:
-
         lines.append(
             f"\n📝 {description}"
         )
 
+    # KEEP YOUR CHOSEN BOT USERNAME.
     lines.append(
-        "\n🦆 Downloaded with @DuckLoaderBot"
+        "\n🦆 Downloaded with @DuckDownloader_Bot"
     )
 
     return "\n".join(lines)
@@ -731,15 +737,10 @@ def register_features(bot):
         if quality_used != quality_requested:
             bot.send_message(chat_id_int, t['quality_reduced'].format(quality=t[f'quality_{quality_used}']))
 
-        # -----------------------------------------------------------
-        # Merge the parent yt-dlp metadata with the selected media
-        # entry.
+        # Merge the parent result with the individual media entry.
         #
-        # Instagram often puts the username/uploader on the parent
-        # result while the individual Reel/Story media entry does
-        # not contain it.
-        # -----------------------------------------------------------
-
+        # The parent result can contain the Instagram username ("channel")
+        # even when the individual Reel/Story media entry doesn't.
         metadata_source = dict(
             info or {}
         )
@@ -754,7 +755,9 @@ def register_features(bot):
             url,
         )
 
-        thumb_url = metadata_source.get('thumbnail')
+        thumb_url = (
+            metadata_source.get("thumbnail")
+        )
         post_id = metadata_source.get('id', str(time.time()))
         if thumb_url:
             thumb_cache[post_id] = thumb_url
