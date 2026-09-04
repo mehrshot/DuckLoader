@@ -1110,29 +1110,62 @@ def _download_with_selector(
 
     last_error = None
 
-    for clients in _client_attempts():
+    # ---------------------------------------------------------------
+    # Use platform-specific authentication.
+    # YouTube gets YouTube client/cookie settings.
+    # Instagram gets Instagram cookie settings.
+    # Other platforms get the base options only.
+    # ---------------------------------------------------------------
+
+    if _is_youtube_url(url):
+        attempts = _client_attempts()
+    else:
+        attempts = [None]
+
+    for clients in attempts:
 
         opts = dict(ydl_opts)
-        opts.update(_youtube_extra_opts(clients))
 
-        if use_proxy:
+        if _is_youtube_url(url) and clients:
+            opts.update(
+                _youtube_extra_opts(clients)
+            )
+
+        elif "instagram.com" in url.lower():
+            opts.update(
+                _instagram_extra_opts()
+            )
+
+        # -----------------------------------------------------------
+        # IMPORTANT:
+        # Do NOT use the rotating proxy for authenticated Instagram
+        # sessions. A changing exit IP can invalidate or confuse
+        # Instagram's session/authentication checks.
+        # -----------------------------------------------------------
+
+        if (
+            use_proxy
+            and "instagram.com" not in url.lower()
+        ):
             proxy = _get_random_proxy()
 
             if proxy:
                 opts["proxy"] = proxy
 
         try:
+
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return _attempt(ydl)
 
         except Exception as e:
 
-            if any(
-                hint in str(e).lower()
-                for hint in _RETRYABLE_ERROR_HINTS
-            ):
-                last_error = e
-                continue
+            if _is_youtube_url(url):
+                if any(
+                    hint in str(e).lower()
+                    for hint in _RETRYABLE_ERROR_HINTS
+                ):
+                    last_error = e
+                    continue
 
             raise
 
