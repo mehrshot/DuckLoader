@@ -12,6 +12,14 @@ import ads
 import platforms
 import store
 
+# ---------------------------------------------------------------------------
+# DuckLoader
+# ---------------------------------------------------------------------------
+# 🦆 A friendly duck that fetches media for the user.
+# Keep the personality light in user-facing messages while keeping
+# technical logs and admin messages precise.
+# ---------------------------------------------------------------------------
+
 logger = logging.getLogger(__name__)
 
 thumb_cache = {}
@@ -78,7 +86,7 @@ def _render_bar(percent_str: str, width: int = 10) -> str:
 
 TEXTS = {
     'fa': {
-        'welcome': "🎯 **به DropShot DL خوش آمدید!**\n\nلینک پابلیک از اینستاگرام، ساندکلاد، اسپاتیفای یا یوتیوب (به‌زودی) بفرستید تا با بالاترین کیفیت دانلود کنم.\n\nکیفیت دلخواهتون رو از /settings تنظیم کنید.",
+        'welcome': "🦆 **به DuckLoader خوش اومدی!**\n\nمن اردک دانلودچیِ توام — لینک رو بفرست، می‌رم پیداش می‌کنم و برات برمی‌گردونمش. 🎒\n\nاز Instagram، SoundCloud، Spotify و YouTube پشتیبانی می‌کنم.\n\nکیفیت دلخواهت رو از /settings انتخاب کن.\n\n🦆 اگه لینک داشته باشی، منم یه راه برای آوردنش پیدا می‌کنم!",
         'init': "⏳ در حال برقراری ارتباط...",
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
         'uploading': "✅ دانلود تکمیل شد! در حال آپلود...",
@@ -167,7 +175,7 @@ TEXTS = {
         'adm_cancelled': "لغو شد.",
     },
     'en': {
-        'welcome': "🎯 **Welcome to DropShot DL!**\n\nSend me a public link from Instagram, SoundCloud, Spotify, or YouTube (coming soon) and I will fetch it in high quality.\n\nSet your preferred quality in /settings.",
+        'welcome': "🦆 **Welcome to DuckLoader!**\n\nI’m your little download duck. Send me a link and I’ll waddle off, fetch it, and bring it back to you. 🎒\n\nI support Instagram, SoundCloud, Spotify, and YouTube.\n\nChoose your preferred quality in /settings.\n\n🦆 You bring the link. I’ll bring the media.",
         'init': "⏳ Initializing connection...",
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
         'uploading': "✅ Download complete! Preparing upload...",
@@ -293,7 +301,7 @@ def _build_caption(entry: dict) -> str:
     lines.append(stats_line)
     if description:
         lines.append(f"\n📝 {description}")
-    lines.append("\n🤖 @DropShotDLBot")
+    lines.append("\n🦆 Downloaded with @DuckDownloader_Bot")
     return "\n".join(lines)
 
 def _friendly_download_error(
@@ -1006,7 +1014,12 @@ def register_features(bot):
                     filepath = platforms.download_spotify_track(track, progress_hook)
                     try:
                         bot.send_chat_action(chat_id_int, 'upload_audio')
-                        caption = f"💿 {track['album']}\n\n🤖 @DropShotDLBot" if i == 0 else ""
+                        caption = (
+                            f"💿 {track['album']}\n\n"
+                            f"🦆 @DuckLoaderBot"
+                            if i == 0
+                            else ""
+                        )
                         with open(filepath, "rb") as audio_file:
                             bot.send_audio(
                                 chat_id_int, audio_file,

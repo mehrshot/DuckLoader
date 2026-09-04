@@ -1,5 +1,8 @@
 """
-Telegram bot entrypoint for @DropShotDLBot.
+🦆 DuckLoader — Telegram media downloader.
+
+DuckLoader is a friendly duck that fetches videos, music and media
+from supported platforms and brings them back to the user.
 
 Setup
 -----
@@ -23,7 +26,7 @@ Then make sure yt-dlp-ejs is installed too (pip install -U yt-dlp yt-dlp-ejs)
 — it ships the actual challenge-solving scripts that Deno runs.
 
 The bot logs whether it found ffmpeg and a JS runtime once at startup
-(check `journalctl -u dropshotdl` right after a restart) rather than
+(check `journalctl -u duckloader` right after a restart) rather than
 leaving you to guess from a downstream error.
 
 If you still get "ffprobe and ffmpeg not found" after installing it: this
