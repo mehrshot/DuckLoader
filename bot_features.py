@@ -270,38 +270,324 @@ def _texts_for(chat_id) -> dict:
     user = store.get_user(user_settings, chat_id)
     return TEXTS[user['lang']]
 
+def _build_caption(
+    entry: dict,
+    source_url: str = "",
+) -> str:
+    """
+    Build the caption for downloaded media.
 
-def _build_caption(entry: dict) -> str:
-    """Builds an Instagram/YouTube/SoundCloud caption from whatever yt-dlp metadata
-    fields are available. Works across platforms because it only uses fields
-    that are present and skips ones that aren't."""
-    uploader = entry.get("uploader") or entry.get("channel") or "Unknown"
-    safe_hashtag = re.sub(r"\W+", "_", uploader)
+    Instagram hashtag rules:
+        - Use the actual Instagram public username.
+        - Prefer the username from the original URL when present.
+        - Otherwise use yt-dlp's username metadata.
+        - Never use a numeric Instagram internal ID.
+        - Preserve the username exactly, except replace characters
+          that are not suitable inside a Telegram hashtag with "_".
+        - Always prefix the hashtag with 🆔.
+    """
 
-    timestamp = entry.get("timestamp") or entry.get("release_timestamp")
-    date_str = datetime.fromtimestamp(timestamp).strftime('%Y/%m/%d, %H:%M') if timestamp else None
+    platform = (
+        entry.get("extractor_key")
+        or entry.get("extractor")
+        or ""
+    ).lower()
 
-    likes = entry.get('like_count') or 0
-    comments = entry.get('comment_count') or 0
-    views = entry.get('view_count') or 0
+    uploader = (
+        entry.get("uploader")
+        or entry.get("channel")
+        or "Unknown"
+    )
+
+    # ---------------------------------------------------------------
+    # Instagram
+    # ---------------------------------------------------------------
+
+    if "instagram" in platform:
+
+        instagram_username = ""
+
+        # -----------------------------------------------------------
+        # 1. Try to extract the username from the original URL.
+        #
+        # This works especially well for:
+        #
+        #   /stories/USERNAME/STORY_ID
+        #
+        # because the username is directly present in the URL.
+        # -----------------------------------------------------------
+
+        if source_url:
+
+            url_match = re.search(
+                r"https?://(?:www\.)?instagram\.com/"
+                r"([^/?#]+)/",
+                source_url,
+                re.IGNORECASE,
+            )
+
+            if url_match:
+
+                possible_username = (
+                    url_match.group(1).strip()
+                )
+
+                reserved_paths = {
+                    "p",
+                    "reel",
+                    "reels",
+                    "stories",
+                    "explore",
+                    "accounts",
+                    "direct",
+                    "tv",
+                    "about",
+                    "developers",
+                    "web",
+                    "emails",
+                }
+
+                if (
+                    possible_username
+                    and possible_username.lower()
+                    not in reserved_paths
+                    and not possible_username.isdigit()
+                ):
+                    instagram_username = (
+                        possible_username
+                    )
+
+        # -----------------------------------------------------------
+        # 2. Use yt-dlp username metadata if the URL did not give us
+        #    a username.
+        #
+        # Important:
+        # uploader_id may be Instagram's numeric internal account ID,
+        # so never blindly use a numeric value.
+        # -----------------------------------------------------------
+
+        if not instagram_username:
+
+            candidates = [
+                entry.get("uploader"),
+                entry.get("channel"),
+                entry.get("uploader_id"),
+                entry.get("channel_id"),
+            ]
+
+            for candidate in candidates:
+
+                if not candidate:
+                    continue
+
+                candidate = str(
+                    candidate
+                ).strip()
+
+                if not candidate:
+                    continue
+
+                if candidate.isdigit():
+                    continue
+
+                if (
+                    "instagram.com"
+                    in candidate.lower()
+                ):
+                    continue
+
+                instagram_username = (
+                    candidate
+                )
+
+                break
+
+        # -----------------------------------------------------------
+        # 3. Safe fallback.
+        # -----------------------------------------------------------
+
+        if not instagram_username:
+
+            instagram_username = "Instagram"
+
+        # Remove a leading @ if Instagram metadata included it.
+        instagram_username = (
+            instagram_username
+            .lstrip("@")
+        )
+
+        # -----------------------------------------------------------
+        # 4. Convert ONLY characters that cannot safely remain inside
+        #    a Telegram hashtag to "_".
+        #
+        # IMPORTANT:
+        #   Do NOT lowercase.
+        #   Do NOT capitalize.
+        #   Do NOT translate.
+        #   Do NOT shorten the username.
+        #
+        # Examples:
+        #
+        #   saadati.clothing
+        #       -> saadati_clothing
+        #
+        #   trendspersian
+        #       -> trendspersian
+        #
+        #   my-shop
+        #       -> my_shop
+        # -----------------------------------------------------------
+
+        hashtag = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            instagram_username,
+        )
+
+        hashtag = re.sub(
+            r"_+",
+            "_",
+            hashtag,
+        ).strip("_")
+
+        if not hashtag:
+
+            hashtag = "Instagram"
+
+        hashtag_line = (
+            f"🆔 #{hashtag}"
+        )
+
+    # ---------------------------------------------------------------
+    # Other platforms
+    # ---------------------------------------------------------------
+
+    else:
+
+        safe_hashtag = re.sub(
+            r"\W+",
+            "_",
+            uploader,
+        ).strip("_")
+
+        if not safe_hashtag:
+            safe_hashtag = "Media"
+
+        hashtag_line = (
+            f"#{safe_hashtag}"
+        )
+
+    # ---------------------------------------------------------------
+    # Date
+    # ---------------------------------------------------------------
+
+    timestamp = (
+        entry.get("timestamp")
+        or entry.get("release_timestamp")
+    )
+
+    date_str = None
+
+    if timestamp:
+
+        try:
+
+            date_str = (
+                datetime.fromtimestamp(
+                    timestamp
+                ).strftime(
+                    "%Y/%m/%d, %H:%M"
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+            OSError,
+        ):
+
+            date_str = None
+
+    # ---------------------------------------------------------------
+    # Statistics
+    # ---------------------------------------------------------------
+
+    likes = (
+        entry.get("like_count")
+        or 0
+    )
+
+    comments = (
+        entry.get("comment_count")
+        or 0
+    )
+
+    views = (
+        entry.get("view_count")
+        or 0
+    )
 
     def format_num(n):
-        return f"{n:,}" if isinstance(n, int) else n
 
-    stats_line = f"❤️ {format_num(likes)} | 💬 {format_num(comments)} | 👁‍🗨 {format_num(views)}"
+        return (
+            f"{n:,}"
+            if isinstance(n, int)
+            else n
+        )
 
-    description = entry.get('description') or ''
+    stats_line = (
+        f"❤️ {format_num(likes)} | "
+        f"💬 {format_num(comments)} | "
+        f"👁‍🗨 {format_num(views)}"
+    )
+
+    # ---------------------------------------------------------------
+    # Description
+    # ---------------------------------------------------------------
+
+    description = (
+        entry.get("description")
+        or ""
+    )
+
     max_length = 750
-    if len(description) > max_length:
-        description = description[:max_length] + "..."
 
-    lines = [f"#{safe_hashtag}", f"👤 {uploader}"]
+    if len(description) > max_length:
+
+        description = (
+            description[:max_length]
+            + "..."
+        )
+
+    # ---------------------------------------------------------------
+    # Final caption
+    # ---------------------------------------------------------------
+
+    lines = [
+        hashtag_line,
+        f"👤 {uploader}",
+    ]
+
     if date_str:
-        lines.append(f"📅 {date_str}")
-    lines.append(stats_line)
+
+        lines.append(
+            f"📅 {date_str}"
+        )
+
+    lines.append(
+        stats_line
+    )
+
     if description:
-        lines.append(f"\n📝 {description}")
-    lines.append("\n🦆 Downloaded with @DuckDownloader_Bot")
+
+        lines.append(
+            f"\n📝 {description}"
+        )
+
+    lines.append(
+        "\n🦆 Downloaded with @DuckLoaderBot"
+    )
+
     return "\n".join(lines)
 
 def _friendly_download_error(
@@ -356,6 +642,23 @@ def _friendly_download_error(
         "download_failed"
     ]
 
+def _start_language_markup() -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    markup.add(
+        InlineKeyboardButton(
+            text="🇺🇸 English",
+            callback_data="startlang_en",
+        ),
+        InlineKeyboardButton(
+            text="🇮🇷 فارسی",
+            callback_data="startlang_fa",
+        ),
+    )
+
+    return markup
 
 def _settings_markup(user: dict, t: dict) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=2)
@@ -428,8 +731,28 @@ def register_features(bot):
         if quality_used != quality_requested:
             bot.send_message(chat_id_int, t['quality_reduced'].format(quality=t[f'quality_{quality_used}']))
 
-        metadata_source = entries[0] if entries else info
-        caption = _build_caption(metadata_source)
+        # -----------------------------------------------------------
+        # Merge the parent yt-dlp metadata with the selected media
+        # entry.
+        #
+        # Instagram often puts the username/uploader on the parent
+        # result while the individual Reel/Story media entry does
+        # not contain it.
+        # -----------------------------------------------------------
+
+        metadata_source = dict(
+            info or {}
+        )
+
+        if entries:
+            metadata_source.update(
+                entries[0] or {}
+            )
+
+        caption = _build_caption(
+            metadata_source,
+            url,
+        )
 
         thumb_url = metadata_source.get('thumbnail')
         post_id = metadata_source.get('id', str(time.time()))
@@ -912,12 +1235,71 @@ def register_features(bot):
                 ),
             )
 
-    @bot.message_handler(commands=["start", "help"])
-
+    @bot.message_handler(
+        commands=["start"]
+    )
     def send_welcome(message):
-        store.track_user(message.chat.id)
-        t = _texts_for(message.chat.id)
-        bot.reply_to(message, t['welcome'], parse_mode="Markdown")
+        store.track_user(
+            message.chat.id
+        )
+
+        chat_id = str(
+            message.chat.id
+        )
+
+        user = store.get_user(
+            user_settings,
+            chat_id,
+        )
+
+        # New users default to English.
+        # Existing users keep their saved language.
+        language = user.get(
+            "lang",
+            "en",
+        )
+
+        if language not in {
+            "en",
+            "fa",
+        }:
+            language = "en"
+
+        user["lang"] = language
+
+        user_settings[chat_id] = user
+
+        store.save_user_settings(
+            user_settings
+        )
+
+        t = TEXTS[language]
+
+        bot.reply_to(
+            message,
+            t["welcome"],
+            reply_markup=_start_language_markup(),
+            parse_mode="Markdown",
+        )
+
+
+    @bot.message_handler(
+        commands=["help"]
+    )
+    def send_help(message):
+        chat_id = str(
+            message.chat.id
+        )
+
+        t = _texts_for(
+            chat_id
+        )
+
+        bot.reply_to(
+            message,
+            t["welcome"],
+            parse_mode="Markdown",
+        )
 
     @bot.message_handler(commands=["whoami"])
     def whoami(message):
@@ -1098,6 +1480,65 @@ def register_features(bot):
         bot.answer_callback_query(call.id)
         status_msg = bot.send_message(chat_id_int, t['init'])
         _run_direct_download(chat_id_int, None, url, 'audio', t, status_msg)
+
+    @bot.callback_query_handler(
+        func=lambda call: call.data.startswith(
+            "startlang_"
+        )
+    )
+    def handle_start_language_callback(call):
+        chat_id = str(
+            call.message.chat.id
+        )
+
+        selected_language = (
+            call.data.split(
+                "_",
+                1,
+            )[1]
+        )
+
+        if selected_language not in {
+            "en",
+            "fa",
+        }:
+            bot.answer_callback_query(
+                call.id,
+                "Invalid language.",
+                show_alert=True,
+            )
+            return
+
+        user = store.get_user(
+            user_settings,
+            chat_id,
+        )
+
+        user["lang"] = (
+            selected_language
+        )
+
+        user_settings[chat_id] = user
+
+        store.save_user_settings(
+            user_settings
+        )
+
+        t = TEXTS[
+            selected_language
+        ]
+
+        bot.edit_message_text(
+            t["welcome"],
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None,
+            parse_mode="Markdown",
+        )
+
+        bot.answer_callback_query(
+            call.id
+        )
 
     @bot.callback_query_handler(
         func=lambda call: call.data.startswith("ytq_")

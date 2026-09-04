@@ -73,8 +73,15 @@ def load_user_settings() -> dict:
         if isinstance(value, str):
             migrated[chat_id] = {"lang": value, "quality": DEFAULT_QUALITY}
         else:
-            value.setdefault("lang", "fa")
-            value.setdefault("quality", DEFAULT_QUALITY)
+            value.setdefault(
+                "lang",
+                "en",
+            )
+
+            value.setdefault(
+                "quality",
+                DEFAULT_QUALITY,
+            )
             migrated[chat_id] = value
     return migrated
 
@@ -83,8 +90,17 @@ def save_user_settings(settings: dict) -> None:
     _save(SETTINGS_FILE, settings)
 
 
-def get_user(settings: dict, chat_id) -> dict:
-    return settings.get(str(chat_id), {"lang": "fa", "quality": DEFAULT_QUALITY})
+def get_user(
+    settings: dict,
+    chat_id,
+) -> dict:
+    return settings.get(
+        str(chat_id),
+        {
+            "lang": "en",
+            "quality": DEFAULT_QUALITY,
+        },
+    )
 
 
 # --- known users, for /broadcast ---
