@@ -34,6 +34,11 @@ MAX_CONCURRENT_DOWNLOADS = 1  # how many downloads run at once, bot-wide
 _recent_downloads = defaultdict(list)  # user_id -> [timestamps]
 _download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
+_duck_status_messages = {}
+_duck_complete_messages = {}
+
+_duck_message_lock = threading.Lock()
+
 # If this many requests are already waiting for a download slot, new ones
 # get turned away immediately instead of growing an unbounded queue — keeps
 # a burst of traffic (organic growth or abuse) from piling up memory and
@@ -86,7 +91,7 @@ def _render_bar(percent_str: str, width: int = 10) -> str:
 
 TEXTS = {
     'fa': {
-        'welcome': "🦆 **به DuckLoader خوش اومدی!**\n\nمن اردک دانلودچیِ توام — لینک رو بفرست، می‌رم پیداش می‌کنم و برات برمی‌گردونمش. 🎒\n\nاز Instagram، SoundCloud، Spotify و YouTube پشتیبانی می‌کنم.\n\nکیفیت دلخواهت رو از /settings انتخاب کن.\n\n🦆 اگه لینک داشته باشی، منم یه راه برای آوردنش پیدا می‌کنم!",
+        'welcome': "🦆 **به DuckLoader خوش اومدی!**\n\nمن اردک دانلودچیِ توام — لینک رو بفرست، می‌رم پیداش می‌کنم و برات برمی‌گردونمش. ⚡\n\nاز Instagram، SoundCloud، Spotify و YouTube پشتیبانی می‌کنم.\n\nکیفیت دلخواهت رو از /settings انتخاب کن.\n\n🦆 اگه لینک داشته باشی، منم یه راه برای آوردنش پیدا می‌کنم!",
         'init': "⏳ در حال برقراری ارتباط...",
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
         'uploading': "✅ دانلود تکمیل شد! در حال آپلود...",
@@ -173,9 +178,23 @@ TEXTS = {
         'adm_ask_unban': "آی‌دی عددی کاربری که می‌خوای رفع مسدودیت کنی رو بفرست:",
         'adm_ask_broadcast': "متنی که می‌خوای برای همه‌ی کاربرها ارسال بشه رو بفرست:",
         'adm_cancelled': "لغو شد.",
+        "adm_duck": "🦆 واکنش‌های اردک",
+        "adm_duck_title": "🦆 تنظیم واکنش‌های DuckLoader:",
+        "adm_duck_start": "👋 شروع",
+        "adm_duck_downloading": "💨 دانلود",
+        "adm_duck_failed": "😤 خطا",
+        "adm_duck_complete": "👋 پایان",
+        "adm_duck_clear_all": "🗑 پاک کردن همه",
+        "adm_ask_duck_start": "🦆 استیکر یا GIF اردک برای شروع را ارسال کنید.",
+        "adm_ask_duck_downloading": "🦆 استیکر یا GIF اردک در حال دانلود را ارسال کنید.",
+        "adm_ask_duck_failed": "🦆 استیکر یا GIF اردک ناراحت را ارسال کنید.",
+        "adm_ask_duck_complete": "🦆 استیکر یا GIF اردک «به‌زودی می‌بینمت» را ارسال کنید.",
+        "adm_duck_saved": "✅ واکنش اردک برای «{event}» ذخیره شد.",
+        "adm_duck_invalid_media": "❌ لطفاً یک استیکر یا GIF/Animation ارسال کنید.",
+        "adm_duck_all_cleared": "✅ همه واکنش‌های اردک پاک شدند.",
     },
     'en': {
-        'welcome': "🦆 **Welcome to DuckLoader!**\n\nI’m your little download duck. Send me a link and I’ll waddle off, fetch it, and bring it back to you. 🎒\n\nI support Instagram, SoundCloud, Spotify, and YouTube.\n\nChoose your preferred quality in /settings.\n\n🦆 You bring the link. I’ll bring the media.",
+        'welcome': "🦆 **Welcome to DuckLoader!**\n\nI’m your little download duck. Send me a link and I’ll waddle off, fetch it, and bring it back to you. ⚡\n\nI support Instagram, SoundCloud, Spotify, and YouTube.\n\nChoose your preferred quality in /settings.\n\n🦆 You bring the link. I’ll bring the media.",
         'init': "⏳ Initializing connection...",
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
         'uploading': "✅ Download complete! Preparing upload...",
@@ -262,6 +281,20 @@ TEXTS = {
         'adm_ask_unban': "Send the numeric user ID to unban:",
         'adm_ask_broadcast': "Send the message to broadcast to all users:",
         'adm_cancelled': "Cancelled.",
+        "adm_duck": "🦆 Duck Reactions",
+        "adm_duck_title": "🦆 Configure DuckLoader reactions:",
+        "adm_duck_start": "👋 Start",
+        "adm_duck_downloading": "💨 Downloading",
+        "adm_duck_failed": "😤 Failed",
+        "adm_duck_complete": "👋 Complete",
+        "adm_duck_clear_all": "🗑 Clear All",
+        "adm_ask_duck_start": "🦆 Send the duck sticker or GIF/animation to use when a user starts.",
+        "adm_ask_duck_downloading": "🦆 Send the jumping duck sticker or GIF/animation to show while downloading.",
+        "adm_ask_duck_failed": "🦆 Send the frustrated duck sticker or GIF/animation to show when a download fails.",
+        "adm_ask_duck_complete": "🦆 Send the goodbye/see-you-soon duck sticker or GIF/animation to show after a successful download.",
+        "adm_duck_saved": "✅ Duck reaction for “{event}” saved.",
+        "adm_duck_invalid_media": "❌ Please send a Sticker or GIF/Animation.",
+        "adm_duck_all_cleared": "✅ All duck reactions cleared.",
     }
 }
 
@@ -694,6 +727,155 @@ def register_features(bot):
 
     admin.register_admin(bot, flags, _texts_for, _my_settings_view)
 
+    def _delete_duck_message(
+        message_map,
+        chat_id_int,
+    ):
+        with _duck_message_lock:
+            message_id = message_map.pop(
+                chat_id_int,
+                None,
+            )
+
+        if message_id is None:
+            return
+
+        try:
+            bot.delete_message(
+                chat_id_int,
+                message_id,
+            )
+        except Exception:
+            pass
+
+
+    def _send_duck_reaction(
+        chat_id_int,
+        event,
+        track_status=False,
+        track_complete=False,
+    ):
+        reactions = (
+            store.load_duck_reactions()
+        )
+
+        reaction = reactions.get(
+            event
+        )
+
+        if not reaction:
+            return None
+
+        media_type = reaction.get(
+            "type"
+        )
+
+        file_id = reaction.get(
+            "file_id"
+        )
+
+        if not file_id:
+            return None
+
+        try:
+            if media_type == "sticker":
+                sent = bot.send_sticker(
+                    chat_id_int,
+                    file_id,
+                )
+
+            elif media_type == "animation":
+                sent = bot.send_animation(
+                    chat_id_int,
+                    file_id,
+                )
+
+            else:
+                logger.warning(
+                    "Unknown duck reaction type: %s",
+                    media_type,
+                )
+                return None
+
+        except Exception:
+            logger.exception(
+                "Failed to send duck reaction | event=%s",
+                event,
+            )
+            return None
+
+        message_id = (
+            sent.message_id
+        )
+
+        with _duck_message_lock:
+            if track_status:
+                _duck_status_messages[
+                    chat_id_int
+                ] = message_id
+
+            if track_complete:
+                _duck_complete_messages[
+                    chat_id_int
+                ] = message_id
+
+        return message_id
+
+
+    def _delete_previous_download_ducks(
+        chat_id_int,
+    ):
+        _delete_duck_message(
+            _duck_status_messages,
+            chat_id_int,
+        )
+
+        _delete_duck_message(
+            _duck_complete_messages,
+            chat_id_int,
+        )
+
+
+    def _finish_duck_download(
+        chat_id_int,
+    ):
+        _delete_duck_message(
+            _duck_status_messages,
+            chat_id_int,
+        )
+
+
+    def _send_duck_download_failed(
+        chat_id_int,
+    ):
+        _finish_duck_download(
+            chat_id_int,
+        )
+
+        _send_duck_reaction(
+            chat_id_int,
+            "failed",
+        )
+
+
+    def _send_duck_download_complete(
+        chat_id_int,
+    ):
+        _finish_duck_download(
+            chat_id_int,
+        )
+
+        _delete_duck_message(
+            _duck_complete_messages,
+            chat_id_int,
+        )
+
+        _send_duck_reaction(
+            chat_id_int,
+            "complete",
+            track_complete=True,
+        )
+
     def _maybe_send_ad(chat_id_int):
         if not flags.get('sponsor_message', False):
             return
@@ -971,6 +1153,12 @@ def register_features(bot):
         ):
             return
 
+        _send_duck_reaction(
+            chat_id_int,
+            "downloading",
+            track_status=True,
+        )
+
         platform = (
             platforms.detect_platform(url)
             or "unknown"
@@ -1014,6 +1202,10 @@ def register_features(bot):
                 t,
             )
 
+            _send_duck_download_complete(
+                chat_id_int
+            )
+
             bot.delete_message(
                 chat_id_int,
                 status_msg.message_id,
@@ -1024,6 +1216,10 @@ def register_features(bot):
             )
 
         except platforms.FileTooLargeError as e:
+
+            _send_duck_download_failed(
+                chat_id_int
+            )
 
             store.record_error(
                 platform=platform,
@@ -1044,6 +1240,10 @@ def register_features(bot):
                 pass
 
         except Exception as e:
+
+            _send_duck_download_failed(
+                chat_id_int
+            )
 
             store.record_error(
                 platform=platform,
@@ -1094,6 +1294,11 @@ def register_features(bot):
             )
 
         except Exception as e:
+
+            _send_duck_download_failed(
+                chat_id_int
+            )
+
             store.record_error(
                 platform="youtube",
                 url=url,
@@ -1278,6 +1483,15 @@ def register_features(bot):
 
         t = TEXTS[language]
 
+        _delete_previous_download_ducks(
+            message.chat.id
+        )
+
+        _send_duck_reaction(
+            message.chat.id,
+            "start",
+        )
+
         bot.reply_to(
             message,
             t["welcome"],
@@ -1361,7 +1575,14 @@ def register_features(bot):
             return
 
         url = message.text.strip()
-        platform = platforms.detect_platform(url)
+
+        _delete_previous_download_ducks(
+            chat_id_int
+        )
+
+        platform = platforms.detect_platform(
+            url
+        )
 
         if not flags.get(platform, True):
             bot.reply_to(message, t['not_launched'].format(platform=platforms.PLATFORM_NAMES[platform]))
@@ -1385,8 +1606,19 @@ def register_features(bot):
         if platform == "spotify":
             progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
 
-            if not _acquire_download_slot(bot, chat_id_int, status_msg, t):
+            if not _acquire_download_slot(
+                bot,
+                chat_id_int,
+                status_msg,
+                t,
+            ):
                 return
+
+            _send_duck_reaction(
+                chat_id_int,
+                "downloading",
+                track_status=True,
+            )
 
             try:
                 tracks = platforms.resolve_spotify_tracks(url)
@@ -1415,9 +1647,23 @@ def register_features(bot):
                         if os.path.exists(filepath):
                             os.remove(filepath)
                     store.record_download("spotify")
-                bot.delete_message(chat_id_int, status_msg.message_id)
-                _maybe_send_ad(chat_id_int)
+                bot.delete_message(
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+
+                _send_duck_download_complete(
+                    chat_id_int
+                )
+
+                _maybe_send_ad(
+                    chat_id_int
+                )
             except Exception as e:
+
+                _send_duck_download_failed(
+                    chat_id_int
+                )
 
                 store.record_error(
                     platform="spotify",
@@ -1616,6 +1862,12 @@ def register_features(bot):
         ):
             return
 
+        _send_duck_reaction(
+            chat_id_int,
+            "downloading",
+            track_status=True,
+        )
+
         try:
 
             info, entries, files = (
@@ -1624,6 +1876,10 @@ def register_features(bot):
                     choice,
                     progress_hook,
                 )
+            )
+
+            _finish_duck_download(
+                chat_id_int
             )
 
             bot.edit_message_text(
@@ -1647,6 +1903,10 @@ def register_features(bot):
                 entries,
                 files,
                 t,
+            )
+
+            _send_duck_download_complete(
+                chat_id_int
             )
 
             try:

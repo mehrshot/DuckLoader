@@ -19,6 +19,15 @@ STATS_FILE = "stats.json"
 ERROR_LOG_FILE = "error_log.json"
 ERROR_LOG_MAX = 200
 
+DUCK_REACTIONS_FILE = "duck_reactions.json"
+
+DUCK_REACTION_KEYS = {
+    "start",
+    "downloading",
+    "failed",
+    "complete",
+}
+
 _error_log_lock = threading.Lock()
 
 DEFAULT_QUALITY = "best"  # "best" | "720p" | "audio"
@@ -213,4 +222,106 @@ def load_error_log() -> list:
     return _load(
         ERROR_LOG_FILE,
         [],
+    )
+
+def load_duck_reactions() -> dict:
+    """
+    Return the configured DuckLoader reaction media.
+
+    Each entry looks like:
+
+        {
+            "type": "sticker",
+            "file_id": "CAAC..."
+        }
+
+    or:
+
+        {
+            "type": "animation",
+            "file_id": "CgAC..."
+        }
+    """
+
+    raw = _load(
+        DUCK_REACTIONS_FILE,
+        {},
+    )
+
+    if not isinstance(raw, dict):
+        return {}
+
+    return raw
+
+
+def save_duck_reaction(
+    event: str,
+    media_type: str,
+    file_id: str,
+) -> None:
+    """
+    Persist one DuckLoader reaction.
+
+    media_type:
+        sticker
+        animation
+    """
+
+    if event not in DUCK_REACTION_KEYS:
+        raise ValueError(
+            f"Invalid duck reaction event: {event}"
+        )
+
+    if media_type not in {
+        "sticker",
+        "animation",
+    }:
+        raise ValueError(
+            f"Invalid duck reaction type: {media_type}"
+        )
+
+    reactions = load_duck_reactions()
+
+    reactions[event] = {
+        "type": media_type,
+        "file_id": file_id,
+    }
+
+    _save(
+        DUCK_REACTIONS_FILE,
+        reactions,
+    )
+
+
+def clear_duck_reaction(
+    event: str,
+) -> None:
+    """
+    Remove one configured DuckLoader reaction.
+    """
+
+    if event not in DUCK_REACTION_KEYS:
+        return
+
+    reactions = load_duck_reactions()
+
+    reactions.pop(
+        event,
+        None,
+    )
+
+    _save(
+        DUCK_REACTIONS_FILE,
+        reactions,
+    )
+
+
+def clear_all_duck_reactions() -> None:
+    """
+    Remove all DuckLoader reactions.
+    """
+
+    _save(
+        DUCK_REACTIONS_FILE,
+        {},
     )
