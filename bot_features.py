@@ -565,10 +565,28 @@ def _build_caption(
         or 0
     )
 
-    views = (
-        entry.get("view_count")
-        or 0
-    )
+    views = None
+
+    for view_key in (
+        "view_count",
+        "video_view_count",
+    ):
+        value = entry.get(view_key)
+
+        if value is None or isinstance(value, bool):
+            continue
+
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+
+        if value > 0:
+            views = value
+            break
+
+    if views is None:
+        views = 0
 
     def format_num(n):
         return (
@@ -932,9 +950,16 @@ def register_features(bot):
         )
 
         if entries:
-            metadata_source.update(
+            for key, value in (
                 entries[0] or {}
-            )
+            ).items():
+                if value not in (
+                    None,
+                    "",
+                    [],
+                    {},
+                ):
+                    metadata_source[key] = value
 
         caption = _build_caption(
             metadata_source,

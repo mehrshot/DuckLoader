@@ -342,6 +342,69 @@ def _instagram_extra_opts() -> dict:
 
     return opts
 
+def _get_instagram_view_count(*objects):
+    """
+    Return Instagram's real Reel view count from any metadata shape
+    returned by yt-dlp.
+
+    Instagram/yt-dlp can expose the count as:
+        view_count
+        video_view_count
+
+    Metadata can also be nested inside another dictionary, so this
+    function searches recursively.
+
+    Only positive integer counts are accepted here so a stale/empty
+    zero cannot overwrite a real value found elsewhere.
+    """
+
+    def _search(obj):
+        if obj is None:
+            return None
+
+        if isinstance(obj, dict):
+            # Prefer the normalized yt-dlp field.
+            for key in (
+                "view_count",
+                "video_view_count",
+            ):
+                value = obj.get(key)
+
+                if value is None or isinstance(value, bool):
+                    continue
+
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+
+                if value > 0:
+                    return value
+
+            # Some Instagram responses keep the media object nested.
+            for value in obj.values():
+                found = _search(value)
+
+                if found is not None:
+                    return found
+
+        elif isinstance(obj, (list, tuple)):
+            for value in obj:
+                found = _search(value)
+
+                if found is not None:
+                    return found
+
+        return None
+
+    for obj in objects:
+        found = _search(obj)
+
+        if found is not None:
+            return found
+
+    return None
+
 def _extract_resilient(
     ydl_opts_base: dict,
     target: str,
@@ -1027,7 +1090,54 @@ def _download_with_selector(
             if not processed:
                 continue
 
-            raw_path = ydl.prepare_filename(processed)
+            # -----------------------------------------------------------
+            # Preserve metadata that yt-dlp may expose on the original
+            # Instagram result but not on the processed media result.
+            #
+            # This is especially important for Instagram Reels where
+            # view_count can exist on the original extractor result.
+            # -----------------------------------------------------------
+            if isinstance(processed, dict):
+                for key in (
+                    "id",
+                    "title",
+                    "description",
+                    "thumbnail",
+                    "timestamp",
+                    "upload_date",
+                    "uploader",
+                    "uploader_id",
+                    "channel",
+                    "channel_id",
+                    "view_count",
+                    "like_count",
+                    "comment_count",
+                    "duration",
+                    "width",
+                    "height",
+                    "webpage_url",
+                    "extractor",
+                    "extractor_key",
+                ):
+                    if (
+                        processed.get(key) is None
+                        and raw_entry.get(key) is not None
+                    ):
+                        processed[key] = raw_entry[key]
+
+                # Some Instagram extraction paths use
+                # video_view_count internally.
+                if (
+                    processed.get("view_count") is None
+                    and raw_entry.get("video_view_count") is not None
+                ):
+                    processed["view_count"] = (
+                        raw_entry["video_view_count"]
+                    )
+
+            raw_path = ydl.prepare_filename(
+                processed
+            )
 
             if extract_audio:
                 mp3_path = os.path.splitext(raw_path)[0] + ".mp3"
@@ -1099,7 +1209,42 @@ def _download_with_selector(
                     format_size(actual_size)
                 )
             filepaths.append(path)
-            valid_entries.append(processed)
+
+# Preserve the original Instagram metadata as well as the
+# processed yt-dlp metadata.
+#
+# This is important because Instagram may expose the Reel count
+# in the raw response as `video_view_count`, while the processed
+# result may only contain the normalized `view_count` field.
+            metadata_entry = dict(
+                raw_entry or {}
+            )
+
+            metadata_entry.update(
+                processed or {}
+            )
+
+            if "instagram" in (
+                str(
+                    metadata_entry.get("extractor_key")
+                    or metadata_entry.get("extractor")
+                    or raw_entry.get("extractor_key")
+                    or raw_entry.get("extractor")
+                    or ""
+                ).lower()
+            ):
+                instagram_views = _get_instagram_view_count(
+                    processed,
+                    raw_entry,
+                    info_raw,
+                )
+
+                if instagram_views is not None:
+                    metadata_entry["view_count"] = instagram_views
+
+            valid_entries.append(
+                metadata_entry
+            )
 
         if not filepaths:
             raise Exception(
