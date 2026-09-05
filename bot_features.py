@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import random
 import threading
 import time
 from collections import defaultdict
@@ -748,7 +749,6 @@ def register_features(bot):
         except Exception:
             pass
 
-
     def _send_duck_reaction(
         chat_id_int,
         event,
@@ -759,12 +759,17 @@ def register_features(bot):
             store.load_duck_reactions()
         )
 
-        reaction = reactions.get(
-            event
+        reaction_list = reactions.get(
+            event,
+            [],
         )
 
-        if not reaction:
+        if not reaction_list:
             return None
+
+        reaction = random.choice(
+            reaction_list
+        )
 
         media_type = reaction.get(
             "type"
@@ -820,7 +825,6 @@ def register_features(bot):
                 ] = message_id
 
         return message_id
-
 
     def _delete_previous_download_ducks(
         chat_id_int,
