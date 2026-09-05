@@ -412,15 +412,14 @@ def _instagram_clip_play_count(
     entry: dict,
 ) -> int | None:
     """
-    Fetch the current Instagram Reel play count from Instagram's
-    Clips GraphQL connection when the normal yt-dlp metadata does
-    not contain a usable view count.
+    Recover an Instagram Reel's play count using Instagram's
+    Clips GraphQL connection.
 
-    This mirrors the fallback currently used by Instaloader.
+    Instagram's current post metadata endpoint can return
+    no view_count/video_view_count for public Reels. The Clips
+    connection can still expose the Reel's play_count.
 
-    Instagram's normal post metadata can contain neither
-    `view_count` nor `video_view_count` for public Reels, while
-    the clips connection can still expose `play_count`.
+    This follows the current Instaloader fallback strategy.
     """
 
     if not isinstance(entry, dict):
@@ -435,23 +434,15 @@ def _instagram_clip_play_count(
     if "instagram" not in extractor:
         return None
 
-    # We only want to perform this extra request for videos/Reels.
-    is_video = (
-        entry.get("vcodec") not in (None, "none")
-        or entry.get("is_video") is True
-        or entry.get("video_url")
-        or entry.get("duration")
-    )
-
-    if not is_video:
-        return None
-
     shortcode = (
         entry.get("id")
         or entry.get("shortcode")
     )
 
     if not shortcode:
+        logger.warning(
+            "Instagram play-count fallback: no shortcode found."
+        )
         return None
 
     user_id = (
@@ -460,11 +451,98 @@ def _instagram_clip_play_count(
     )
 
     if not user_id:
+        logger.warning(
+            "Instagram play-count fallback: no user id "
+            "for shortcode=%s",
+            shortcode,
+        )
         return None
 
     try:
-        # Instagram's current Clips connection GraphQL document.
-        doc_id = "27234427476213202"
+        # ---------------------------------------------------------------
+        # Find the CSRF token from yt-dlp's existing cookie jar.
+        # The same yt-dlp opener contains the Instagram cookies loaded
+        # from INSTAGRAM_COOKIE_FILE / cookiesfrombrowser.
+        # ---------------------------------------------------------------
+
+        csrf_token = None
+        cookie_jar = None
+
+        try:
+            for handler in ydl._opener.handlers:
+                if hasattr(handler, "cookiejar"):
+                    cookie_jar = handler.cookiejar
+                    break
+        except Exception:
+            cookie_jar = None
+
+        if cookie_jar is not None:
+            for cookie in cookie_jar:
+                if (
+                    cookie.name == "csrftoken"
+                    and cookie.value
+                    and "instagram.com" in (
+                        cookie.domain or ""
+                    )
+                ):
+                    csrf_token = cookie.value
+                    break
+
+        # Instagram's current GraphQL endpoint requires a CSRF token.
+        # If the cookie jar does not already contain one, visit the
+        # Instagram homepage once using the same authenticated opener.
+        if not csrf_token:
+            try:
+                bootstrap_request = urllib.request.Request(
+                    "https://www.instagram.com/",
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (X11; Linux x86_64) "
+                            "AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) "
+                            "Chrome/151.0.0.0 Safari/537.36"
+                        ),
+                        "Accept": "text/html,application/xhtml+xml",
+                    },
+                )
+
+                ydl._opener.open(
+                    bootstrap_request,
+                    timeout=30,
+                ).read(1)
+
+            except Exception as bootstrap_error:
+                logger.warning(
+                    "Instagram CSRF bootstrap failed for %s: %s",
+                    shortcode,
+                    bootstrap_error,
+                )
+
+            if cookie_jar is not None:
+                for cookie in cookie_jar:
+                    if (
+                        cookie.name == "csrftoken"
+                        and cookie.value
+                        and "instagram.com" in (
+                            cookie.domain or ""
+                        )
+                    ):
+                        csrf_token = cookie.value
+                        break
+
+        if not csrf_token:
+            logger.warning(
+                "Instagram play-count fallback: no csrftoken "
+                "available for shortcode=%s",
+                shortcode,
+            )
+            return None
+
+        # ---------------------------------------------------------------
+        # Current Instagram Clips GraphQL query.
+        #
+        # This is the same query currently used by Instaloader.
+        # ---------------------------------------------------------------
 
         variables = {
             "data": {
@@ -474,40 +552,53 @@ def _instagram_clip_play_count(
             }
         }
 
-        response = ydl._opener.open(
-            urllib.request.Request(
-                "https://www.instagram.com/api/graphql",
-                data=urllib.parse.urlencode(
-                    {
-                        "doc_id": doc_id,
-                        "variables": json.dumps(
-                            variables,
-                            separators=(",", ":"),
-                        ),
-                    }
-                ).encode("utf-8"),
-                headers={
-                    "User-Agent": (
-                        entry.get("user_agent")
-                        or (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/151.0 Safari/537.36"
-                        )
-                    ),
-                    "Accept": "application/json",
-                    "Content-Type": (
-                        "application/x-www-form-urlencoded"
-                    ),
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": "https://www.instagram.com/",
-                },
-            )
+        post_data = urllib.parse.urlencode(
+            {
+                "variables": json.dumps(
+                    variables,
+                    separators=(",", ":"),
+                ),
+                "doc_id": "27234427476213202",
+            }
+        ).encode("utf-8")
+
+        request = urllib.request.Request(
+            "https://www.instagram.com/graphql/query",
+            data=post_data,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/151.0.0.0 Safari/537.36"
+                ),
+                "Accept": "*/*",
+                "Content-Type": (
+                    "application/x-www-form-urlencoded"
+                ),
+                "X-CSRFToken": csrf_token,
+                "Referer": (
+                    f"https://www.instagram.com/reel/"
+                    f"{shortcode}/"
+                ),
+            },
+            method="POST",
         )
 
-        payload = json.loads(
-            response.read().decode("utf-8")
+        response = ydl._opener.open(
+            request,
+            timeout=30,
         )
+
+        raw_response = response.read()
+
+        payload = json.loads(
+            raw_response.decode("utf-8")
+        )
+
+        # ---------------------------------------------------------------
+        # Extract the Clips connection.
+        # ---------------------------------------------------------------
 
         clips_connection = (
             (payload.get("data") or {})
@@ -517,28 +608,56 @@ def _instagram_clip_play_count(
             or {}
         )
 
-        for edge in (
+        edges = (
             clips_connection.get("edges")
             or []
-        ):
-            media = (
-                (edge.get("node") or {})
-                .get("media")
+        )
+
+        logger.info(
+            "Instagram Clips query: shortcode=%s "
+            "user_id=%s returned_edges=%d",
+            shortcode,
+            user_id,
+            len(edges),
+        )
+
+        # ---------------------------------------------------------------
+        # Find our Reel by its shortcode.
+        # ---------------------------------------------------------------
+
+        for edge in edges:
+
+            node = (
+                edge.get("node")
                 or {}
             )
 
-            if str(
+            media = (
+                node.get("media")
+                or {}
+            )
+
+            media_code = (
                 media.get("code")
                 or ""
-            ) != str(shortcode):
+            )
+
+            if str(media_code) != str(shortcode):
                 continue
 
             play_count = media.get(
                 "play_count"
             )
 
+            logger.info(
+                "Instagram Clips matched Reel: "
+                "shortcode=%s play_count=%r",
+                shortcode,
+                play_count,
+            )
+
             if play_count is None:
-                continue
+                return None
 
             try:
                 play_count = int(
@@ -548,7 +667,7 @@ def _instagram_clip_play_count(
                 TypeError,
                 ValueError,
             ):
-                continue
+                return None
 
             if play_count > 0:
                 logger.info(
@@ -561,10 +680,19 @@ def _instagram_clip_play_count(
 
                 return play_count
 
+            return None
+
+        logger.warning(
+            "Instagram Clips response did not contain "
+            "shortcode=%s for user_id=%s",
+            shortcode,
+            user_id,
+        )
+
     except Exception as e:
-        logger.debug(
+        logger.exception(
             "Instagram Reel play-count fallback failed "
-            "for %s: %s",
+            "for shortcode=%s: %s",
             shortcode,
             e,
         )
@@ -1376,10 +1504,10 @@ def _download_with_selector(
                 )
         filepaths.append(path)
 
-# -----------------------------------------------------------
-# Merge the raw Instagram metadata with the processed
-# yt-dlp metadata.
-# -----------------------------------------------------------
+        # -----------------------------------------------------------
+        # Merge the raw Instagram metadata with the processed
+        # yt-dlp metadata.
+        # -----------------------------------------------------------
 
         metadata_entry = dict(
             raw_entry or {}
@@ -1390,48 +1518,83 @@ def _download_with_selector(
         )
 
         extractor_name = str(
-            metadata_entry.get("extractor_key")
-            or metadata_entry.get("extractor")
-            or raw_entry.get("extractor_key")
-            or raw_entry.get("extractor")
+            metadata_entry.get(
+                "extractor_key"
+            )
+            or metadata_entry.get(
+                "extractor"
+            )
+            or raw_entry.get(
+                "extractor_key"
+            )
+            or raw_entry.get(
+                "extractor"
+            )
             or ""
         ).lower()
 
-# -----------------------------------------------------------
-# Instagram statistics
-# -----------------------------------------------------------
+        # -----------------------------------------------------------
+        # Instagram Reel view/play count recovery.
+        # -----------------------------------------------------------
+
         if "instagram" in extractor_name:
 
             logger.info(
-                "Instagram metadata before view-count recovery | "
-                "id=%s extractor=%s view_count=%r "
-                "video_view_count=%r uploader_id=%r channel_id=%r",
-                metadata_entry.get("id"),
+                "Instagram metadata before recovery: "
+                "id=%s extractor=%s "
+                "view_count=%r "
+                "video_view_count=%r "
+                "video_play_count=%r "
+                "uploader_id=%r "
+                "channel_id=%r",
+                metadata_entry.get(
+                    "id"
+                ),
                 extractor_name,
-                metadata_entry.get("view_count"),
-                metadata_entry.get("video_view_count"),
-                metadata_entry.get("uploader_id"),
-                metadata_entry.get("channel_id"),
+                metadata_entry.get(
+                    "view_count"
+                ),
+                metadata_entry.get(
+                    "video_view_count"
+                ),
+                metadata_entry.get(
+                    "video_play_count"
+                ),
+                metadata_entry.get(
+                    "uploader_id"
+                ),
+                metadata_entry.get(
+                    "channel_id"
+                ),
             )
 
-    # First try the normal yt-dlp/Instagram fields.
-            instagram_views = _get_instagram_view_count(
-                processed,
-                raw_entry,
-                info_raw,
-                 )
+            # First: use a normal yt-dlp count if one exists.
+            instagram_views = (
+                _get_instagram_view_count(
+                    processed,
+                    raw_entry,
+                    info_raw,
+                )
+            )
 
             if instagram_views is not None:
-                metadata_entry["view_count"] = (
-                    instagram_views
-                )
+
+                metadata_entry[
+                    "view_count"
+                ] = instagram_views
+
+                metadata_entry[
+                    "video_view_count"
+                ] = instagram_views
 
             else:
-        # ---------------------------------------------------
-        # Instagram can omit view_count/video_view_count for
-        # public Reels. Use the current Clips connection
-        # fallback to recover play_count.
-        # ---------------------------------------------------
+
+                # Instagram may omit view_count and
+                # video_view_count on public Reels.
+                #
+                # Recover the Reel play count through
+                # Instagram's Clips connection.
+
                 instagram_play_count = (
                     _instagram_clip_play_count(
                         ydl,
@@ -1440,6 +1603,7 @@ def _download_with_selector(
                 )
 
                 if instagram_play_count is not None:
+
                     metadata_entry[
                         "view_count"
                     ] = instagram_play_count
@@ -1452,9 +1616,35 @@ def _download_with_selector(
                         "video_play_count"
                     ] = instagram_play_count
 
-                valid_entries.append(
-                    metadata_entry
-                )    
+                    metadata_entry[
+                        "play_count"
+                    ] = instagram_play_count
+
+                    logger.info(
+                        "Instagram final view count: "
+                        "id=%s count=%s",
+                        metadata_entry.get(
+                            "id"
+                        ),
+                        instagram_play_count,
+                    )
+
+                else:
+
+                    logger.warning(
+                        "Instagram view count could not "
+                        "be recovered: id=%s",
+                        metadata_entry.get(
+                            "id"
+                        ),
+                    )
+
+        # IMPORTANT:
+        # Always append the entry, regardless of whether the
+        # Instagram fallback succeeded.
+        valid_entries.append(
+            metadata_entry
+        )
 
         if not filepaths:
             raise Exception(
