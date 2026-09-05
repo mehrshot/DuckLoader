@@ -570,6 +570,8 @@ def _build_caption(
     for view_key in (
         "view_count",
         "video_view_count",
+        "video_play_count",
+        "play_count",
     ):
         value = entry.get(view_key)
 

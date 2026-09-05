@@ -27,6 +27,8 @@ import subprocess
 import threading
 import time
 import uuid
+import urllib.parse
+import urllib.request
 
 import yt_dlp
 
@@ -402,6 +404,170 @@ def _get_instagram_view_count(*objects):
 
         if found is not None:
             return found
+
+    return None
+
+def _instagram_clip_play_count(
+    ydl,
+    entry: dict,
+) -> int | None:
+    """
+    Fetch the current Instagram Reel play count from Instagram's
+    Clips GraphQL connection when the normal yt-dlp metadata does
+    not contain a usable view count.
+
+    This mirrors the fallback currently used by Instaloader.
+
+    Instagram's normal post metadata can contain neither
+    `view_count` nor `video_view_count` for public Reels, while
+    the clips connection can still expose `play_count`.
+    """
+
+    if not isinstance(entry, dict):
+        return None
+
+    extractor = str(
+        entry.get("extractor_key")
+        or entry.get("extractor")
+        or ""
+    ).lower()
+
+    if "instagram" not in extractor:
+        return None
+
+    # We only want to perform this extra request for videos/Reels.
+    is_video = (
+        entry.get("vcodec") not in (None, "none")
+        or entry.get("is_video") is True
+        or entry.get("video_url")
+        or entry.get("duration")
+    )
+
+    if not is_video:
+        return None
+
+    shortcode = (
+        entry.get("id")
+        or entry.get("shortcode")
+    )
+
+    if not shortcode:
+        return None
+
+    user_id = (
+        entry.get("uploader_id")
+        or entry.get("channel_id")
+    )
+
+    if not user_id:
+        return None
+
+    try:
+        # Instagram's current Clips connection GraphQL document.
+        doc_id = "27234427476213202"
+
+        variables = {
+            "data": {
+                "include_feed_video": True,
+                "page_size": 12,
+                "target_user_id": str(user_id),
+            }
+        }
+
+        response = ydl._opener.open(
+            urllib.request.Request(
+                "https://www.instagram.com/api/graphql",
+                data=urllib.parse.urlencode(
+                    {
+                        "doc_id": doc_id,
+                        "variables": json.dumps(
+                            variables,
+                            separators=(",", ":"),
+                        ),
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "User-Agent": (
+                        entry.get("user_agent")
+                        or (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/151.0 Safari/537.36"
+                        )
+                    ),
+                    "Accept": "application/json",
+                    "Content-Type": (
+                        "application/x-www-form-urlencoded"
+                    ),
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": "https://www.instagram.com/",
+                },
+            )
+        )
+
+        payload = json.loads(
+            response.read().decode("utf-8")
+        )
+
+        clips_connection = (
+            (payload.get("data") or {})
+            .get(
+                "xdt_api__v1__clips__user__connection_v2"
+            )
+            or {}
+        )
+
+        for edge in (
+            clips_connection.get("edges")
+            or []
+        ):
+            media = (
+                (edge.get("node") or {})
+                .get("media")
+                or {}
+            )
+
+            if str(
+                media.get("code")
+                or ""
+            ) != str(shortcode):
+                continue
+
+            play_count = media.get(
+                "play_count"
+            )
+
+            if play_count is None:
+                continue
+
+            try:
+                play_count = int(
+                    play_count
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if play_count > 0:
+                logger.info(
+                    "Instagram Reel play count recovered: "
+                    "shortcode=%s user_id=%s count=%s",
+                    shortcode,
+                    user_id,
+                    play_count,
+                )
+
+                return play_count
+
+    except Exception as e:
+        logger.debug(
+            "Instagram Reel play-count fallback failed "
+            "for %s: %s",
+            shortcode,
+            e,
+        )
 
     return None
 
@@ -1208,43 +1374,87 @@ def _download_with_selector(
                 raise FileTooLargeError(
                     format_size(actual_size)
                 )
-            filepaths.append(path)
+        filepaths.append(path)
 
-# Preserve the original Instagram metadata as well as the
-# processed yt-dlp metadata.
-#
-# This is important because Instagram may expose the Reel count
-# in the raw response as `video_view_count`, while the processed
-# result may only contain the normalized `view_count` field.
-            metadata_entry = dict(
-                raw_entry or {}
+# -----------------------------------------------------------
+# Merge the raw Instagram metadata with the processed
+# yt-dlp metadata.
+# -----------------------------------------------------------
+
+        metadata_entry = dict(
+            raw_entry or {}
+        )
+
+        metadata_entry.update(
+            processed or {}
+        )
+
+        extractor_name = str(
+            metadata_entry.get("extractor_key")
+            or metadata_entry.get("extractor")
+            or raw_entry.get("extractor_key")
+            or raw_entry.get("extractor")
+            or ""
+        ).lower()
+
+# -----------------------------------------------------------
+# Instagram statistics
+# -----------------------------------------------------------
+        if "instagram" in extractor_name:
+
+            logger.info(
+                "Instagram metadata before view-count recovery | "
+                "id=%s extractor=%s view_count=%r "
+                "video_view_count=%r uploader_id=%r channel_id=%r",
+                metadata_entry.get("id"),
+                extractor_name,
+                metadata_entry.get("view_count"),
+                metadata_entry.get("video_view_count"),
+                metadata_entry.get("uploader_id"),
+                metadata_entry.get("channel_id"),
             )
 
-            metadata_entry.update(
-                processed or {}
-            )
+    # First try the normal yt-dlp/Instagram fields.
+            instagram_views = _get_instagram_view_count(
+                processed,
+                raw_entry,
+                info_raw,
+                 )
 
-            if "instagram" in (
-                str(
-                    metadata_entry.get("extractor_key")
-                    or metadata_entry.get("extractor")
-                    or raw_entry.get("extractor_key")
-                    or raw_entry.get("extractor")
-                    or ""
-                ).lower()
-            ):
-                instagram_views = _get_instagram_view_count(
-                    processed,
-                    raw_entry,
-                    info_raw,
+            if instagram_views is not None:
+                metadata_entry["view_count"] = (
+                    instagram_views
                 )
 
-                if instagram_views is not None:
-                    metadata_entry["view_count"] = instagram_views
+            else:
+        # ---------------------------------------------------
+        # Instagram can omit view_count/video_view_count for
+        # public Reels. Use the current Clips connection
+        # fallback to recover play_count.
+        # ---------------------------------------------------
+                instagram_play_count = (
+                    _instagram_clip_play_count(
+                        ydl,
+                        metadata_entry,
+                    )
+                )
 
-            valid_entries.append(
-                metadata_entry
-            )
+                if instagram_play_count is not None:
+                    metadata_entry[
+                        "view_count"
+                    ] = instagram_play_count
+
+                    metadata_entry[
+                        "video_view_count"
+                    ] = instagram_play_count
+
+                    metadata_entry[
+                        "video_play_count"
+                    ] = instagram_play_count
+
+                valid_entries.append(
+                    metadata_entry
+                )    
 
         if not filepaths:
             raise Exception(
