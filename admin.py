@@ -35,7 +35,6 @@ def has_pending_action(user_id) -> bool:
 
 
 # --- admin panel (shown to the owner instead of the normal /settings menu) ---
-
 def _panel_markup(t):
     m = InlineKeyboardMarkup(
         row_width=2
@@ -72,6 +71,13 @@ def _panel_markup(t):
             t["adm_errors"],
             callback_data="adm_menu_errors",
         ),
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["adm_duck"],
+            callback_data="adm_menu_duck",
+        )
     )
 
     m.add(
@@ -119,6 +125,48 @@ def _users_markup(t) -> InlineKeyboardMarkup:
     m.add(InlineKeyboardButton(t['back'], callback_data='adm_menu_main'))
     return m
 
+def _duck_markup(t) -> InlineKeyboardMarkup:
+    m = InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["adm_duck_start"],
+            callback_data="adm_duck_set_start",
+        ),
+        InlineKeyboardButton(
+            t["adm_duck_downloading"],
+            callback_data="adm_duck_set_downloading",
+        ),
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["adm_duck_failed"],
+            callback_data="adm_duck_set_failed",
+        ),
+        InlineKeyboardButton(
+            t["adm_duck_complete"],
+            callback_data="adm_duck_set_complete",
+        ),
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["adm_duck_clear_all"],
+            callback_data="adm_duck_clear_all",
+        )
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["back"],
+            callback_data="adm_menu_main",
+        )
+    )
+
+    return m
 
 def _back_markup(target, t) -> InlineKeyboardMarkup:
     m = InlineKeyboardMarkup()
@@ -334,8 +382,21 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
         elif data == 'adm_menu_users':
             edit(t['adm_users_title'], _users_markup(t))
         elif data == 'adm_menu_mysettings':
-            text, markup = my_settings_view(chat_id_int)
-            edit(text, markup)
+            text, markup = my_settings_view(
+                chat_id_int
+            )
+
+            markup.add(
+                InlineKeyboardButton(
+                    t["back"],
+                    callback_data="adm_menu_main",
+                )
+            )
+
+            edit(
+                text,
+                markup,
+            )
         elif data == 'adm_menu_stats':
             stats = store.load_stats()
             users = store.load_known_users()
@@ -344,6 +405,38 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 lines.append(f"  • {p}: {c}")
             lines.append(f"❌ {t['stats_errors']}: {stats.get('errors', 0)}")
             edit("\n".join(lines), _back_markup('adm_menu_main', t))
+        elif data == "adm_menu_duck":
+            reactions = (
+                store.load_duck_reactions()
+            )
+
+            def reaction_status(event):
+                return (
+                    "✅"
+                    if event in reactions
+                    else "❌"
+                )
+
+            text = (
+                t["adm_duck_title"]
+                + "\n\n"
+                + f"{reaction_status('start')} "
+                + t["adm_duck_start"]
+                + "\n"
+                + f"{reaction_status('downloading')} "
+                + t["adm_duck_downloading"]
+                + "\n"
+                + f"{reaction_status('failed')} "
+                + t["adm_duck_failed"]
+                + "\n"
+                + f"{reaction_status('complete')} "
+                + t["adm_duck_complete"]
+            )
+
+            edit_plain(
+                text,
+                _duck_markup(t),
+            )
         elif data == "adm_menu_errors":
 
             errors = (
@@ -420,6 +513,62 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             channels = ads.load_sponsor_channels()
             text = "\n".join(f"• {c['username']} — {c['name']}" for c in channels) if channels else t['sponsors_empty']
             edit(text, _back_markup('adm_menu_ads', t))
+        elif data.startswith("adm_duck_set_"):
+            event = data.split(
+                "adm_duck_set_",
+                1,
+            )[1]
+
+            if event not in {
+                "start",
+                "downloading",
+                "failed",
+                "complete",
+            }:
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid duck reaction.",
+                    show_alert=True,
+                )
+                return
+
+            _pending_action[user_id] = (
+                f"duck_{event}"
+            )
+
+            bot.send_message(
+                chat_id_int,
+                t[
+                    f"adm_ask_duck_{event}"
+                ],
+                reply_markup=ForceReply(
+                    selective=True
+                ),
+            )
+
+        elif data == "adm_duck_clear_all":
+            store.clear_all_duck_reactions()
+
+            reactions_text = (
+                t["adm_duck_title"]
+                + "\n\n"
+                + "❌ "
+                + t["adm_duck_start"]
+                + "\n"
+                + "❌ "
+                + t["adm_duck_downloading"]
+                + "\n"
+                + "❌ "
+                + t["adm_duck_failed"]
+                + "\n"
+                + "❌ "
+                + t["adm_duck_complete"]
+            )
+
+            edit_plain(
+                reactions_text,
+                _duck_markup(t),
+            )
         elif data.startswith('adm_lock_'):
             key = data.split('adm_lock_', 1)[1]
             flags[key] = not flags.get(key, True)
@@ -437,57 +586,218 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
 
         bot.answer_callback_query(call.id)
 
-    @bot.message_handler(func=lambda msg: msg.from_user is not None and msg.from_user.id in _pending_action)
+    @bot.message_handler(
+        func=lambda msg:
+            msg.from_user is not None
+            and msg.from_user.id in _pending_action
+    )
     def handle_admin_reply(message):
         user_id = message.from_user.id
-        action = _pending_action.pop(user_id, None)
-        if not action or not is_owner(user_id):
+
+        action = _pending_action.pop(
+            user_id,
+            None,
+        )
+
+        if not action or not is_owner(
+            user_id
+        ):
             return
 
-        t = texts_for(message.chat.id)
-        text = (message.text or "").strip()
+        t = texts_for(
+            message.chat.id
+        )
 
-        if text.startswith('/'):
-            bot.reply_to(message, t['adm_cancelled'])
+        if action.startswith("duck_"):
+            event = action.split(
+                "duck_",
+                1,
+            )[1]
+
+            if message.sticker:
+                media_type = "sticker"
+                file_id = (
+                    message.sticker.file_id
+                )
+
+            elif message.animation:
+                media_type = "animation"
+                file_id = (
+                    message.animation.file_id
+                )
+
+            else:
+                _pending_action[
+                    user_id
+                ] = action
+
+                bot.reply_to(
+                    message,
+                    t[
+                        "adm_duck_invalid_media"
+                    ],
+                )
+                return
+
+            store.save_duck_reaction(
+                event,
+                media_type,
+                file_id,
+            )
+
+            event_names = {
+                "start": t["adm_duck_start"],
+                "downloading": t["adm_duck_downloading"],
+                "failed": t["adm_duck_failed"],
+                "complete": t["adm_duck_complete"],
+            }
+
+            bot.reply_to(
+                message,
+                t["adm_duck_saved"].format(
+                    event=event_names.get(
+                        event,
+                        event,
+                    )
+                ),
+            )
             return
 
-        if action == 'setad':
-            ads.save_ad_message(text)
-            bot.reply_to(message, t['setad_done'] if text else t['setad_cleared'])
+        text = (
+            message.text
+            or ""
+        ).strip()
 
-        elif action == 'addsponsor':
-            parts = text.split(maxsplit=1)
+        if text.startswith("/"):
+            bot.reply_to(
+                message,
+                t["adm_cancelled"],
+            )
+            return
+
+        if action == "setad":
+            ads.save_ad_message(
+                text
+            )
+
+            bot.reply_to(
+                message,
+                (
+                    t["setad_done"]
+                    if text
+                    else t["setad_cleared"]
+                ),
+            )
+
+        elif action == "addsponsor":
+            parts = text.split(
+                maxsplit=1
+            )
+
             if len(parts) < 2:
-                bot.reply_to(message, t['addsponsor_usage'])
+                bot.reply_to(
+                    message,
+                    t["addsponsor_usage"],
+                )
             else:
-                ads.add_sponsor_channel(parts[0], parts[1])
-                bot.reply_to(message, t['addsponsor_done'].format(name=parts[1]))
-                bot.reply_to(message, t['addsponsor_reminder'])
+                ads.add_sponsor_channel(
+                    parts[0],
+                    parts[1],
+                )
 
-        elif action == 'removesponsor':
-            found = ads.remove_sponsor_channel(text)
-            bot.reply_to(message, t['removesponsor_done'] if found else t['removesponsor_not_found'])
+                bot.reply_to(
+                    message,
+                    t["addsponsor_done"].format(
+                        name=parts[1]
+                    ),
+                )
 
-        elif action == 'ban':
+                bot.reply_to(
+                    message,
+                    t["addsponsor_reminder"],
+                )
+
+        elif action == "removesponsor":
+            found = (
+                ads.remove_sponsor_channel(
+                    text
+                )
+            )
+
+            bot.reply_to(
+                message,
+                (
+                    t["removesponsor_done"]
+                    if found
+                    else t["removesponsor_not_found"]
+                ),
+            )
+
+        elif action == "ban":
             if text.isdigit():
-                store.ban_user(int(text))
-                bot.reply_to(message, t['ban_done'].format(id=text))
-            else:
-                bot.reply_to(message, t['ban_usage'].format(cmd='ban'))
+                store.ban_user(
+                    int(text)
+                )
 
-        elif action == 'unban':
-            if text.isdigit() and store.unban_user(int(text)):
-                bot.reply_to(message, t['unban_done'].format(id=text))
+                bot.reply_to(
+                    message,
+                    t["ban_done"].format(
+                        id=text
+                    ),
+                )
             else:
-                bot.reply_to(message, t['unban_not_found'])
+                bot.reply_to(
+                    message,
+                    t["ban_usage"].format(
+                        cmd="ban"
+                    ),
+                )
 
-        elif action == 'broadcast':
-            sent, failed = 0, 0
-            for chat_id in store.load_known_users():
+        elif action == "unban":
+            if (
+                text.isdigit()
+                and store.unban_user(
+                    int(text)
+                )
+            ):
+                bot.reply_to(
+                    message,
+                    t["unban_done"].format(
+                        id=text
+                    ),
+                )
+            else:
+                bot.reply_to(
+                    message,
+                    t["unban_not_found"],
+                )
+
+        elif action == "broadcast":
+            sent = 0
+            failed = 0
+
+            for chat_id in (
+                store.load_known_users()
+            ):
                 try:
-                    bot.send_message(chat_id, text)
+                    bot.send_message(
+                        chat_id,
+                        text,
+                    )
                     sent += 1
                 except Exception:
                     failed += 1
-                time.sleep(0.05)
-            bot.reply_to(message, t['broadcast_done'].format(sent=sent, failed=failed))
+
+                time.sleep(
+                    0.05
+                )
+
+            bot.reply_to(
+                message,
+                t[
+                    "broadcast_done"
+                ].format(
+                    sent=sent,
+                    failed=failed,
+                ),
+            )
