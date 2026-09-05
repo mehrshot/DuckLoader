@@ -126,29 +126,59 @@ def _users_markup(t) -> InlineKeyboardMarkup:
     return m
 
 def _duck_markup(t) -> InlineKeyboardMarkup:
+    reactions = store.load_duck_reactions()
+
+    start_count = len(
+        reactions.get(
+            "start",
+            [],
+        )
+    )
+
+    downloading_count = len(
+        reactions.get(
+            "downloading",
+            [],
+        )
+    )
+
+    failed_count = len(
+        reactions.get(
+            "failed",
+            [],
+        )
+    )
+
+    complete_count = len(
+        reactions.get(
+            "complete",
+            [],
+        )
+    )
+
     m = InlineKeyboardMarkup(
         row_width=2
     )
 
     m.add(
         InlineKeyboardButton(
-            t["adm_duck_start"],
-            callback_data="adm_duck_set_start",
+            f"{t['adm_duck_start']} ({start_count})",
+            callback_data="adm_duck_category_start",
         ),
         InlineKeyboardButton(
-            t["adm_duck_downloading"],
-            callback_data="adm_duck_set_downloading",
+            f"{t['adm_duck_downloading']} ({downloading_count})",
+            callback_data="adm_duck_category_downloading",
         ),
     )
 
     m.add(
         InlineKeyboardButton(
-            t["adm_duck_failed"],
-            callback_data="adm_duck_set_failed",
+            f"{t['adm_duck_failed']} ({failed_count})",
+            callback_data="adm_duck_category_failed",
         ),
         InlineKeyboardButton(
-            t["adm_duck_complete"],
-            callback_data="adm_duck_set_complete",
+            f"{t['adm_duck_complete']} ({complete_count})",
+            callback_data="adm_duck_category_complete",
         ),
     )
 
@@ -167,6 +197,47 @@ def _duck_markup(t) -> InlineKeyboardMarkup:
     )
 
     return m
+
+def _duck_category_markup(
+    event,
+    t,
+) -> InlineKeyboardMarkup:
+    reactions = store.load_duck_reactions()
+
+    count = len(
+        reactions.get(
+            event,
+            [],
+        )
+    )
+
+    m = InlineKeyboardMarkup(
+        row_width=1
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            f"➕ Add ({event})",
+            callback_data=f"adm_duck_add_{event}",
+        )
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            f"🗑 Clear ({count})",
+            callback_data=f"adm_duck_clear_{event}",
+        )
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["back"],
+            callback_data="adm_menu_duck",
+        )
+    )
+
+    return m
+
 
 def _back_markup(target, t) -> InlineKeyboardMarkup:
     m = InlineKeyboardMarkup()
@@ -437,6 +508,236 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 text,
                 _duck_markup(t),
             )
+
+        elif data == "adm_menu_duck":
+            reactions = (
+                store.load_duck_reactions()
+            )
+
+            text = (
+                t["adm_duck_title"]
+                + "\n\n"
+                + f"{t['adm_duck_start']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "start",
+                            [],
+                        )
+                    )
+                )
+                + "\n"
+                + f"{t['adm_duck_downloading']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "downloading",
+                            [],
+                        )
+                    )
+                )
+                + "\n"
+                + f"{t['adm_duck_failed']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "failed",
+                            [],
+                        )
+                    )
+                )
+                + "\n"
+                + f"{t['adm_duck_complete']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "complete",
+                            [],
+                        )
+                    )
+                )
+            )
+
+            edit_plain(
+                text,
+                _duck_markup(t),
+            )
+
+        elif data.startswith(
+            "adm_duck_category_"
+        ):
+            event = data.split(
+                "adm_duck_category_",
+                1,
+            )[1]
+
+            if event not in {
+                "start",
+                "downloading",
+                "failed",
+                "complete",
+            }:
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid category.",
+                    show_alert=True,
+                )
+                return
+
+            reactions = (
+                store.load_duck_reactions()
+            )
+
+            count = len(
+                reactions.get(
+                    event,
+                    [],
+                )
+            )
+
+            event_name = {
+                "start": t["adm_duck_start"],
+                "downloading": t["adm_duck_downloading"],
+                "failed": t["adm_duck_failed"],
+                "complete": t["adm_duck_complete"],
+            }[event]
+
+            text = (
+                f"🦆 {event_name}\n\n"
+                f"Configured reactions: {count}\n\n"
+                "Send one or more reactions by using "
+                "Add. You can repeat Add as many times as you want."
+            )
+
+            edit_plain(
+                text,
+                _duck_category_markup(
+                    event,
+                    t,
+                ),
+            )
+
+        elif data.startswith(
+            "adm_duck_add_"
+        ):
+            event = data.split(
+                "adm_duck_add_",
+                1,
+            )[1]
+
+            if event not in {
+                "start",
+                "downloading",
+                "failed",
+                "complete",
+            }:
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid category.",
+                    show_alert=True,
+                )
+                return
+
+            _pending_action[user_id] = (
+                f"duck_{event}"
+            )
+
+            bot.send_message(
+                chat_id_int,
+                t[
+                    f"adm_ask_duck_{event}"
+                ],
+                reply_markup=ForceReply(
+                    selective=True
+                ),
+            )
+
+        elif data.startswith(
+            "adm_duck_clear_"
+        ):
+            event = data.split(
+                "adm_duck_clear_",
+                1,
+            )[1]
+
+            if event not in {
+                "start",
+                "downloading",
+                "failed",
+                "complete",
+            }:
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid category.",
+                    show_alert=True,
+                )
+                return
+
+            store.clear_duck_reaction(
+                event
+            )
+
+            reactions = (
+                store.load_duck_reactions()
+            )
+
+            text = (
+                t["adm_duck_title"]
+                + "\n\n"
+                + f"{t['adm_duck_start']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "start",
+                            [],
+                        )
+                    )
+                )
+                + "\n"
+                + f"{t['adm_duck_downloading']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "downloading",
+                            [],
+                        )
+                    )
+                )
+                + "\n"
+                + f"{t['adm_duck_failed']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "failed",
+                            [],
+                        )
+                    )
+                )
+                + "\n"
+                + f"{t['adm_duck_complete']}: "
+                + str(
+                    len(
+                        reactions.get(
+                            "complete",
+                            [],
+                        )
+                    )
+                )
+            )
+
+            edit_plain(
+                text,
+                _duck_markup(t),
+            )
+
+        elif data == "adm_duck_clear_all":
+            store.clear_all_duck_reactions()
+
+            edit_plain(
+                t["adm_duck_all_cleared"],
+                _duck_markup(t),
+            )
+            
         elif data == "adm_menu_errors":
 
             errors = (
@@ -589,7 +890,12 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
     @bot.message_handler(
         func=lambda msg:
             msg.from_user is not None
-            and msg.from_user.id in _pending_action
+            and msg.from_user.id in _pending_action,
+        content_types=[
+            "text",
+            "sticker",
+            "animation",
+        ],
     )
     def handle_admin_reply(message):
         user_id = message.from_user.id
@@ -608,11 +914,29 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             message.chat.id
         )
 
-        if action.startswith("duck_"):
+        # -----------------------------------------------------------
+        # Duck reaction upload
+        # -----------------------------------------------------------
+
+        if action.startswith(
+            "duck_"
+        ):
             event = action.split(
                 "duck_",
                 1,
             )[1]
+
+            if event not in {
+                "start",
+                "downloading",
+                "failed",
+                "complete",
+            }:
+                bot.reply_to(
+                    message,
+                    "Invalid duck reaction category.",
+                )
+                return
 
             if message.sticker:
                 media_type = "sticker"
@@ -645,6 +969,17 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 file_id,
             )
 
+            reactions = (
+                store.load_duck_reactions()
+            )
+
+            count = len(
+                reactions.get(
+                    event,
+                    [],
+                )
+            )
+
             event_names = {
                 "start": t["adm_duck_start"],
                 "downloading": t["adm_duck_downloading"],
@@ -659,9 +994,15 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                         event,
                         event,
                     )
-                ),
+                )
+                + f"\n📦 Total: {count}",
             )
+
             return
+
+        # -----------------------------------------------------------
+        # Existing text-based admin actions
+        # -----------------------------------------------------------
 
         text = (
             message.text
@@ -718,10 +1059,8 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 )
 
         elif action == "removesponsor":
-            found = (
-                ads.remove_sponsor_channel(
-                    text
-                )
+            found = ads.remove_sponsor_channel(
+                text
             )
 
             bot.reply_to(
@@ -794,9 +1133,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
 
             bot.reply_to(
                 message,
-                t[
-                    "broadcast_done"
-                ].format(
+                t["broadcast_done"].format(
                     sent=sent,
                     failed=failed,
                 ),

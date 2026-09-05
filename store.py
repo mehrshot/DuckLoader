@@ -226,21 +226,28 @@ def load_error_log() -> list:
 
 def load_duck_reactions() -> dict:
     """
-    Return the configured DuckLoader reaction media.
+    Load DuckLoader reactions.
 
-    Each entry looks like:
-
-        {
-            "type": "sticker",
-            "file_id": "CAAC..."
-        }
-
-    or:
+    New format:
 
         {
-            "type": "animation",
-            "file_id": "CgAC..."
+            "start": [
+                {
+                    "type": "sticker",
+                    "file_id": "..."
+                },
+                {
+                    "type": "animation",
+                    "file_id": "..."
+                }
+            ],
+            "downloading": [],
+            "failed": [],
+            "complete": []
         }
+
+    This function also accepts the old one-reaction format and
+    automatically converts it to the new list format in memory.
     """
 
     raw = _load(
@@ -249,9 +256,64 @@ def load_duck_reactions() -> dict:
     )
 
     if not isinstance(raw, dict):
-        return {}
+        raw = {}
 
-    return raw
+    normalized = {}
+
+    for event in DUCK_REACTION_KEYS:
+        value = raw.get(
+            event,
+            [],
+        )
+
+        if isinstance(value, dict):
+            if (
+                value.get("type")
+                and value.get("file_id")
+            ):
+                normalized[event] = [
+                    {
+                        "type": value["type"],
+                        "file_id": value["file_id"],
+                    }
+                ]
+            else:
+                normalized[event] = []
+
+        elif isinstance(value, list):
+            cleaned = []
+
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+
+                media_type = item.get(
+                    "type"
+                )
+                file_id = item.get(
+                    "file_id"
+                )
+
+                if (
+                    media_type in {
+                        "sticker",
+                        "animation",
+                    }
+                    and file_id
+                ):
+                    cleaned.append(
+                        {
+                            "type": media_type,
+                            "file_id": file_id,
+                        }
+                    )
+
+            normalized[event] = cleaned
+
+        else:
+            normalized[event] = []
+
+    return normalized
 
 
 def save_duck_reaction(
@@ -260,11 +322,9 @@ def save_duck_reaction(
     file_id: str,
 ) -> None:
     """
-    Persist one DuckLoader reaction.
+    Append one reaction to a category.
 
-    media_type:
-        sticker
-        animation
+    Multiple reactions are allowed for every category.
     """
 
     if event not in DUCK_REACTION_KEYS:
@@ -282,10 +342,17 @@ def save_duck_reaction(
 
     reactions = load_duck_reactions()
 
-    reactions[event] = {
-        "type": media_type,
-        "file_id": file_id,
-    }
+    reactions.setdefault(
+        event,
+        [],
+    )
+
+    reactions[event].append(
+        {
+            "type": media_type,
+            "file_id": file_id,
+        }
+    )
 
     _save(
         DUCK_REACTIONS_FILE,
@@ -297,7 +364,7 @@ def clear_duck_reaction(
     event: str,
 ) -> None:
     """
-    Remove one configured DuckLoader reaction.
+    Remove every reaction from one category.
     """
 
     if event not in DUCK_REACTION_KEYS:
@@ -305,10 +372,7 @@ def clear_duck_reaction(
 
     reactions = load_duck_reactions()
 
-    reactions.pop(
-        event,
-        None,
-    )
+    reactions[event] = []
 
     _save(
         DUCK_REACTIONS_FILE,
@@ -318,10 +382,15 @@ def clear_duck_reaction(
 
 def clear_all_duck_reactions() -> None:
     """
-    Remove all DuckLoader reactions.
+    Remove every configured DuckLoader reaction.
     """
+
+    reactions = {
+        event: []
+        for event in DUCK_REACTION_KEYS
+    }
 
     _save(
         DUCK_REACTIONS_FILE,
-        {},
+        reactions,
     )
