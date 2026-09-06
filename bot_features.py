@@ -164,13 +164,10 @@ TEXTS = {
         'ad_channel_prompt': "📣 لطفاً آیدی، یوزرنیم یا لینک کانالی که می‌خواهید تبلیغ کنید را ارسال کنید:",
         'ad_display_name_prompt': "🏷 نام نمایشی موردنظرتان برای تبلیغ را وارد کنید:",
         'ad_type_prompt': "📌 نوع تبلیغ را انتخاب کنید:",
-        'ad_duration_prompt': "⏱ مدت تبلیغ یا تعداد نمایش موردنظر را وارد کنید:",
-        'ad_notes_prompt': "📝 اگر توضیح یا درخواست دیگری دارید بنویسید.\nاگر ندارید، «ندارم» را ارسال کنید.",
-        'ad_cancel': "❌ لغو",
-        'ad_type_text': "📝 متنی",
-        'ad_type_image': "🖼 تصویری",
-        'ad_type_video': "🎬 ویدیویی",
-        'ad_type_post': "🔗 پست / لینک",
+        'ad_type_sponsor_channel':
+            "📢 کانال حامی — کاربر برای استفاده از ربات باید عضو کانال شما باشد",
+        'ad_type_post_download':
+            "📣 تبلیغ بعد از هر دانلود — تبلیغ شما بعد از محتوای دانلودشده نمایش داده می‌شود",
         'ad_summary_title': "📋 خلاصه درخواست تبلیغات",
         'ad_summary_channel': "📣 کانال",
         'ad_summary_display_name': "🏷 نام نمایشی",
@@ -253,6 +250,12 @@ TEXTS = {
         'adm_ad_requests': "📨 درخواست‌های تبلیغات",
         'adm_ad_requests_title': "📨 درخواست‌های تبلیغات",
         'adm_ad_requests_empty': "✅ هیچ درخواست تبلیغاتی در انتظار بررسی نیست.",
+        'ad_lang_en': "🇺🇸 English",
+        'ad_lang_fa': "🇮🇷 فارسی",
+        'ad_type_sponsor_channel': "📢 کانال حامی",
+        'ad_type_post_download': "📣 تبلیغ بعد از هر دانلود",
+        'ad_lang_en': "🇺🇸 English",
+        'ad_lang_fa': "🇮🇷 فارسی",
     },
     'en': {
         'welcome': "🦆 **Welcome to DuckLoader!**\n\nI’m your little download duck. Send me a link and I’ll waddle off, fetch it, and bring it back to you. ⚡\n\nI support Instagram, SoundCloud, Spotify, and YouTube.\n\nChoose your preferred quality in /settings.\n\n🦆 You bring the link. I’ll bring the media.",
@@ -317,13 +320,10 @@ TEXTS = {
         'ad_channel_prompt': "📣 Send the channel ID, username, or link you want to advertise:",
         'ad_display_name_prompt': "🏷 Enter the display name you want for the advertisement:",
         'ad_type_prompt': "📌 Choose the advertisement type:",
-        'ad_duration_prompt': "⏱ Enter the desired duration or number of displays:",
-        'ad_notes_prompt': "📝 Send any additional notes or requirements.\nIf you have none, send \"none\".",
-        'ad_cancel': "❌ Cancel",
-        'ad_type_text': "📝 Text",
-        'ad_type_image': "🖼 Image",
-        'ad_type_video': "🎬 Video",
-        'ad_type_post': "🔗 Post / Link",
+        'ad_type_sponsor_channel':
+            "📢 Sponsor Channel — users must join your channel before downloading",
+        'ad_type_post_download':
+            "📣 Post-Download Ad — your advertisement is shown after every download",
         'ad_summary_title': "📋 Advertisement Request Summary",
         'ad_summary_channel': "📣 Channel",
         'ad_summary_display_name': "🏷 Display Name",
@@ -406,13 +406,49 @@ TEXTS = {
         'adm_ad_requests': "📨 Ad Requests",
         'adm_ad_requests_title': "📨 Ad Requests",
         'adm_ad_requests_empty': "✅ There are no advertising requests waiting for review.",
+        'ad_lang_en': "🇺🇸 English",
+        'ad_lang_fa': "🇮🇷 فارسی",
+        'ad_type_sponsor_channel': "📢 Sponsor Channel",
+        'ad_type_post_download': "📣 Ad After Every Download",
+        'ad_lang_en': "🇺🇸 English",
+        'ad_lang_fa': "🇮🇷 فارسی",
     }
 }
 
+def _ad_lang_button(request):
+    lang = request.get("form_lang", "fa")
+
+    if lang == "fa":
+        return InlineKeyboardButton(
+            "🇺🇸 English",
+            callback_data="ad_lang_en",
+        )
+
+    return InlineKeyboardButton(
+        "🇮🇷 فارسی",
+        callback_data="ad_lang_fa",
+    )
+
+def _ad_texts(request):
+    return TEXTS.get(
+        request.get("form_lang", "fa"),
+        TEXTS["fa"],
+    )
 
 def _texts_for(chat_id) -> dict:
     user = store.get_user(user_settings, chat_id)
     return TEXTS[user['lang']]
+
+def _ad_texts(request) -> dict:
+    lang = request.get(
+        "form_lang",
+        "fa",
+    )
+
+    return TEXTS.get(
+        lang,
+        TEXTS["fa"],
+    )
 
 def _build_caption(
     entry: dict,
@@ -871,45 +907,37 @@ def register_features(bot):
 
         return markup
 
-    def _ad_cancel_markup():
+    def _ad_cancel_markup(t):
+        markup = InlineKeyboardMarkup(row_width=1)
+
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_cancel"],
+                callback_data="ad_cancel",
+            )
+        )
+
+        return markup
+
+    def _ad_type_markup(request):
+        t = _ad_texts(request)
+
         markup = InlineKeyboardMarkup(
             row_width=1
         )
 
         markup.add(
             InlineKeyboardButton(
-                t["ad_cancel"],
-                callback_data="ad_cancel",
+                t["ad_type_sponsor_channel"],
+                callback_data="ad_type_sponsor_channel",
             )
         )
 
-        return markup
-
-    def _ad_type_markup(t):
-        markup = InlineKeyboardMarkup(
-            row_width=2
-        )
-
         markup.add(
             InlineKeyboardButton(
-                t["ad_type_text"],
-                callback_data="ad_type_text",
-            ),
-            InlineKeyboardButton(
-                t["ad_type_image"],
-                callback_data="ad_type_image",
-            ),
-        )
-
-        markup.add(
-            InlineKeyboardButton(
-                t["ad_type_video"],
-                callback_data="ad_type_video",
-            ),
-            InlineKeyboardButton(
-                t["ad_type_post"],
-                callback_data="ad_type_post",
-            ),
+                t["ad_type_post_download"],
+                callback_data="ad_type_post_download",
+            )
         )
 
         markup.add(
@@ -919,12 +947,34 @@ def register_features(bot):
             )
         )
 
-        return markup
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_lang_en"]
+                if request.get("form_lang", "fa") == "fa"
+                else t["ad_lang_fa"],
+                callback_data=(
+                    "ad_lang_en"
+                    if request.get("form_lang", "fa") == "fa"
+                    else "ad_lang_fa"
+                ),
+            )
+        )
 
+        return markup
     def _format_ad_summary(
         request,
         t,
     ):
+        type_labels = {
+            "sponsor_channel": t["ad_type_sponsor_channel"],
+            "post_download": t["ad_type_post_download"],
+        }
+
+        display_type = type_labels.get(
+            request.get("ad_type"),
+            request.get("ad_type", "—"),
+        )
+
         return (
             f"{t['ad_summary_title']}\n\n"
             f"{t['ad_summary_channel']}: "
@@ -932,7 +982,7 @@ def register_features(bot):
             f"{t['ad_summary_display_name']}: "
             f"{request.get('display_name', '')}\n"
             f"{t['ad_summary_type']}: "
-            f"{request.get('ad_type', '')}\n"
+            f"{display_type}\n"
             f"{t['ad_summary_duration']}: "
             f"{request.get('duration', '')}\n"
             f"{t['ad_summary_notes']}: "
@@ -940,10 +990,10 @@ def register_features(bot):
             f"{t['ad_confirm_prompt']}"
         )
 
-    def _ad_confirmation_markup(t):
-        markup = InlineKeyboardMarkup(
-            row_width=2
-        )
+    def _ad_confirmation_markup(request):
+        t = _ad_texts(request)
+
+        markup = InlineKeyboardMarkup(row_width=2)
 
         markup.add(
             InlineKeyboardButton(
@@ -963,6 +1013,10 @@ def register_features(bot):
             )
         )
 
+        markup.add(
+            _ad_lang_button(request)
+        )
+
         return markup
 
     def _send_ad_prompt(
@@ -978,35 +1032,35 @@ def register_features(bot):
             bot.send_message(
                 chat_id_int,
                 t["ad_channel_prompt"],
-                reply_markup=_ad_cancel_markup(),
+                reply_markup=_ad_cancel_markup(t),
             )
 
         elif step == "display_name":
             bot.send_message(
                 chat_id_int,
                 t["ad_display_name_prompt"],
-                reply_markup=_ad_cancel_markup(),
+                reply_markup=_ad_cancel_markup(t),
             )
 
         elif step == "type":
             bot.send_message(
                 chat_id_int,
                 t["ad_type_prompt"],
-                reply_markup=_ad_type_markup(t),
+                reply_markup=_ad_type_markup(request),
             )
 
         elif step == "duration":
             bot.send_message(
                 chat_id_int,
                 t["ad_duration_prompt"],
-                reply_markup=_ad_cancel_markup(),
+                reply_markup=_ad_cancel_markup(t),
             )
 
         elif step == "notes":
             bot.send_message(
                 chat_id_int,
                 t["ad_notes_prompt"],
-                reply_markup=_ad_cancel_markup(),
+                reply_markup=_ad_cancel_markup(t),
             )
 
     def _my_settings_view(chat_id):
@@ -1841,6 +1895,49 @@ def register_features(bot):
         t = TEXTS[user['lang']]
         bot.reply_to(message, t['settings_msg'], reply_markup=_settings_markup(user, t), parse_mode="Markdown")
 
+    @bot.callback_query_handler(
+        func=lambda call: call.data in {
+            "ad_lang_en",
+            "ad_lang_fa",
+        }
+    )
+    def handle_ad_language_callback(call):
+        chat_id = call.message.chat.id
+        user_id = call.from_user.id
+
+        request = store.get_user_ad_request(
+            user_id,
+            "draft",
+        )
+
+        if not request:
+            bot.answer_callback_query(
+                call.id,
+                "درخواست پیدا نشد.",
+                show_alert=True,
+            )
+            return
+
+        new_lang = (
+            "en"
+            if call.data == "ad_lang_en"
+            else "fa"
+        )
+
+        request = store.update_ad_request(
+            request["request_id"],
+            form_lang=new_lang,
+        )
+
+        bot.answer_callback_query(call.id)
+
+        if request:
+            _send_ad_prompt(
+                chat_id,
+                request,
+                _ad_texts(request),
+            )
+
     @bot.callback_query_handler(func=lambda call: call.data.startswith('lang_') or call.data.startswith('quality_'))
     def handle_settings_callback(call):
         chat_id = str(call.message.chat.id)
@@ -1867,58 +1964,43 @@ def register_features(bot):
             and msg.text.strip()
             == AD_BUTTON_TEXT
     )
-    def start_ad_request(message):
+
+    def _start_ad_request(message):
         user_id = message.from_user.id
         chat_id_int = message.chat.id
-        chat_id_str = str(
-            message.chat.id
-        )
 
-        if store.is_banned(
-            user_id
-        ):
+        if store.is_banned(user_id):
             return
 
-        if not flags.get(
-            "ad_requests_button",
-            False,
-        ):
+        if not flags.get("ad_requests_button", False):
+            t = TEXTS["fa"]
             bot.send_message(
                 chat_id_int,
-                _texts_for(
-                    chat_id_str
-                )["ad_unavailable"],
+                t["ad_unavailable"],
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
 
-        t = _texts_for(
-            chat_id_str
-        )
-
-        existing_draft = (
-            store.get_user_ad_request(
-                user_id,
-                "draft",
-            )
+        existing_draft = store.get_user_ad_request(
+            user_id,
+            "draft",
         )
 
         if existing_draft:
             _send_ad_prompt(
                 chat_id_int,
                 existing_draft,
-                t,
+                _ad_texts(existing_draft),
             )
             return
 
-        existing_pending = (
-            store.get_user_ad_request(
-                user_id,
-                "pending",
-            )
+        existing_pending = store.get_user_ad_request(
+            user_id,
+            "pending",
         )
 
         if existing_pending:
+            t = _ad_texts(existing_pending)
             bot.send_message(
                 chat_id_int,
                 t["ad_existing_pending"],
@@ -1927,15 +2009,11 @@ def register_features(bot):
             return
 
         telegram_username = (
-            message.from_user.username
-            or ""
+            message.from_user.username or ""
         )
 
         if telegram_username:
-            telegram_username = (
-                "@"
-                + telegram_username
-            )
+            telegram_username = "@" + telegram_username
 
         telegram_name = " ".join(
             part
@@ -1944,23 +2022,20 @@ def register_features(bot):
                 message.from_user.last_name,
             )
             if part
-        ).strip()
+        ).strip() or "—"
 
-        if not telegram_name:
-            telegram_name = "—"
-
-        request = (
-            store.create_ad_request(
-                user_id=user_id,
-                telegram_username=telegram_username,
-                telegram_name=telegram_name,
-            )
+        request = store.create_ad_request(
+            user_id=user_id,
+            telegram_username=telegram_username,
+            telegram_name=telegram_name,
         )
 
         bot.send_message(
             chat_id_int,
-            t["ad_channel_prompt"],
-            reply_markup=_ad_cancel_markup(),
+            TEXTS["fa"]["ad_channel_prompt"],
+            reply_markup=_ad_cancel_markup(
+                TEXTS["fa"]
+            ),
         )
 
     @bot.message_handler(
@@ -2125,20 +2200,12 @@ def register_features(bot):
             )[1]
         )
 
-        type_labels = {
-            "text": t["ad_type_text"],
-            "image": t["ad_type_image"],
-            "video": t["ad_type_video"],
-            "post": t["ad_type_post"],
+        valid_types = {
+            "sponsor_channel",
+            "post_download",
         }
 
-        selected_type = (
-            type_labels.get(
-                type_key
-            )
-        )
-
-        if not selected_type:
+        if type_key not in valid_types:
             bot.answer_callback_query(
                 call.id,
                 "Invalid selection.",
@@ -2149,7 +2216,7 @@ def register_features(bot):
         updated = (
             store.update_ad_request(
                 request["request_id"],
-                ad_type=selected_type,
+                ad_type=type_key,
                 step="duration",
             )
         )

@@ -10,6 +10,7 @@ import json
 import os
 import threading
 import time
+import uuid
 
 SETTINGS_FILE = "user_settings.json"
 FLAGS_FILE = "feature_flags.json"
@@ -125,6 +126,7 @@ def create_ad_request(
             "request_id": request_id,
             "status": "draft",
             "step": "channel",
+            "form_lang": "fa",
             "user_id": user_id,
             "telegram_username": telegram_username,
             "telegram_name": telegram_name,
