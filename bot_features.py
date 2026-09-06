@@ -3256,14 +3256,16 @@ def register_features(bot):
             call.message.chat.id
         )
 
+        chat_id_str = str(
+            chat_id_int
+        )
+
         user_id = (
             call.from_user.id
         )
 
         t = _texts_for(
-            str(
-                chat_id_int
-            )
+            chat_id_str
         )
 
         if store.is_banned(
@@ -3275,7 +3277,7 @@ def register_features(bot):
             return
 
         try:
-            callback_user_id = int(
+            requested_user_id = int(
                 call.data.split(
                     "sponsor_check_",
                     1,
@@ -3292,7 +3294,7 @@ def register_features(bot):
             )
             return
 
-        if callback_user_id != user_id:
+        if requested_user_id != user_id:
             bot.answer_callback_query(
                 call.id,
                 "This button belongs to another user.",
@@ -3300,39 +3302,167 @@ def register_features(bot):
             )
             return
 
-        last_message = (
-            last_link_messages.get(
-                (
-                    chat_id_int,
-                    user_id,
-                )
-            )
-        )
+        current_flags = store.load_flags()
 
-        if not last_message:
-            bot.answer_callback_query(
-                call.id,
-                t.get(
-                    "audio_expired",
-                    "Please send your link again.",
-                ),
-                show_alert=True,
-            )
-            return
-
-        if not _check_sponsor_channel_gate(
-            chat_id_int,
-            user_id,
-            t,
+        if not current_flags.get(
+            "sponsor_channel_gate",
+            True,
         ):
             bot.answer_callback_query(
                 call.id
             )
+
+            try:
+                bot.edit_message_reply_markup(
+                    chat_id_int,
+                    call.message.message_id,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+
+            last_message = (
+                last_link_messages.pop(
+                    (
+                        chat_id_int,
+                        user_id,
+                    ),
+                    None,
+                )
+            )
+
+            if last_message:
+                handle_media_link(
+                    last_message
+                )
+
+            return
+
+        if store.is_exempt(
+            user_id
+        ):
+            bot.answer_callback_query(
+                call.id
+            )
+
+            try:
+                bot.edit_message_reply_markup(
+                    chat_id_int,
+                    call.message.message_id,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+
+            last_message = (
+                last_link_messages.pop(
+                    (
+                        chat_id_int,
+                        user_id,
+                    ),
+                    None,
+                )
+            )
+
+            if last_message:
+                handle_media_link(
+                    last_message
+                )
+
+            return
+
+        unjoined = (
+            ads.get_unjoined_channels(
+                bot,
+                user_id,
+            )
+        )
+
+        if unjoined:
+            markup = InlineKeyboardMarkup(
+                row_width=1
+            )
+
+            for channel in unjoined:
+                username = (
+                    channel.get(
+                        "username",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if not username:
+                    continue
+
+                if username.startswith(
+                    "@"
+                ):
+                    channel_url = (
+                        "https://t.me/"
+                        + username[1:]
+                    )
+                else:
+                    channel_url = (
+                        "https://t.me/"
+                        + username
+                    )
+
+                channel_name = (
+                    channel.get(
+                        "name",
+                        "",
+                    )
+                    or username
+                )
+
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t[
+                            "sponsor_gate_join"
+                        ].format(
+                            name=channel_name
+                        ),
+                        url=channel_url,
+                    )
+                )
+
+            if markup.keyboard:
+                markup.add(
+                    InlineKeyboardButton(
+                        t[
+                            "sponsor_gate_check"
+                        ],
+                        callback_data=(
+                            "sponsor_check_"
+                            + str(
+                                user_id
+                            )
+                        ),
+                    )
+                )
+
+                try:
+                    bot.edit_message_reply_markup(
+                        chat_id_int,
+                        call.message.message_id,
+                        reply_markup=markup,
+                    )
+                except Exception:
+                    pass
+
+            bot.answer_callback_query(
+                call.id,
+                t[
+                    "sponsor_gate_not_joined"
+                ],
+                show_alert=True,
+            )
+
             return
 
         bot.answer_callback_query(
-            call.id,
-            "✅ Membership confirmed.",
+            call.id
         )
 
         try:
@@ -3343,6 +3473,19 @@ def register_features(bot):
             )
         except Exception:
             pass
+
+        last_message = (
+            last_link_messages.pop(
+                (
+                    chat_id_int,
+                    user_id,
+                ),
+                None,
+            )
+        )
+
+        if not last_message:
+            return
 
         handle_media_link(
             last_message
