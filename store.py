@@ -47,6 +47,7 @@ DEFAULT_FLAGS = {
     "youtube": False,
     "auto_quality_fallback": False,
     "ad_requests_button": True,
+    "sponsor_channel_gate": True,
 }
 
 

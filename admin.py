@@ -23,12 +23,14 @@ TOGGLE_KEYS = {
     "auto_quality_fallback",
     "sponsor_message",
     "ad_requests_button",
+    "sponsor_channel_gate",
 }
 
 TOGGLE_LABELS = {
     "auto_quality_fallback": "auto_quality_fallback",
     "sponsor_message": "sponsor_message",
     "ad_requests_button": "toggle_ad_requests_button",
+    "sponsor_channel_gate": "toggle_sponsor_channel_gate",
 }
 # user_id -> which text-input action a /settings panel button is waiting on
 _pending_action = {}
@@ -789,6 +791,68 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                         "%Y-%m-%d %H:%M:%S"
                     ),
                 )
+            )
+
+            if not updated:
+                bot.answer_callback_query(
+                    call.id,
+                    "Could not update request.",
+                    show_alert=True,
+                )
+                return
+
+            if (
+                updated.get(
+                    "ad_type"
+                )
+                == "sponsor_channel"
+            ):
+                channel_username = (
+                    updated.get(
+                        "channel",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                display_name = (
+                    updated.get(
+                        "display_name",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if channel_username:
+                    ads.add_sponsor_channel(
+                        channel_username,
+                        display_name
+                        or channel_username,
+                    )
+
+            try:
+                user_t = texts_for(
+                    updated["user_id"]
+                )
+
+                bot.send_message(
+                    updated["user_id"],
+                    user_t[
+                        "ad_admin_approved"
+                    ],
+                )
+            except Exception:
+                pass
+
+            edit_plain(
+                _format_ad_request_for_admin(
+                    updated,
+                    t,
+                ),
+                _ad_request_action_markup(
+                    updated,
+                    t,
+                ),
             )
 
             if not updated:

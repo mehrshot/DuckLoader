@@ -204,6 +204,7 @@ TEXTS = {
         'ad_admin_request_status_approved': "✅ تأیید شده",
         'ad_admin_request_status_rejected': "❌ رد شده",
         'toggle_ad_requests_button': "📣 دکمه تبلیغات در ربات",
+        'toggle_sponsor_channel_gate': "🔒 الزام عضویت در کانال‌های حامی",
         'adm_title': "🛠 **پنل مدیریت**",
         'adm_platforms': "🔒 پلتفرم‌ها",
         'adm_toggles': "⚙️ تنظیمات کلی",
@@ -360,6 +361,7 @@ TEXTS = {
         'ad_admin_request_status_approved': "✅ Approved",
         'ad_admin_request_status_rejected': "❌ Rejected",
         'toggle_ad_requests_button': "📣 Ad Requests Button",
+        'toggle_sponsor_channel_gate': "🔒 Sponsor Channel Membership Requirement",
         'adm_title': "🛠 **Admin Panel**",
         'adm_platforms': "🔒 Platforms",
         'adm_toggles': "⚙️ General Settings",
@@ -1442,6 +1444,62 @@ def register_features(bot):
                     )
             except Exception:
                 pass
+
+    def _check_sponsor_channel_gate(
+        chat_id_int,
+        user_id,
+        t,
+    ):
+        current_flags = store.load_flags()
+
+        if not current_flags.get(
+            "sponsor_channel_gate",
+            True,
+        ):
+            return True
+
+        unjoined = (
+            ads.get_unjoined_channels(
+                bot,
+                user_id,
+            )
+        )
+
+        if not unjoined:
+            return True
+
+        markup = InlineKeyboardMarkup()
+
+        for channel in unjoined:
+            markup.add(
+                InlineKeyboardButton(
+                    text=t[
+                        "sponsor_gate_join"
+                    ].format(
+                        name=channel[
+                            "name"
+                        ]
+                    ),
+                    url=(
+                        "https://t.me/"
+                        + channel[
+                            "username"
+                        ].lstrip("@")
+                    ),
+                )
+            )
+
+        bot.send_message(
+            chat_id_int,
+            (
+                t["sponsor_gate_title"]
+                + "\n\n"
+                + t["sponsor_gate_retry"]
+            ),
+            reply_markup=markup,
+        )
+
+        return False
 
     def _make_progress_hook(chat_id_int, status_msg, t):
         """Shared by every download path (direct, spotify, YouTube quality
@@ -2899,12 +2957,11 @@ def register_features(bot):
         user = store.get_user(user_settings, chat_id_str)
         t = TEXTS[user['lang']]
 
-        unjoined = ads.get_unjoined_channels(bot, user_id)
-        if unjoined:
-            markup = InlineKeyboardMarkup()
-            for ch in unjoined:
-                markup.add(InlineKeyboardButton(text=t['sponsor_gate_join'].format(name=ch['name']), url=f"https://t.me/{ch['username'].lstrip('@')}"))
-            bot.reply_to(message, f"{t['sponsor_gate_title']}\n\n{t['sponsor_gate_retry']}", reply_markup=markup)
+        if not _check_sponsor_channel_gate(
+            chat_id_int,
+            user_id,
+            t,
+        ):
             return
 
         url = message.text.strip()
@@ -3049,6 +3106,16 @@ def register_features(bot):
             bot.answer_callback_query(call.id)
             return
 
+        if not _check_sponsor_channel_gate(
+            chat_id_int,
+            user_id,
+            t,
+        ):
+            bot.answer_callback_query(
+                call.id
+            )
+            return
+
         post_id = call.data.split('audio_', 1)[1]
         url = audio_source_cache.get(post_id)
         if not url:
@@ -3137,6 +3204,16 @@ def register_features(bot):
         )
 
         if store.is_banned(user_id):
+            bot.answer_callback_query(
+                call.id
+            )
+            return
+
+        if not _check_sponsor_channel_gate(
+            chat_id_int,
+            user_id,
+            t,
+        ):
             bot.answer_callback_query(
                 call.id
             )
