@@ -604,6 +604,138 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
         ads.save_ad_message(text)
         bot.reply_to(message, t['setad_done'] if text else t['setad_cleared'])
 
+    @bot.message_handler(
+        commands=["checksponsor"]
+    )
+    def check_sponsor_command(
+        message
+    ):
+        if not is_owner(
+            message.from_user.id
+        ):
+            return
+
+        parts = (
+            message.text or ""
+        ).split()
+
+        if len(parts) != 2:
+            bot.reply_to(
+                message,
+                "Usage:\n/checksponsor @ChannelUsername",
+            )
+            return
+
+        channel_username = (
+            ads.normalize_sponsor_channel(
+                parts[1]
+            )
+        )
+
+        if not channel_username:
+            bot.reply_to(
+                message,
+                "Invalid channel username.",
+            )
+            return
+
+        try:
+            chat = bot.get_chat(
+                channel_username
+            )
+
+            bot_info = bot.get_me()
+
+            administrators = (
+                bot.get_chat_administrators(
+                    chat.id
+                )
+            )
+
+            bot_admin = None
+
+            for admin in administrators:
+                if (
+                    admin.user.id
+                    == bot_info.id
+                ):
+                    bot_admin = admin
+                    break
+
+            result_lines = [
+                f"Channel: {chat.title or channel_username}",
+                f"Chat ID: {chat.id}",
+                f"Username: {getattr(chat, 'username', None) or channel_username}",
+            ]
+
+            if bot_admin is None:
+                result_lines.append(
+                    "❌ Bot is NOT an administrator in this channel."
+                )
+
+                bot.reply_to(
+                    message,
+                    "\n".join(
+                        result_lines
+                    ),
+                )
+                return
+
+            result_lines.append(
+                f"✅ Bot administrator status: {bot_admin.status}"
+            )
+
+            result_lines.append(
+                f"can_manage_chat: "
+                f"{getattr(bot_admin, 'can_manage_chat', None)}"
+            )
+
+            result_lines.append(
+                "Now testing getChatMember..."
+            )
+
+            try:
+                member = (
+                    bot.get_chat_member(
+                        chat.id,
+                        message.from_user.id,
+                    )
+                )
+
+                result_lines.append(
+                    "✅ getChatMember works."
+                )
+
+                result_lines.append(
+                    f"Test user status: "
+                    f"{member.status}"
+                )
+
+            except Exception as exc:
+                result_lines.append(
+                    "❌ getChatMember FAILED."
+                )
+
+                result_lines.append(
+                    f"Error: {exc}"
+                )
+
+            bot.reply_to(
+                message,
+                "\n".join(
+                    result_lines
+                ),
+            )
+
+        except Exception as exc:
+            bot.reply_to(
+                message,
+                (
+                    "❌ Could not inspect channel.\n\n"
+                    f"Error: {exc}"
+                ),
+            )
+
     @bot.message_handler(commands=["addsponsor"])
     def add_sponsor(message):
         t = texts_for(message.chat.id)

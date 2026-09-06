@@ -227,12 +227,16 @@ TEXTS = {
         'adm_ban_btn': "🚫 مسدودکردن کاربر",
         'adm_unban_btn': "✅ رفع مسدودی کاربر",
         'adm_broadcast_btn': "📣 پیام همگانی",
+        'adm_exempt_btn': "✅ معاف کردن از الزام عضویت",
+        'adm_unexempt_btn': "❌ لغو معافیت عضویت",
         'adm_ask_setad': "متن تبلیغ جدید رو بفرست:",
         'adm_ask_addsponsor': "به این شکل بفرست: @یوزرنیم نام نمایشی",
         'adm_ask_removesponsor': "یوزرنیم کانالی که می‌خوای حذف کنی رو بفرست (با @):",
         'adm_ask_ban': "آی‌دی عددی کاربری که می‌خوای مسدود کنی رو بفرست:",
         'adm_ask_unban': "آی‌دی عددی کاربری که می‌خوای رفع مسدودیت کنی رو بفرست:",
         'adm_ask_broadcast': "متنی که می‌خوای برای همه‌ی کاربرها ارسال بشه رو بفرست:",
+        'adm_ask_exempt': "آی‌دی عددی کاربری که می‌خوای از الزام عضویت در کانال‌های حامی معاف کنی رو بفرست:",
+        'adm_ask_unexempt': "آی‌دی عددی کاربری که می‌خوای معافیتش از الزام عضویت برداشته بشه رو بفرست:",
         'adm_cancelled': "لغو شد.",
         "adm_duck": "🦆 واکنش‌های اردک",
         "adm_duck_title": "🦆 تنظیم واکنش‌های DuckLoader:",
@@ -384,12 +388,16 @@ TEXTS = {
         'adm_ban_btn': "🚫 Ban a user",
         'adm_unban_btn': "✅ Unban a user",
         'adm_broadcast_btn': "📣 Broadcast message",
+        'adm_exempt_btn': "✅ Exempt User from Membership Requirement",
+        'adm_unexempt_btn': "❌ Remove Membership Exemption",
         'adm_ask_setad': "Send the new ad text:",
         'adm_ask_addsponsor': "Send it like this: @username Display Name",
         'adm_ask_removesponsor': "Send the channel's username to remove (with @):",
         'adm_ask_ban': "Send the numeric user ID to ban:",
         'adm_ask_unban': "Send the numeric user ID to unban:",
         'adm_ask_broadcast': "Send the message to broadcast to all users:",
+        'adm_ask_exempt': "Send the numeric user ID to exempt from the sponsor-channel membership requirement:",
+        'adm_ask_unexempt': "Send the numeric user ID whose sponsor-channel membership exemption should be removed:",
         'adm_cancelled': "Cancelled.",
         "adm_duck": "🦆 Duck Reactions",
         "adm_duck_title": "🦆 Configure DuckLoader reactions:",
@@ -1457,13 +1465,18 @@ def register_features(bot):
             True,
         ):
             return True
-        if not store.is_exempt(user_id):
-            unjoined = (
-                ads.get_unjoined_channels(
-                    bot,
-                    user_id,
-                )
+
+        if store.is_exempt(
+            user_id
+        ):
+            return True
+
+        unjoined = (
+            ads.get_unjoined_channels(
+                bot,
+                user_id,
             )
+        )
 
         if not unjoined:
             return True
@@ -1471,10 +1484,13 @@ def register_features(bot):
         markup = InlineKeyboardMarkup()
 
         for channel in unjoined:
-            username = channel.get(
-                "username",
-                "",
-            )
+            username = (
+                channel.get(
+                    "username",
+                    "",
+                )
+                or ""
+            ).strip()
 
             if not username:
                 continue
@@ -1487,16 +1503,25 @@ def register_features(bot):
                     + username[1:]
                 )
             else:
-                channel_url = username
+                channel_url = (
+                    "https://t.me/"
+                    + username
+                )
+
+            channel_name = (
+                channel.get(
+                    "name",
+                    "",
+                )
+                or username
+            )
 
             markup.add(
                 InlineKeyboardButton(
                     text=t[
                         "sponsor_gate_join"
                     ].format(
-                        name=channel[
-                            "name"
-                        ]
+                        name=channel_name
                     ),
                     url=channel_url,
                 )
@@ -1508,9 +1533,13 @@ def register_features(bot):
         bot.send_message(
             chat_id_int,
             (
-                t["sponsor_gate_title"]
+                t[
+                    "sponsor_gate_title"
+                ]
                 + "\n\n"
-                + t["sponsor_gate_retry"]
+                + t[
+                    "sponsor_gate_retry"
+                ]
             ),
             reply_markup=markup,
         )
@@ -2359,11 +2388,6 @@ def register_features(bot):
             request,
         )
     
-    @bot.message_handler(
-        commands=["adrequest"]
-    )
-    def adrequest_command(message):
-        _start_ad_request(message)
 
     @bot.message_handler(
         func=lambda msg:

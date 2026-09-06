@@ -107,8 +107,15 @@ def normalize_sponsor_channel(username: str) -> str:
     if not value:
         return ""
 
-    if not value.startswith("@"):
+    if not value.startswith(
+        "@"
+    ):
         value = "@" + value
+
+    value = value.split(
+        "/",
+        1,
+    )[0]
 
     return value
 
@@ -252,28 +259,30 @@ def remove_sponsor_channel(
 
     return True
 
-
 def get_unjoined_channels(
     bot,
     user_id,
 ) -> list:
     """
-    Return sponsor channels the user has not joined.
+    Return sponsor channels that the user has not joined.
 
-    Important behavior:
-    - joined/member/administrator/creator -> allowed
-    - left/kicked -> blocked
-    - restricted + is_member=False -> blocked
-    - Telegram/API error -> channel is skipped, allowing the user to continue
-      because membership could not be verified
+    Rules:
+    - member / administrator / creator -> joined
+    - left / kicked -> not joined
+    - Telegram cannot verify the channel -> ignore that channel and allow
+      the user to continue
     """
+
     unjoined = []
 
     for channel in load_sponsor_channels():
-        username = channel.get(
-            "username",
-            "",
-        )
+        username = (
+            channel.get(
+                "username",
+                "",
+            )
+            or ""
+        ).strip()
 
         if not username:
             continue
@@ -281,13 +290,21 @@ def get_unjoined_channels(
         try:
             member = bot.get_chat_member(
                 username,
-                user_id,
+                int(user_id),
             )
 
             status = getattr(
                 member,
                 "status",
                 None,
+            )
+
+            logger.info(
+                "Sponsor membership check | "
+                "channel=%s | user=%s | status=%s",
+                username,
+                user_id,
+                status,
             )
 
             if status in {
@@ -297,24 +314,11 @@ def get_unjoined_channels(
                 unjoined.append(
                     channel
                 )
-                continue
-
-            if (
-                status == "restricted"
-                and getattr(
-                    member,
-                    "is_member",
-                    True,
-                ) is False
-            ):
-                unjoined.append(
-                    channel
-                )
 
         except Exception as exc:
             logger.warning(
-                "Could not check sponsor-channel membership | "
-                "channel=%s user_id=%s error=%s",
+                "Sponsor membership check failed; "
+                "allowing user | channel=%s | user=%s | error=%s",
                 username,
                 user_id,
                 exc,
