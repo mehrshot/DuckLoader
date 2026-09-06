@@ -171,7 +171,7 @@ TEXTS = {
         'sponsor_gate_join': "{name}",
         'sponsor_gate_retry': (
             "بعد از عضویت، روی دکمه «✅ بررسی عضویت و ادامه» بزنید "
-            "تا وضعیت عضویت شما بررسی شود و لینک قبلی ادامه پیدا کند."
+            "تا وضعیت عضویت شما بررسی بشه و دانلود ادامه پیدا کنه."
         ),
         'sponsor_gate_check': "✅ بررسی عضویت و ادامه",
         'sponsor_gate_not_joined': (
@@ -369,7 +369,7 @@ TEXTS = {
         'sponsor_gate_retry': (
             "After joining, tap "
             "\"✅ Check Membership & Continue\" below. "
-            "Your previous link will then continue automatically."
+            "Your download will then continue automatically."
         ),
         'sponsor_gate_check': "✅ Check Membership & Continue",
         'sponsor_gate_not_joined': (
