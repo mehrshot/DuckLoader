@@ -124,6 +124,7 @@ def create_ad_request(
 
         request = {
             "request_id": request_id,
+            "ad_form_lang": "fa",
             "status": "draft",
             "step": "channel",
             "form_lang": "fa",

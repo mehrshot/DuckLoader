@@ -888,7 +888,9 @@ def register_features(bot):
     flags = store.load_flags()
 
     def _main_reply_markup():
-        if not flags.get(
+        current_flags = store.load_flags()
+
+        if not current_flags.get(
             "ad_requests_button",
             False,
         ):
@@ -907,12 +909,109 @@ def register_features(bot):
 
         return markup
 
-    def _ad_cancel_markup(t):
-        markup = InlineKeyboardMarkup(row_width=1)
+    def _ad_texts(lang="fa"):
+        if lang == "en":
+            return {
+                "channel_prompt": "📣 Send the ID, username, or link of the channel you want to advertise:",
+                "display_name_prompt": "🏷 Enter the display name you want for the advertisement:",
+                "type_prompt": (
+                    "📌 Choose the type of advertisement you want:\n\n"
+                    "📢 Sponsor Channel\n"
+                    "Your channel will be added as a sponsor channel. "
+                    "Users will need to join your channel before they can use the bot's download features.\n\n"
+                    "📣 After Every Downloaded Post\n"
+                    "Your channel advertisement will be shown to users after each successful download."
+                ),
+                "type_sponsor_channel": "📢 Sponsor Channel",
+                "type_post_download": "📣 After Every Downloaded Post",
+                "duration_prompt": "⏱ Enter the desired duration or number of displays:",
+                "notes_prompt": "📝 Send any additional notes or requirements.\nIf you have none, send \"none\".",
+                "cancel": "❌ Cancel",
+                "switch_to_english": "🇺🇸 English",
+                "switch_to_persian": "🇮🇷 فارسی",
+                "summary_title": "📋 Advertisement Request Summary",
+                "summary_channel": "📣 Channel",
+                "summary_display_name": "🏷 Display Name",
+                "summary_type": "📌 Advertisement Type",
+                "summary_duration": "⏱ Duration / Displays",
+                "summary_notes": "📝 Notes",
+                "confirm_prompt": "Is the information correct?",
+                "submit": "✅ Submit Request",
+                "edit": "✏️ Edit",
+                "submitted": "✅ Your advertising request has been submitted.\n\nThe admin will review it and contact you if it is approved.",
+                "cancelled": "❌ Advertising request cancelled.",
+                "existing_pending": "⏳ You already have an advertising request awaiting review.\n\nPlease wait for the previous request to be reviewed.",
+                "unavailable": "⚠️ Advertising requests are currently disabled.",
+                "invalid_type": "Invalid advertisement type.",
+            }
+
+        return {
+            "channel_prompt": "📣 لطفاً آیدی، یوزرنیم یا لینک کانالی که می‌خواهید تبلیغ کنید را ارسال کنید:",
+            "display_name_prompt": "🏷 نام نمایشی موردنظرتان برای تبلیغ را وارد کنید:",
+            "type_prompt": (
+                "📌 نوع تبلیغ موردنظر خود را انتخاب کنید:\n\n"
+                "📢 کانال اسپانسر\n"
+                "کانال شما به‌عنوان کانال اسپانسر ربات ثبت می‌شود "
+                "و کاربران برای استفاده از قابلیت دانلود باید ابتدا عضو کانال شما شوند.\n\n"
+                "📣 نمایش بعد از هر دانلود\n"
+                "تبلیغ کانال شما پس از هر دانلود موفق به کاربران نمایش داده می‌شود."
+            ),
+            "type_sponsor_channel": "📢 کانال اسپانسر",
+            "type_post_download": "📣 نمایش بعد از هر دانلود",
+            "duration_prompt": "⏱ مدت تبلیغ یا تعداد نمایش موردنظر را وارد کنید:",
+            "notes_prompt": "📝 اگر توضیح یا درخواست دیگری دارید بنویسید.\nاگر ندارید، «ندارم» را ارسال کنید.",
+            "cancel": "❌ لغو",
+            "switch_to_english": "🇺🇸 English",
+            "switch_to_persian": "🇮🇷 فارسی",
+            "summary_title": "📋 خلاصه درخواست تبلیغات",
+            "summary_channel": "📣 کانال",
+            "summary_display_name": "🏷 نام نمایشی",
+            "summary_type": "📌 نوع تبلیغ",
+            "summary_duration": "⏱ مدت / تعداد نمایش",
+            "summary_notes": "📝 توضیحات",
+            "confirm_prompt": "آیا اطلاعات درخواست صحیح است؟",
+            "submit": "✅ ارسال درخواست",
+            "edit": "✏️ ویرایش",
+            "submitted": "✅ درخواست تبلیغات شما با موفقیت ثبت شد.\n\nمدیر درخواست شما را بررسی می‌کند و در صورت تأیید با شما هماهنگ خواهد شد.",
+            "cancelled": "❌ درخواست تبلیغات لغو شد.",
+            "existing_pending": "⏳ شما یک درخواست تبلیغات در حال بررسی دارید.\n\nلطفاً تا بررسی درخواست قبلی منتظر بمانید.",
+            "unavailable": "⚠️ ثبت درخواست تبلیغات در حال حاضر غیرفعال است.",
+            "invalid_type": "نوع تبلیغ نامعتبر است.",
+        }
+
+    def _ad_lang_for_request(request):
+        return request.get(
+            "ad_form_lang",
+            "fa",
+        )
+
+    def _ad_cancel_markup(request):
+        ad_t = _ad_texts(
+            _ad_lang_for_request(request)
+        )
+
+        markup = InlineKeyboardMarkup(
+            row_width=1
+        )
+
+        if _ad_lang_for_request(request) == "fa":
+            markup.add(
+                InlineKeyboardButton(
+                    ad_t["switch_to_english"],
+                    callback_data="ad_lang_en",
+                )
+            )
+        else:
+            markup.add(
+                InlineKeyboardButton(
+                    ad_t["switch_to_persian"],
+                    callback_data="ad_lang_fa",
+                )
+            )
 
         markup.add(
             InlineKeyboardButton(
-                t["ad_cancel"],
+                ad_t["cancel"],
                 callback_data="ad_cancel",
             )
         )
@@ -920,7 +1019,9 @@ def register_features(bot):
         return markup
 
     def _ad_type_markup(request):
-        t = _ad_texts(request)
+        ad_t = _ad_texts(
+            _ad_lang_for_request(request)
+        )
 
         markup = InlineKeyboardMarkup(
             row_width=1
@@ -928,93 +1029,109 @@ def register_features(bot):
 
         markup.add(
             InlineKeyboardButton(
-                t["ad_type_sponsor_channel"],
+                ad_t["type_sponsor_channel"],
                 callback_data="ad_type_sponsor_channel",
             )
         )
 
         markup.add(
             InlineKeyboardButton(
-                t["ad_type_post_download"],
+                ad_t["type_post_download"],
                 callback_data="ad_type_post_download",
             )
         )
 
-        markup.add(
-            InlineKeyboardButton(
-                t["ad_cancel"],
-                callback_data="ad_cancel",
+        if _ad_lang_for_request(request) == "fa":
+            markup.add(
+                InlineKeyboardButton(
+                    ad_t["switch_to_english"],
+                    callback_data="ad_lang_en",
+                )
             )
-        )
+        else:
+            markup.add(
+                InlineKeyboardButton(
+                    ad_t["switch_to_persian"],
+                    callback_data="ad_lang_fa",
+                )
+            )
 
         markup.add(
             InlineKeyboardButton(
-                t["ad_lang_en"]
-                if request.get("form_lang", "fa") == "fa"
-                else t["ad_lang_fa"],
-                callback_data=(
-                    "ad_lang_en"
-                    if request.get("form_lang", "fa") == "fa"
-                    else "ad_lang_fa"
-                ),
+                ad_t["cancel"],
+                callback_data="ad_cancel",
             )
         )
 
         return markup
+
     def _format_ad_summary(
         request,
-        t,
     ):
-        type_labels = {
-            "sponsor_channel": t["ad_type_sponsor_channel"],
-            "post_download": t["ad_type_post_download"],
-        }
-
-        display_type = type_labels.get(
-            request.get("ad_type"),
-            request.get("ad_type", "—"),
+        ad_t = _ad_texts(
+            _ad_lang_for_request(request)
         )
 
+        type_labels = {
+            "sponsor_channel": ad_t["type_sponsor_channel"],
+            "post_download": ad_t["type_post_download"],
+        }
+
         return (
-            f"{t['ad_summary_title']}\n\n"
-            f"{t['ad_summary_channel']}: "
+            f"{ad_t['summary_title']}\n\n"
+            f"{ad_t['summary_channel']}: "
             f"{request.get('channel', '')}\n"
-            f"{t['ad_summary_display_name']}: "
+            f"{ad_t['summary_display_name']}: "
             f"{request.get('display_name', '')}\n"
-            f"{t['ad_summary_type']}: "
-            f"{display_type}\n"
-            f"{t['ad_summary_duration']}: "
+            f"{ad_t['summary_type']}: "
+            f"{type_labels.get(request.get('ad_type'), request.get('ad_type', ''))}\n"
+            f"{ad_t['summary_duration']}: "
             f"{request.get('duration', '')}\n"
-            f"{t['ad_summary_notes']}: "
+            f"{ad_t['summary_notes']}: "
             f"{request.get('notes', '')}\n\n"
-            f"{t['ad_confirm_prompt']}"
+            f"{ad_t['confirm_prompt']}"
         )
 
     def _ad_confirmation_markup(request):
-        t = _ad_texts(request)
+        ad_t = _ad_texts(
+            _ad_lang_for_request(request)
+        )
 
-        markup = InlineKeyboardMarkup(row_width=2)
+        markup = InlineKeyboardMarkup(
+            row_width=2
+        )
 
         markup.add(
             InlineKeyboardButton(
-                t["ad_submit"],
+                ad_t["submit"],
                 callback_data="ad_submit",
             ),
             InlineKeyboardButton(
-                t["ad_edit"],
+                ad_t["edit"],
                 callback_data="ad_edit",
             ),
         )
 
-        markup.add(
-            InlineKeyboardButton(
-                t["ad_cancel"],
-                callback_data="ad_cancel",
+        if _ad_lang_for_request(request) == "fa":
+            markup.add(
+                InlineKeyboardButton(
+                    ad_t["switch_to_english"],
+                    callback_data="ad_lang_en",
+                )
             )
-        )
+        else:
+            markup.add(
+                InlineKeyboardButton(
+                    ad_t["switch_to_persian"],
+                    callback_data="ad_lang_fa",
+                )
+            )
 
         markup.add(
-            _ad_lang_button(request)
+            InlineKeyboardButton(
+                ad_t["cancel"],
+                callback_data="ad_cancel",
+            )
         )
 
         return markup
@@ -1022,45 +1139,48 @@ def register_features(bot):
     def _send_ad_prompt(
         chat_id_int,
         request,
-        t,
     ):
         step = request.get(
             "step"
         )
 
+        ad_t = _ad_texts(
+            _ad_lang_for_request(request)
+        )
+
         if step == "channel":
             bot.send_message(
                 chat_id_int,
-                t["ad_channel_prompt"],
-                reply_markup=_ad_cancel_markup(t),
+                ad_t["channel_prompt"],
+                reply_markup=_ad_cancel_markup(request),
             )
 
         elif step == "display_name":
             bot.send_message(
                 chat_id_int,
-                t["ad_display_name_prompt"],
-                reply_markup=_ad_cancel_markup(t),
+                ad_t["display_name_prompt"],
+                reply_markup=_ad_cancel_markup(request),
             )
 
         elif step == "type":
             bot.send_message(
                 chat_id_int,
-                t["ad_type_prompt"],
+                ad_t["type_prompt"],
                 reply_markup=_ad_type_markup(request),
             )
 
         elif step == "duration":
             bot.send_message(
                 chat_id_int,
-                t["ad_duration_prompt"],
-                reply_markup=_ad_cancel_markup(t),
+                ad_t["duration_prompt"],
+                reply_markup=_ad_cancel_markup(request),
             )
 
         elif step == "notes":
             bot.send_message(
                 chat_id_int,
-                t["ad_notes_prompt"],
-                reply_markup=_ad_cancel_markup(t),
+                ad_t["notes_prompt"],
+                reply_markup=_ad_cancel_markup(request),
             )
 
     def _my_settings_view(chat_id):
@@ -1223,12 +1343,103 @@ def register_features(bot):
         )
 
     def _maybe_send_ad(chat_id_int):
-        if not flags.get('sponsor_message', False):
-            return
-        ad_text = ads.load_ad_message()
-        if ad_text:
+        if flags.get(
+            "sponsor_message",
+            False,
+        ):
+            ad_text = (
+                ads.load_ad_message()
+            )
+
+            if ad_text:
+                try:
+                    bot.send_message(
+                        chat_id_int,
+                        ad_text,
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+
+        approved_requests = (
+            store.list_ad_requests(
+                "approved"
+            )
+        )
+
+        for request in approved_requests:
+            if (
+                request.get(
+                    "ad_type"
+                )
+                != "post_download"
+            ):
+                continue
+
+            channel = (
+                request.get(
+                    "channel",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            display_name = (
+                request.get(
+                    "display_name",
+                    "",
+                )
+                or channel
+            ).strip()
+
+            if not channel:
+                continue
+
+            if channel.startswith(
+                "https://t.me/"
+            ):
+                channel_url = channel
+            elif channel.startswith(
+                "http://t.me/"
+            ):
+                channel_url = channel
+            elif channel.startswith(
+                "t.me/"
+            ):
+                channel_url = (
+                    "https://"
+                    + channel
+                )
+            elif channel.startswith(
+                "@"
+            ):
+                channel_url = (
+                    "https://t.me/"
+                    + channel[1:]
+                )
+            else:
+                channel_url = ""
+
             try:
-                bot.send_message(chat_id_int, ad_text, parse_mode="Markdown")
+                if channel_url:
+                    markup = InlineKeyboardMarkup()
+                    markup.add(
+                        InlineKeyboardButton(
+                            display_name,
+                            url=channel_url,
+                        )
+                    )
+
+                    bot.send_message(
+                        chat_id_int,
+                        "📣 تبلیغ",
+                        reply_markup=markup,
+                    )
+                else:
+                    bot.send_message(
+                        chat_id_int,
+                        f"📣 {display_name}\n{channel}",
+                    )
             except Exception:
                 pass
 
@@ -1981,17 +2192,20 @@ def register_features(bot):
         )
         bot.answer_callback_query(call.id)
 
+    @bot.message_handler(commands=["adrequest"])
     @bot.message_handler(
         func=lambda msg:
             bool(msg.text)
-            and msg.text.strip() == AD_BUTTON_TEXT
+            and msg.text.strip()
+            == AD_BUTTON_TEXT
     )
     def start_ad_request(message):
-        _start_ad_request(message)
         user_id = message.from_user.id
         chat_id_int = message.chat.id
 
-        if store.is_banned(user_id):
+        if store.is_banned(
+            user_id
+        ):
             return
 
         existing_draft = (
@@ -2005,7 +2219,6 @@ def register_features(bot):
             _send_ad_prompt(
                 chat_id_int,
                 existing_draft,
-                _ad_texts(existing_draft),
             )
             return
 
@@ -2017,22 +2230,26 @@ def register_features(bot):
         )
 
         if existing_pending:
-            t = _ad_texts(existing_pending)
+            ad_t = _ad_texts(
+                "fa"
+            )
 
             bot.send_message(
                 chat_id_int,
-                t["ad_existing_pending"],
+                ad_t["existing_pending"],
                 reply_markup=_main_reply_markup(),
             )
             return
 
         telegram_username = (
-            message.from_user.username or ""
+            message.from_user.username
+            or ""
         )
 
         if telegram_username:
             telegram_username = (
-                "@" + telegram_username
+                "@"
+                + telegram_username
             )
 
         telegram_name = " ".join(
@@ -2042,20 +2259,30 @@ def register_features(bot):
                 message.from_user.last_name,
             )
             if part
-        ).strip() or "—"
+        ).strip()
 
-        request = store.create_ad_request(
-            user_id=user_id,
-            telegram_username=telegram_username,
-            telegram_name=telegram_name,
+        if not telegram_name:
+            telegram_name = "—"
+
+        request = (
+            store.create_ad_request(
+                user_id=user_id,
+                telegram_username=telegram_username,
+                telegram_name=telegram_name,
+            )
         )
 
-        bot.send_message(
+        request = (
+            store.update_ad_request(
+                request["request_id"],
+                ad_form_lang="fa",
+                step="channel",
+            )
+        )
+
+        _send_ad_prompt(
             chat_id_int,
-            TEXTS["fa"]["ad_channel_prompt"],
-            reply_markup=_ad_cancel_markup(
-                TEXTS["fa"]
-            ),
+            request,
         )
     
     @bot.message_handler(
@@ -2081,10 +2308,6 @@ def register_features(bot):
             message.chat.id
         )
 
-        chat_id_str = str(
-            message.chat.id
-        )
-
         request = (
             store.get_user_ad_request(
                 user_id,
@@ -2095,8 +2318,8 @@ def register_features(bot):
         if not request:
             return
 
-        t = _texts_for(
-            chat_id_str
+        ad_t = _ad_texts(
+            _ad_lang_for_request(request)
         )
 
         text = (
@@ -2115,7 +2338,7 @@ def register_features(bot):
 
             bot.send_message(
                 chat_id_int,
-                t["ad_cancelled"],
+                ad_t["cancelled"],
                 reply_markup=_main_reply_markup(),
             )
             return
@@ -2125,24 +2348,30 @@ def register_features(bot):
         )
 
         if step == "channel":
-            store.update_ad_request(
-                request["request_id"],
-                channel=text,
-                step="display_name",
+            updated = (
+                store.update_ad_request(
+                    request["request_id"],
+                    channel=text,
+                    step="display_name",
+                )
             )
 
         elif step == "display_name":
-            store.update_ad_request(
-                request["request_id"],
-                display_name=text,
-                step="type",
+            updated = (
+                store.update_ad_request(
+                    request["request_id"],
+                    display_name=text,
+                    step="type",
+                )
             )
 
         elif step == "duration":
-            store.update_ad_request(
-                request["request_id"],
-                duration=text,
-                step="notes",
+            updated = (
+                store.update_ad_request(
+                    request["request_id"],
+                    duration=text,
+                    step="notes",
+                )
             )
 
         elif step == "notes":
@@ -2160,23 +2389,20 @@ def register_features(bot):
                 chat_id_int,
                 _format_ad_summary(
                     updated,
-                    t,
                 ),
-                reply_markup=_ad_confirmation_markup(t),
+                reply_markup=_ad_confirmation_markup(
+                    updated
+                ),
             )
             return
 
-        updated = (
-            store.get_ad_request(
-                request["request_id"]
-            )
-        )
+        else:
+            return
 
         if updated:
             _send_ad_prompt(
                 chat_id_int,
                 updated,
-                t,
             )
 
     @bot.callback_query_handler(
@@ -2192,16 +2418,8 @@ def register_features(bot):
             call.message.chat.id
         )
 
-        chat_id_str = str(
-            chat_id_int
-        )
-
         user_id = (
             call.from_user.id
-        )
-
-        t = _texts_for(
-            chat_id_str
         )
 
         request = (
@@ -2214,7 +2432,7 @@ def register_features(bot):
         if not request:
             bot.answer_callback_query(
                 call.id,
-                t["ad_cancelled"],
+                _ad_texts("fa")["cancelled"],
                 show_alert=True,
             )
             return
@@ -2226,15 +2444,15 @@ def register_features(bot):
             )[1]
         )
 
-        valid_types = {
+        if type_key not in {
             "sponsor_channel",
             "post_download",
-        }
-
-        if type_key not in valid_types:
+        }:
             bot.answer_callback_query(
                 call.id,
-                "Invalid selection.",
+                _ad_texts(
+                    _ad_lang_for_request(request)
+                )["invalid_type"],
                 show_alert=True,
             )
             return
@@ -2264,7 +2482,69 @@ def register_features(bot):
             _send_ad_prompt(
                 chat_id_int,
                 updated,
-                t,
+            )
+
+    @bot.callback_query_handler(
+        func=lambda call:
+            call.data in {
+                "ad_lang_en",
+                "ad_lang_fa",
+            }
+    )
+    def handle_ad_language_callback(
+        call
+    ):
+        chat_id_int = (
+            call.message.chat.id
+        )
+
+        user_id = (
+            call.from_user.id
+        )
+
+        request = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
+        )
+
+        if not request:
+            bot.answer_callback_query(
+                call.id
+            )
+            return
+
+        selected_language = (
+            "en"
+            if call.data == "ad_lang_en"
+            else "fa"
+        )
+
+        updated = (
+            store.update_ad_request(
+                request["request_id"],
+                ad_form_lang=selected_language,
+            )
+        )
+
+        bot.answer_callback_query(
+            call.id
+        )
+
+        try:
+            bot.edit_message_reply_markup(
+                chat_id_int,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        if updated:
+            _send_ad_prompt(
+                chat_id_int,
+                updated,
             )
 
     @bot.callback_query_handler(
@@ -2278,16 +2558,8 @@ def register_features(bot):
             call.message.chat.id
         )
 
-        chat_id_str = str(
-            chat_id_int
-        )
-
         user_id = (
             call.from_user.id
-        )
-
-        t = _texts_for(
-            chat_id_str
         )
 
         request = (
@@ -2298,9 +2570,17 @@ def register_features(bot):
         )
 
         if request:
+            ad_t = _ad_texts(
+                _ad_lang_for_request(request)
+            )
+
             store.update_ad_request(
                 request["request_id"],
                 status="cancelled",
+            )
+        else:
+            ad_t = _ad_texts(
+                "fa"
             )
 
         try:
@@ -2318,7 +2598,7 @@ def register_features(bot):
 
         bot.send_message(
             chat_id_int,
-            t["ad_cancelled"],
+            ad_t["cancelled"],
             reply_markup=_main_reply_markup(),
         )
 
@@ -2333,16 +2613,8 @@ def register_features(bot):
             call.message.chat.id
         )
 
-        chat_id_str = str(
-            chat_id_int
-        )
-
         user_id = (
             call.from_user.id
-        )
-
-        t = _texts_for(
-            chat_id_str
         )
 
         request = (
@@ -2355,7 +2627,7 @@ def register_features(bot):
         if not request:
             bot.answer_callback_query(
                 call.id,
-                t["ad_cancelled"],
+                _ad_texts("fa")["cancelled"],
                 show_alert=True,
             )
             return
@@ -2389,7 +2661,6 @@ def register_features(bot):
             _send_ad_prompt(
                 chat_id_int,
                 updated,
-                t,
             )
 
     @bot.callback_query_handler(
@@ -2403,16 +2674,8 @@ def register_features(bot):
             call.message.chat.id
         )
 
-        chat_id_str = str(
-            chat_id_int
-        )
-
         user_id = (
             call.from_user.id
-        )
-
-        t = _texts_for(
-            chat_id_str
         )
 
         request = (
@@ -2425,10 +2688,14 @@ def register_features(bot):
         if not request:
             bot.answer_callback_query(
                 call.id,
-                t["ad_cancelled"],
+                _ad_texts("fa")["cancelled"],
                 show_alert=True,
             )
             return
+
+        ad_t = _ad_texts(
+            _ad_lang_for_request(request)
+        )
 
         required_fields = (
             "channel",
@@ -2442,14 +2709,16 @@ def register_features(bot):
             not str(
                 request.get(
                     field,
-                    ""
+                    "",
                 )
             ).strip()
             for field in required_fields
         ):
             bot.answer_callback_query(
                 call.id,
-                "اطلاعات درخواست کامل نیست.",
+                "اطلاعات درخواست کامل نیست."
+                if _ad_lang_for_request(request) == "fa"
+                else "The request is incomplete.",
                 show_alert=True,
             )
             return

@@ -799,6 +799,43 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 )
                 return
 
+            if (
+                updated.get(
+                    "ad_type"
+                )
+                == "sponsor_channel"
+            ):
+                channel_username = (
+                    updated.get(
+                        "channel",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                display_name = (
+                    updated.get(
+                        "display_name",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if channel_username:
+                    ads.add_sponsor_channel(
+                        channel_username,
+                        display_name
+                        or channel_username,
+                    )
+
+            elif (
+                updated.get(
+                    "ad_type"
+                )
+                == "post_download"
+            ):
+                pass
+
             try:
                 user_t = texts_for(
                     updated["user_id"]
