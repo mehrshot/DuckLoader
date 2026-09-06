@@ -16,7 +16,8 @@ from telebot.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardRemove,
-)import admin
+)
+import admin
 import ads
 import platforms
 import store
