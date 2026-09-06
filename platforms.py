@@ -118,24 +118,6 @@ def detect_platform(text: str):
             return platform
     return None
 
-def _get_instagram_story_id(
-    url: str,
-):
-    match = re.search(
-        r"https?://(?:www\.)?instagram\.com/"
-        r"stories/[^/?#]+/"
-        r"(?P<id>\d+)",
-        url,
-        re.IGNORECASE,
-    )
-
-    if not match:
-        return None
-
-    return match.group(
-        "id"
-    )
-
 def _is_youtube_url(url: str) -> bool:
     u = url.lower()
     return "youtube.com" in u or "youtu.be" in u
@@ -1296,6 +1278,15 @@ def _download_with_selector(
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+    is_instagram_story = bool(
+        re.search(
+            r"https?://(?:www\.)?instagram\.com/"
+            r"stories/[^/?#]+/\d+",
+            url,
+            re.IGNORECASE,
+        )
+    )
+
     ydl_opts = {
         "format": format_selector,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
@@ -1303,7 +1294,7 @@ def _download_with_selector(
         "quiet": True,
         "no_warnings": True,
         "color": "never",
-        "noplaylist": False,
+        "noplaylist": is_instagram_story,
         "socket_timeout": 30,
     }
 
@@ -1393,54 +1384,6 @@ def _download_with_selector(
             )
             or [info_raw]
         )
-
-        story_id = (
-            _get_instagram_story_id(
-                url
-            )
-        )
-
-        if story_id:
-            matching_entries = []
-
-            for entry in entries_raw:
-                if not entry:
-                    continue
-
-                entry_id = str(
-                    entry.get(
-                        "id",
-                        ""
-                    )
-                )
-
-                entry_url = str(
-                    entry.get(
-                        "webpage_url",
-                        ""
-                    )
-                )
-
-                if (
-                    entry_id == story_id
-                    or re.search(
-                        rf"/{re.escape(story_id)}(?:[/?#]|$)",
-                        entry_url,
-                    )
-                ):
-                    matching_entries.append(
-                        entry
-                    )
-
-            if matching_entries:
-                entries_raw = (
-                    matching_entries
-                )
-            else:
-                raise Exception(
-                    "The requested Instagram Story "
-                    "could not be found."
-                )
 
         filepaths = []
         valid_entries = []
