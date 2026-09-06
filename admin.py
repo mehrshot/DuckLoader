@@ -180,6 +180,8 @@ def _users_markup(t) -> InlineKeyboardMarkup:
     m.add(InlineKeyboardButton(t['adm_unban_btn'], callback_data='adm_ask_unban'))
     m.add(InlineKeyboardButton(t['adm_broadcast_btn'], callback_data='adm_ask_broadcast'))
     m.add(InlineKeyboardButton(t['back'], callback_data='adm_menu_main'))
+    m.add(InlineKeyboardButton(t['adm_exempt_btn'], callback_data='adm_ask_exempt'))
+    m.add(InlineKeyboardButton(t['adm_unexempt_btn'], callback_data='adm_ask_unexempt'))
     return m
 
 def _duck_markup(t) -> InlineKeyboardMarkup:
@@ -1669,6 +1671,13 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                     message,
                     t["unban_not_found"],
                 )
+        elif action == 'exempt':
+            if text.isdigit():
+                store.add_exempt_user(text)
+                bot.reply_to(message, f"✅ {text} از دروازه‌ی عضویت معاف شد.")
+        elif action == 'unexempt':
+            if text.isdigit() and store.remove_exempt_user(text):
+                bot.reply_to(message, f"✅ معافیت {text} برداشته شد.")
 
         elif action == "broadcast":
             sent = 0

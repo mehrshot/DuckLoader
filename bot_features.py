@@ -1457,13 +1457,13 @@ def register_features(bot):
             True,
         ):
             return True
-
-        unjoined = (
-            ads.get_unjoined_channels(
-                bot,
-                user_id,
+        if not store.is_exempt(user_id):
+            unjoined = (
+                ads.get_unjoined_channels(
+                    bot,
+                    user_id,
+                )
             )
-        )
 
         if not unjoined:
             return True

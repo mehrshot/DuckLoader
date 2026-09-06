@@ -590,3 +590,26 @@ def clear_all_duck_reactions() -> None:
         DUCK_REACTIONS_FILE,
         reactions,
     )
+
+
+EXEMPT_FILE = "exempt_users.json"
+
+def load_exempt_users() -> list:
+    return _load(EXEMPT_FILE, [])
+
+def is_exempt(user_id) -> bool:
+    return int(user_id) in load_exempt_users()
+
+def add_exempt_user(user_id) -> None:
+    users = load_exempt_users()
+    if int(user_id) not in users:
+        users.append(int(user_id))
+        _save(EXEMPT_FILE, users)
+
+def remove_exempt_user(user_id) -> bool:
+    users = load_exempt_users()
+    if int(user_id) in users:
+        users.remove(int(user_id))
+        _save(EXEMPT_FILE, users)
+        return True
+    return False
