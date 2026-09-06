@@ -823,11 +823,17 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                     or ""
                 ).strip()
 
-                if channel_username:
+                normalized_channel = (
+                    ads.normalize_sponsor_channel(
+                        channel_username
+                    )
+                )
+
+                if normalized_channel:
                     ads.add_sponsor_channel(
-                        channel_username,
+                        normalized_channel,
                         display_name
-                        or channel_username,
+                        or normalized_channel,
                     )
 
             try:

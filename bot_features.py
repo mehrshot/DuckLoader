@@ -1471,6 +1471,24 @@ def register_features(bot):
         markup = InlineKeyboardMarkup()
 
         for channel in unjoined:
+            username = channel.get(
+                "username",
+                "",
+            )
+
+            if not username:
+                continue
+
+            if username.startswith(
+                "@"
+            ):
+                channel_url = (
+                    "https://t.me/"
+                    + username[1:]
+                )
+            else:
+                channel_url = username
+
             markup.add(
                 InlineKeyboardButton(
                     text=t[
@@ -1480,14 +1498,12 @@ def register_features(bot):
                             "name"
                         ]
                     ),
-                    url=(
-                        "https://t.me/"
-                        + channel[
-                            "username"
-                        ].lstrip("@")
-                    ),
+                    url=channel_url,
                 )
             )
+
+        if not markup.keyboard:
+            return True
 
         bot.send_message(
             chat_id_int,
@@ -2406,10 +2422,29 @@ def register_features(bot):
         )
 
         if step == "channel":
+            channel_value = (
+                ads.normalize_sponsor_channel(
+                    text
+                )
+            )
+
+            if not channel_value:
+                bot.send_message(
+                    chat_id_int,
+                    (
+                        "⚠️ لطفاً یک یوزرنیم عمومی کانال مانند "
+                        "@MyChannel یا https://t.me/MyChannel ارسال کنید."
+                    ),
+                    reply_markup=_ad_cancel_markup(
+                        request
+                    ),
+                )
+                return
+
             updated = (
                 store.update_ad_request(
                     request["request_id"],
-                    channel=text,
+                    channel=channel_value,
                     step="display_name",
                 )
             )
