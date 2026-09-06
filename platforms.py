@@ -118,6 +118,23 @@ def detect_platform(text: str):
             return platform
     return None
 
+def _get_instagram_story_id(
+    url: str,
+):
+    match = re.search(
+        r"https?://(?:www\.)?instagram\.com/"
+        r"stories/[^/?#]+/"
+        r"(?P<id>\d+)",
+        url,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return match.group(
+        "id"
+    )
 
 def _is_youtube_url(url: str) -> bool:
     u = url.lower()
@@ -318,6 +335,17 @@ def _youtube_extra_opts(clients) -> dict:
 
     return opts
 
+def _is_instagram_story_url(
+    url: str,
+) -> bool:
+    return bool(
+        re.search(
+            r"https?://(?:www\.)?instagram\.com/"
+            r"stories/[^/?#]+/\d+",
+            url,
+            re.IGNORECASE,
+        )
+    )
 
 def _instagram_extra_opts() -> dict:
     """
@@ -1355,9 +1383,64 @@ def _download_with_selector(
         )
 
         if not info_raw:
-            raise Exception("Media info not found.")
+            raise Exception(
+                "Media info not found."
+            )
 
-        entries_raw = info_raw.get("entries") or [info_raw]
+        entries_raw = (
+            info_raw.get(
+                "entries"
+            )
+            or [info_raw]
+        )
+
+        story_id = (
+            _get_instagram_story_id(
+                url
+            )
+        )
+
+        if story_id:
+            matching_entries = []
+
+            for entry in entries_raw:
+                if not entry:
+                    continue
+
+                entry_id = str(
+                    entry.get(
+                        "id",
+                        ""
+                    )
+                )
+
+                entry_url = str(
+                    entry.get(
+                        "webpage_url",
+                        ""
+                    )
+                )
+
+                if (
+                    entry_id == story_id
+                    or re.search(
+                        rf"/{re.escape(story_id)}(?:[/?#]|$)",
+                        entry_url,
+                    )
+                ):
+                    matching_entries.append(
+                        entry
+                    )
+
+            if matching_entries:
+                entries_raw = (
+                    matching_entries
+                )
+            else:
+                raise Exception(
+                    "The requested Instagram Story "
+                    "could not be found."
+                )
 
         filepaths = []
         valid_entries = []
@@ -1366,24 +1449,94 @@ def _download_with_selector(
             if not raw_entry:
                 continue
 
-            for key in ("extractor", "extractor_key", "webpage_url"):
-                if key not in raw_entry and key in info_raw:
+            for key in (
+                "extractor",
+                "extractor_key",
+                "webpage_url",
+            ):
+                if (
+                    key not in raw_entry
+                    and key in info_raw
+                ):
                     raw_entry[key] = info_raw[key]
 
-            if _is_probably_photo_entry(info_raw, raw_entry):
-                path = _download_image_entry(raw_entry)
+            # -----------------------------------------------------------
+            # Photo entry
+            # -----------------------------------------------------------
+            if _is_probably_photo_entry(
+                info_raw,
+                raw_entry,
+            ):
+                path = _download_image_entry(
+                    raw_entry
+                )
 
                 if path:
-                    filepaths.append(path)
-                    valid_entries.append(raw_entry)
+                    if not os.path.exists(
+                        path
+                    ):
+                        raise Exception(
+                            f"downloaded image does not exist: {path}"
+                        )
+
+                    actual_size = (
+                        os.path.getsize(path)
+                    )
+
+                    if (
+                        actual_size
+                        < MIN_VALID_FILE_BYTES
+                    ):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+
+                        raise Exception(
+                            f"incomplete download: {path}"
+                        )
+
+                    if (
+                        actual_size
+                        > MAX_TELEGRAM_BYTES
+                    ):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+
+                        raise FileTooLargeError(
+                            format_size(
+                                actual_size
+                            )
+                        )
+
+                    filepaths.append(
+                        path
+                    )
+
+                    metadata_entry = dict(
+                        raw_entry
+                    )
+
+                    valid_entries.append(
+                        metadata_entry
+                    )
 
                 continue
 
-            entry_id = raw_entry.get("id")
+            # -----------------------------------------------------------
+            # Video / audio entry
+            # -----------------------------------------------------------
+            entry_id = raw_entry.get(
+                "id"
+            )
 
-            processed = ydl.process_ie_result(
-                raw_entry,
-                download=True,
+            processed = (
+                ydl.process_ie_result(
+                    raw_entry,
+                    download=True,
+                )
             )
 
             if not processed:
@@ -1392,11 +1545,11 @@ def _download_with_selector(
             # -----------------------------------------------------------
             # Preserve metadata that yt-dlp may expose on the original
             # Instagram result but not on the processed media result.
-            #
-            # This is especially important for Instagram Reels where
-            # view_count can exist on the original extractor result.
             # -----------------------------------------------------------
-            if isinstance(processed, dict):
+            if isinstance(
+                processed,
+                dict,
+            ):
                 for key in (
                     "id",
                     "title",
@@ -1419,46 +1572,80 @@ def _download_with_selector(
                     "extractor_key",
                 ):
                     if (
-                        processed.get(key) is None
-                        and raw_entry.get(key) is not None
+                        processed.get(
+                            key
+                        ) is None
+                        and raw_entry.get(
+                            key
+                        ) is not None
                     ):
-                        processed[key] = raw_entry[key]
+                        processed[key] = (
+                            raw_entry[key]
+                        )
 
                 # Some Instagram extraction paths use
                 # video_view_count internally.
                 if (
-                    processed.get("view_count") is None
-                    and raw_entry.get("video_view_count") is not None
+                    processed.get(
+                        "view_count"
+                    ) is None
+                    and raw_entry.get(
+                        "video_view_count"
+                    ) is not None
                 ):
-                    processed["view_count"] = (
-                        raw_entry["video_view_count"]
-                    )
+                    processed[
+                        "view_count"
+                    ] = raw_entry[
+                        "video_view_count"
+                    ]
 
-            raw_path = ydl.prepare_filename(
-                processed
+            raw_path = (
+                ydl.prepare_filename(
+                    processed
+                )
             )
 
             if extract_audio:
-                mp3_path = os.path.splitext(raw_path)[0] + ".mp3"
+                mp3_path = (
+                    os.path.splitext(
+                        raw_path
+                    )[0]
+                    + ".mp3"
+                )
 
                 path = (
                     mp3_path
-                    if os.path.exists(mp3_path)
+                    if os.path.exists(
+                        mp3_path
+                    )
                     else raw_path
                 )
 
             else:
-                # After yt-dlp merges video + audio, the final file
-                # should be MP4. Find it explicitly.
+                # After yt-dlp merges video + audio,
+                # locate the final MP4 explicitly.
                 mp4_candidates = []
 
-                if entry_id and os.path.isdir(DOWNLOAD_DIR):
-                    prefix = f"{entry_id}."
+                if (
+                    entry_id
+                    and os.path.isdir(
+                        DOWNLOAD_DIR
+                    )
+                ):
+                    prefix = (
+                        f"{entry_id}."
+                    )
 
-                    for name in os.listdir(DOWNLOAD_DIR):
+                    for name in os.listdir(
+                        DOWNLOAD_DIR
+                    ):
                         if (
-                            name.startswith(prefix)
-                            and name.lower().endswith(".mp4")
+                            name.startswith(
+                                prefix
+                            )
+                            and name.lower().endswith(
+                                ".mp4"
+                            )
                         ):
                             mp4_candidates.append(
                                 os.path.join(
@@ -1475,188 +1662,218 @@ def _download_with_selector(
                 else:
                     path = raw_path
 
-                # Prepare the MP4 for Telegram/iPhone streaming.
-                #
-                # _ensure_h264_mp4() performs the codec conversion
-                # when necessary AND applies faststart in the same
-                # FFmpeg operation, so no second FFmpeg pass is needed.
                 path = _ensure_h264_mp4(
                     path,
                     ffmpeg_location,
                 )
 
-            if not os.path.exists(path):
-                _cleanup_id(entry_id)
+            if not os.path.exists(
+                path
+            ):
+                _cleanup_id(
+                    entry_id
+                )
 
                 raise Exception(
                     f"downloaded file does not exist: {path}"
                 )
 
-            actual_size = os.path.getsize(path)
+            actual_size = (
+                os.path.getsize(
+                    path
+                )
+            )
 
-            if actual_size < MIN_VALID_FILE_BYTES:
-                _cleanup_id(entry_id)
+            if (
+                actual_size
+                < MIN_VALID_FILE_BYTES
+            ):
+                _cleanup_id(
+                    entry_id
+                )
 
                 raise Exception(
                     f"incomplete download: {path}"
                 )
 
-            if actual_size > MAX_TELEGRAM_BYTES:
-                _cleanup_id(entry_id)
+            if (
+                actual_size
+                > MAX_TELEGRAM_BYTES
+            ):
+                _cleanup_id(
+                    entry_id
+                )
 
                 raise FileTooLargeError(
-                    format_size(actual_size)
-                )
-        filepaths.append(path)
-
-        # -----------------------------------------------------------
-        # Merge the raw Instagram metadata with the processed
-        # yt-dlp metadata.
-        # -----------------------------------------------------------
-
-        metadata_entry = dict(
-            raw_entry or {}
-        )
-
-        metadata_entry.update(
-            processed or {}
-        )
-
-        extractor_name = str(
-            metadata_entry.get(
-                "extractor_key"
-            )
-            or metadata_entry.get(
-                "extractor"
-            )
-            or raw_entry.get(
-                "extractor_key"
-            )
-            or raw_entry.get(
-                "extractor"
-            )
-            or ""
-        ).lower()
-
-        # -----------------------------------------------------------
-        # Instagram Reel view/play count recovery.
-        # -----------------------------------------------------------
-
-        if "instagram" in extractor_name:
-
-            logger.info(
-                "Instagram metadata before recovery: "
-                "id=%s extractor=%s "
-                "view_count=%r "
-                "video_view_count=%r "
-                "video_play_count=%r "
-                "uploader_id=%r "
-                "channel_id=%r",
-                metadata_entry.get(
-                    "id"
-                ),
-                extractor_name,
-                metadata_entry.get(
-                    "view_count"
-                ),
-                metadata_entry.get(
-                    "video_view_count"
-                ),
-                metadata_entry.get(
-                    "video_play_count"
-                ),
-                metadata_entry.get(
-                    "uploader_id"
-                ),
-                metadata_entry.get(
-                    "channel_id"
-                ),
-            )
-
-            # First: use a normal yt-dlp count if one exists.
-            instagram_views = (
-                _get_instagram_view_count(
-                    processed,
-                    raw_entry,
-                    info_raw,
-                )
-            )
-
-            if instagram_views is not None:
-
-                metadata_entry[
-                    "view_count"
-                ] = instagram_views
-
-                metadata_entry[
-                    "video_view_count"
-                ] = instagram_views
-
-            else:
-
-                # Instagram may omit view_count and
-                # video_view_count on public Reels.
-                #
-                # Recover the Reel play count through
-                # Instagram's Clips connection.
-
-                instagram_play_count = (
-                    _instagram_clip_play_count(
-                        ydl,
-                        metadata_entry,
+                    format_size(
+                        actual_size
                     )
                 )
 
-                if instagram_play_count is not None:
+            # IMPORTANT:
+            # Append every downloaded entry immediately.
+            filepaths.append(
+                path
+            )
 
+            # -----------------------------------------------------------
+            # Build metadata for THIS entry.
+            # -----------------------------------------------------------
+            metadata_entry = dict(
+                raw_entry
+            )
+
+            if isinstance(
+                processed,
+                dict,
+            ):
+                metadata_entry.update(
+                    processed
+                )
+
+            extractor_name = str(
+                metadata_entry.get(
+                    "extractor_key"
+                )
+                or metadata_entry.get(
+                    "extractor"
+                )
+                or raw_entry.get(
+                    "extractor_key"
+                )
+                or raw_entry.get(
+                    "extractor"
+                )
+                or ""
+            ).lower()
+
+            # -----------------------------------------------------------
+            # Instagram Reel view/play count recovery.
+            # -----------------------------------------------------------
+            if (
+                "instagram" in extractor_name
+                and not _is_instagram_story_url(
+                    url
+                )
+            ):
+                logger.info(
+                    "Instagram metadata before recovery: "
+                    "id=%s extractor=%s "
+                    "view_count=%r "
+                    "video_view_count=%r "
+                    "video_play_count=%r "
+                    "uploader_id=%r "
+                    "channel_id=%r",
+                    metadata_entry.get(
+                        "id"
+                    ),
+                    extractor_name,
+                    metadata_entry.get(
+                        "view_count"
+                    ),
+                    metadata_entry.get(
+                        "video_view_count"
+                    ),
+                    metadata_entry.get(
+                        "video_play_count"
+                    ),
+                    metadata_entry.get(
+                        "uploader_id"
+                    ),
+                    metadata_entry.get(
+                        "channel_id"
+                    ),
+                )
+
+                instagram_views = (
+                    _get_instagram_view_count(
+                        processed,
+                        raw_entry,
+                        info_raw,
+                    )
+                )
+
+                if instagram_views is not None:
                     metadata_entry[
                         "view_count"
-                    ] = instagram_play_count
+                    ] = (
+                        instagram_views
+                    )
 
                     metadata_entry[
                         "video_view_count"
-                    ] = instagram_play_count
-
-                    metadata_entry[
-                        "video_play_count"
-                    ] = instagram_play_count
-
-                    metadata_entry[
-                        "play_count"
-                    ] = instagram_play_count
-
-                    logger.info(
-                        "Instagram final view count: "
-                        "id=%s count=%s",
-                        metadata_entry.get(
-                            "id"
-                        ),
-                        instagram_play_count,
+                    ] = (
+                        instagram_views
                     )
 
                 else:
-
-                    logger.warning(
-                        "Instagram view count could not "
-                        "be recovered: id=%s",
-                        metadata_entry.get(
-                            "id"
-                        ),
+                    instagram_play_count = (
+                        _instagram_clip_play_count(
+                            ydl,
+                            metadata_entry,
+                        )
                     )
 
-        # IMPORTANT:
-        # Always append the entry, regardless of whether the
-        # Instagram fallback succeeded.
-        valid_entries.append(
-            metadata_entry
-        )
+                    if (
+                        instagram_play_count
+                        is not None
+                    ):
+                        metadata_entry[
+                            "view_count"
+                        ] = (
+                            instagram_play_count
+                        )
+
+                        metadata_entry[
+                            "video_view_count"
+                        ] = (
+                            instagram_play_count
+                        )
+
+                        metadata_entry[
+                            "video_play_count"
+                        ] = (
+                            instagram_play_count
+                        )
+
+                        metadata_entry[
+                            "play_count"
+                        ] = (
+                            instagram_play_count
+                        )
+
+                        logger.info(
+                            "Instagram final view count: "
+                            "id=%s count=%s",
+                            metadata_entry.get(
+                                "id"
+                            ),
+                            instagram_play_count,
+                        )
+
+                    else:
+                        logger.warning(
+                            "Instagram view count could not "
+                            "be recovered: id=%s",
+                            metadata_entry.get(
+                                "id"
+                            ),
+                        )
+
+            valid_entries.append(
+                metadata_entry
+            )
 
         if not filepaths:
             raise Exception(
                 "Nothing could be downloaded from this link."
             )
 
-        return info_raw, valid_entries, filepaths
+        return (
+            info_raw,
+            valid_entries,
+            filepaths,
+        )
 
     last_error = None
 
