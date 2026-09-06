@@ -50,6 +50,7 @@ DOWNLOAD_DIR = "downloads"
 PLATFORM_NAMES = {
     "instagram": "Instagram",
     "youtube": "YouTube",
+    "tiktok": "TikTok",
     "soundcloud": "SoundCloud",
     "spotify": "Spotify",
 }
@@ -57,6 +58,10 @@ PLATFORM_NAMES = {
 PLATFORM_PATTERNS = {
     "instagram": re.compile(r"instagram\.com/\S+", re.IGNORECASE),
     "youtube": re.compile(r"(youtube\.com|youtu\.be)/\S+", re.IGNORECASE),
+    "tiktok": re.compile(
+        r"(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/\S+",
+        re.IGNORECASE,
+    ),
     "soundcloud": re.compile(r"soundcloud\.com/\S+", re.IGNORECASE),
     "spotify": re.compile(r"(open\.)?spotify\.com/\S+", re.IGNORECASE),
 }

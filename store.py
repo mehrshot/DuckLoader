@@ -45,6 +45,7 @@ DEFAULT_FLAGS = {
     "soundcloud": True,
     "spotify": True,
     "youtube": False,
+    "tiktok": True,
     "auto_quality_fallback": False,
     "ad_requests_button": True,
     "sponsor_channel_gate": True,

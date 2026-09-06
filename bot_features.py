@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 thumb_cache = {}
 audio_source_cache = {}  # post_id -> original url, for the "get audio" button under video posts
+last_link_messages = {}
 user_settings = store.load_user_settings()
 
 # --- rate limiting + concurrency cap ---
@@ -102,8 +103,15 @@ def _render_bar(percent_str: str, width: int = 10) -> str:
 
 TEXTS = {
     'fa': {
-        'welcome': "🦆 **به DuckLoader خوش اومدی!**\n\nمن اردک دانلودچیِ توام — لینک رو بفرست، می‌رم پیداش می‌کنم و برات برمی‌گردونمش. ⚡\n\nاز Instagram، SoundCloud، Spotify و YouTube پشتیبانی می‌کنم.\n\nکیفیت دلخواهت رو از /settings انتخاب کن.\n\n🦆 اگه لینک داشته باشی، منم یه راه برای آوردنش پیدا می‌کنم!",
-        'init': "⏳ در حال برقراری ارتباط...",
+        'welcome': (
+            "🦆 **به DuckLoader خوش اومدی!**\n\n"
+            "من اردک دانلودچیِ توام — لینک رو بفرست، "
+            "می‌رم پیداش می‌کنم و برات برمی‌گردونمش. ⚡\n\n"
+            "از Instagram، TikTok، SoundCloud، Spotify و YouTube "
+            "پشتیبانی می‌کنم.\n\n"
+            "کیفیت دلخواهت رو از /settings انتخاب کن.\n\n"
+            "🦆 اگه لینک داشته باشی، منم یه راه برای آوردنش پیدا می‌کنم!"
+        ),        'init': "⏳ در حال برقراری ارتباط...",
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
         'uploading': "✅ دانلود تکمیل شد! در حال آپلود...",
         'failed': "❌ خطا: {error}",
@@ -111,6 +119,10 @@ TEXTS = {
         'instagram_failed': "❌ دریافت محتوای اینستاگرام انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
         'instagram_unavailable': "❌ این استوری اینستاگرام در حال حاضر برای ربات قابل دسترسی نیست. ممکنه نیاز به ورود به اینستاگرام داشته باشه یا استوری دیگه در دسترس نباشه.",
         'youtube_failed': "❌ دریافت این ویدیوی یوتیوب در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
+        'tiktok_failed': (
+            "❌ دریافت این ویدیوی TikTok در حال حاضر انجام نشد. "
+            "لطفاً لینک را بررسی کنید و دوباره امتحان کنید."
+        ),
         'soundcloud_failed': "❌ دریافت این ترک ساندکلاد در حال حاضر انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
         'spotify_failed': "❌ دریافت این ترک اسپاتیفای در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
         'not_launched': "🚧 دانلود از {platform} هنوز لانچ نشده. به‌زودی فعال می‌شود!",
@@ -155,9 +167,18 @@ TEXTS = {
         'removesponsor_done': "✅ حذف شد.",
         'removesponsor_not_found': "همچین کانالی توی لیست نبود.",
         'sponsors_empty': "لیست کانال‌های حامی خالیه — یعنی قفل عضویت برای هیچ‌کس فعال نیست.",
-        'sponsor_gate_title': "🔸 برای استفاده‌ی رایگان از این بات، لطفاً عضو کانال(های) حامی زیر شو (هزینه‌ی نگهداری بات رو تأمین می‌کنن):",
-        'sponsor_gate_join': "➕ عضویت در {name}",
-        'sponsor_gate_retry': "بعد از عضویت، همون لینک رو دوباره بفرست.",
+        'sponsor_gate_title': "🔸 برای استفاده‌ی رایگان از این بات، در چنل‌های اسپانسر عضو بشید:",
+        'sponsor_gate_join': "{name}",
+        'sponsor_gate_retry': (
+            "بعد از عضویت، روی دکمه «✅ بررسی عضویت و ادامه» بزنید "
+            "تا وضعیت عضویت شما بررسی شود و لینک قبلی ادامه پیدا کند."
+        ),
+        'sponsor_gate_check': "✅ بررسی عضویت و ادامه",
+        'sponsor_gate_not_joined': (
+            "❌ هنوز عضو همه کانال‌های حامی نشده‌اید.\n\n"
+            "لطفاً عضو کانال‌های باقی‌مانده شوید و دوباره بررسی کنید."
+        ),
+        'sponsor_gate_confirmed': "✅ عضویت شما تأیید شد. دانلود شروع می‌شود.",
         'yt_choose_quality': "🎬 {title}\n\nکیفیت مورد نظر رو انتخاب کن:",
         'yt_no_quality': "⚠️ متأسفانه هیچ کیفیتی از این ویدیو زیر سقف مجاز نیست.",
         'ad_button': "📣 تبلیغات در ربات",
@@ -215,6 +236,22 @@ TEXTS = {
         'adm_errors_title': "🚨 آخرین خطاهای دانلود:",
         'adm_errors_empty': "✅ هیچ خطای ثبت‌شده‌ای وجود نداره.",
         'adm_mysettings': "🌐 تنظیمات شخصی من",
+        'adm_commands': "📚 دستورات مدیر",
+        'adm_commands_title': (
+            "📚 **دستورات مدیر DuckLoader**\n\n"
+            "/lock <platform> — قفل کردن پلتفرم\n"
+            "/unlock <platform> — باز کردن پلتفرم\n"
+            "/toggle <setting> — روشن/خاموش کردن تنظیم\n"
+            "/stats — نمایش آمار\n"
+            "/broadcast <message> — پیام همگانی\n"
+            "/ban <user_id> — مسدود کردن کاربر\n"
+            "/unban <user_id> — رفع مسدودی کاربر\n"
+            "/setad <message> — تنظیم تبلیغ عمومی\n"
+            "/checksponsor <channel> — بررسی دسترسی بات به کانال حامی\n"
+            "/addsponsor <channel> <name> — افزودن کانال حامی\n"
+            "/removesponsor <channel> — حذف کانال حامی\n"
+            "/sponsors — نمایش کانال‌های حامی"
+        ),
         'back': "⬅️ بازگشت",
         'adm_platforms_title': "کدوم پلتفرم رو می‌خوای قفل/باز کنی؟",
         'adm_toggles_title': "کدوم تنظیم رو می‌خوای روشن/خاموش کنی؟",
@@ -263,8 +300,15 @@ TEXTS = {
         'ad_lang_fa': "🇮🇷 فارسی",
     },
     'en': {
-        'welcome': "🦆 **Welcome to DuckLoader!**\n\nI’m your little download duck. Send me a link and I’ll waddle off, fetch it, and bring it back to you. ⚡\n\nI support Instagram, SoundCloud, Spotify, and YouTube.\n\nChoose your preferred quality in /settings.\n\n🦆 You bring the link. I’ll bring the media.",
-        'init': "⏳ Initializing connection...",
+        'welcome': (
+            "🦆 **Welcome to DuckLoader!**\n\n"
+            "I’m your little download duck. Send me a link and "
+            "I’ll waddle off, fetch it, and bring it back to you. ⚡\n\n"
+            "I support Instagram, TikTok, SoundCloud, Spotify, "
+            "and YouTube.\n\n"
+            "Choose your preferred quality in /settings.\n\n"
+            "🦆 You bring the link. I’ll bring the media."
+        ),        'init': "⏳ Initializing connection...",
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
         'uploading': "✅ Download complete! Preparing upload...",
         'failed': "❌ Failed: {error}",
@@ -272,6 +316,10 @@ TEXTS = {
         'instagram_failed': "❌ We couldn't download this Instagram content right now. Please check the link and try again.",
         'instagram_unavailable': "❌ This Instagram story isn't currently accessible to the bot. It may require an Instagram login or may no longer be available.",
         'youtube_failed': "❌ We couldn't download this YouTube video right now. Please try again in a moment.",
+        'tiktok_failed': (
+            "❌ We couldn't download this TikTok video right now. "
+            "Please check the link and try again."
+        ),
         'soundcloud_failed': "❌ We couldn't download this SoundCloud track right now. Please check the link and try again.",
         'spotify_failed': "❌ We couldn't download this Spotify track right now. Please try again in a moment.",
         'not_launched': "🚧 Downloading from {platform} hasn't launched yet. Stay tuned!",
@@ -316,9 +364,19 @@ TEXTS = {
         'removesponsor_done': "✅ Removed.",
         'removesponsor_not_found': "That channel wasn't in the list.",
         'sponsors_empty': "The sponsor channel list is empty — the join gate is off for everyone.",
-        'sponsor_gate_title': "🔸 To use this bot for free, please join our sponsor channel(s) below (they help cover the cost of running it):",
-        'sponsor_gate_join': "➕ Join {name}",
-        'sponsor_gate_retry': "After joining, just resend your link.",
+        'sponsor_gate_title': "🔸 To use this bot for free, please join our sponsor channels.",
+        'sponsor_gate_join': "{name}",
+        'sponsor_gate_retry': (
+            "After joining, tap "
+            "\"✅ Check Membership & Continue\" below. "
+            "Your previous link will then continue automatically."
+        ),
+        'sponsor_gate_check': "✅ Check Membership & Continue",
+        'sponsor_gate_not_joined': (
+            "❌ You're still not a member of all sponsor channels.\n\n"
+            "Please join the remaining channel(s) and check again."
+        ),
+        'sponsor_gate_confirmed': "✅ Membership confirmed. Your download continues.",
         'yt_choose_quality': "🎬 {title}\n\nChoose a quality:",
         'yt_no_quality': "⚠️ Unfortunately no quality of this video is under the allowed size limit.",
         'ad_button': "📣 تبلیغات در ربات",
@@ -376,6 +434,22 @@ TEXTS = {
         'adm_errors_title': "🚨 Recent Download Errors:",
         'adm_errors_empty': "✅ No recorded download errors.",
         'adm_mysettings': "🌐 My Own Settings",
+        'adm_commands': "📚 Admin Commands",
+        'adm_commands_title': (
+            "📚 **DuckLoader Admin Commands**\n\n"
+            "/lock <platform> — Lock a platform\n"
+            "/unlock <platform> — Unlock a platform\n"
+            "/toggle <setting> — Toggle a bot setting\n"
+            "/stats — Show bot statistics\n"
+            "/broadcast <message> — Broadcast to users\n"
+            "/ban <user_id> — Ban a user\n"
+            "/unban <user_id> — Unban a user\n"
+            "/setad <message> — Set the global ad\n"
+            "/checksponsor <channel> — Check bot access to a sponsor channel\n"
+            "/addsponsor <channel> <name> — Add a sponsor channel\n"
+            "/removesponsor <channel> — Remove a sponsor channel\n"
+            "/sponsors — List sponsor channels"
+        ),
         'back': "⬅️ Back",
         'adm_platforms_title': "Which platform do you want to lock/unlock?",
         'adm_toggles_title': "Which setting do you want to turn on/off?",
@@ -840,6 +914,12 @@ def _friendly_download_error(
 
         return t[
             "youtube_failed"
+        ]
+
+    if platform == "tiktok":
+
+        return t[
+            "tiktok_failed"
         ]
 
     if platform == "soundcloud":
@@ -1481,7 +1561,9 @@ def register_features(bot):
         if not unjoined:
             return True
 
-        markup = InlineKeyboardMarkup()
+        markup = InlineKeyboardMarkup(
+            row_width=1
+        )
 
         for channel in unjoined:
             username = (
@@ -1529,6 +1611,20 @@ def register_features(bot):
 
         if not markup.keyboard:
             return True
+
+        markup.add(
+            InlineKeyboardButton(
+                t[
+                    "sponsor_gate_check"
+                ],
+                callback_data=(
+                    "sponsor_check_"
+                    + str(
+                        user_id
+                    )
+                ),
+            )
+        )
 
         bot.send_message(
             chat_id_int,
@@ -3016,6 +3112,13 @@ def register_features(bot):
         user = store.get_user(user_settings, chat_id_str)
         t = TEXTS[user['lang']]
 
+        last_link_messages[
+            (
+                chat_id_int,
+                user_id,
+            )
+        ] = message
+
         if not _check_sponsor_channel_gate(
             chat_id_int,
             user_id,
@@ -3139,6 +3242,111 @@ def register_features(bot):
             return
 
         _run_direct_download(chat_id_int, message.message_id, url, user['quality'], t, status_msg)
+
+    @bot.callback_query_handler(
+        func=lambda call:
+            call.data.startswith(
+                "sponsor_check_"
+            )
+    )
+    def handle_sponsor_check_callback(
+        call
+    ):
+        chat_id_int = (
+            call.message.chat.id
+        )
+
+        user_id = (
+            call.from_user.id
+        )
+
+        t = _texts_for(
+            str(
+                chat_id_int
+            )
+        )
+
+        if store.is_banned(
+            user_id
+        ):
+            bot.answer_callback_query(
+                call.id
+            )
+            return
+
+        try:
+            callback_user_id = int(
+                call.data.split(
+                    "sponsor_check_",
+                    1,
+                )[1]
+            )
+        except (
+            ValueError,
+            IndexError,
+        ):
+            bot.answer_callback_query(
+                call.id,
+                "Invalid membership check.",
+                show_alert=True,
+            )
+            return
+
+        if callback_user_id != user_id:
+            bot.answer_callback_query(
+                call.id,
+                "This button belongs to another user.",
+                show_alert=True,
+            )
+            return
+
+        last_message = (
+            last_link_messages.get(
+                (
+                    chat_id_int,
+                    user_id,
+                )
+            )
+        )
+
+        if not last_message:
+            bot.answer_callback_query(
+                call.id,
+                t.get(
+                    "audio_expired",
+                    "Please send your link again.",
+                ),
+                show_alert=True,
+            )
+            return
+
+        if not _check_sponsor_channel_gate(
+            chat_id_int,
+            user_id,
+            t,
+        ):
+            bot.answer_callback_query(
+                call.id
+            )
+            return
+
+        bot.answer_callback_query(
+            call.id,
+            "✅ Membership confirmed.",
+        )
+
+        try:
+            bot.edit_message_reply_markup(
+                chat_id_int,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        handle_media_link(
+            last_message
+        )
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('thumb_'))
     def handle_thumbnail_callback(call):

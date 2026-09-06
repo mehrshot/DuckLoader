@@ -102,6 +102,13 @@ def _panel_markup(t):
         )
     )
 
+    m.add(
+        InlineKeyboardButton(
+            t["adm_commands"],
+            callback_data="adm_menu_commands",
+        )
+    )
+
     return m
 
 def _platforms_markup(flags, t) -> InlineKeyboardMarkup:
@@ -807,6 +814,14 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
 
         if data == 'adm_menu_main':
             edit(t['adm_title'], _panel_markup(t))
+        elif data == "adm_menu_commands":
+            edit(
+                t["adm_commands_title"],
+                _back_markup(
+                    "adm_menu_main",
+                    t,
+                ),
+            )
         elif data == 'adm_menu_platforms':
             edit(t['adm_platforms_title'], _platforms_markup(flags, t))
         elif data == 'adm_menu_toggles':
@@ -969,76 +984,6 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                         display_name
                         or normalized_channel,
                     )
-
-            try:
-                user_t = texts_for(
-                    updated["user_id"]
-                )
-
-                bot.send_message(
-                    updated["user_id"],
-                    user_t[
-                        "ad_admin_approved"
-                    ],
-                )
-            except Exception:
-                pass
-
-            edit_plain(
-                _format_ad_request_for_admin(
-                    updated,
-                    t,
-                ),
-                _ad_request_action_markup(
-                    updated,
-                    t,
-                ),
-            )
-
-            if not updated:
-                bot.answer_callback_query(
-                    call.id,
-                    "Could not update request.",
-                    show_alert=True,
-                )
-                return
-
-            if (
-                updated.get(
-                    "ad_type"
-                )
-                == "sponsor_channel"
-            ):
-                channel_username = (
-                    updated.get(
-                        "channel",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                display_name = (
-                    updated.get(
-                        "display_name",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                if channel_username:
-                    ads.add_sponsor_channel(
-                        channel_username,
-                        display_name
-                        or channel_username,
-                    )
-
-            elif (
-                updated.get(
-                    "ad_type"
-                )
-                == "post_download"
-            ):
-                pass
 
             try:
                 user_t = texts_for(
