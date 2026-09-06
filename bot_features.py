@@ -59,11 +59,21 @@ MAX_QUEUE_WAITING = 15
 _queue_waiting_count = 0
 _queue_lock = threading.Lock()
 
+def _is_private_chat(chat_type) -> bool:
+    return chat_type == "private"
 
-def _acquire_download_slot(bot, chat_id_int, status_msg, t) -> bool:
-    """Returns True once a download slot is acquired. Returns False (and
-    already told the user) if the wait queue is already too deep — caller
-    should stop immediately without touching the semaphore."""
+def _acquire_download_slot(
+    bot,
+    chat_id_int,
+    status_msg,
+    t,
+    show_ui=True,
+) -> bool:
+    """Returns True once a download slot is acquired.
+
+    In private chats the user sees queue/busy status messages.
+    In groups/supergroups those messages are suppressed.
+    """
     global _queue_waiting_count
 
     if _download_semaphore.acquire(blocking=False):
@@ -71,17 +81,29 @@ def _acquire_download_slot(bot, chat_id_int, status_msg, t) -> bool:
 
     with _queue_lock:
         if _queue_waiting_count >= MAX_QUEUE_WAITING:
-            bot.edit_message_text(t['server_busy'], chat_id_int, status_msg.message_id)
+            if show_ui and status_msg is not None:
+                bot.edit_message_text(
+                    t['server_busy'],
+                    chat_id_int,
+                    status_msg.message_id,
+                )
             return False
+
         _queue_waiting_count += 1
 
-    bot.edit_message_text(t['queued'], chat_id_int, status_msg.message_id)
+    if show_ui and status_msg is not None:
+        bot.edit_message_text(
+            t['queued'],
+            chat_id_int,
+            status_msg.message_id,
+        )
+
     _download_semaphore.acquire()
 
     with _queue_lock:
         _queue_waiting_count -= 1
-    return True
 
+    return True
 
 def _is_rate_limited(user_id) -> bool:
     now = time.time()
@@ -1315,7 +1337,11 @@ def register_features(bot):
         event,
         track_status=False,
         track_complete=False,
+        show_ui=True,
     ):
+        if not show_ui:
+            return None
+
         reactions = (
             store.load_duck_reactions()
         )
@@ -1412,7 +1438,11 @@ def register_features(bot):
 
     def _send_duck_download_failed(
         chat_id_int,
+        show_ui=True,
     ):
+        if not show_ui:
+            return
+
         _finish_duck_download(
             chat_id_int,
         )
@@ -1420,12 +1450,16 @@ def register_features(bot):
         _send_duck_reaction(
             chat_id_int,
             "failed",
+            show_ui=True,
         )
-
 
     def _send_duck_download_complete(
         chat_id_int,
+        show_ui=True,
     ):
+        if not show_ui:
+            return
+
         _finish_duck_download(
             chat_id_int,
         )
@@ -1439,6 +1473,7 @@ def register_features(bot):
             chat_id_int,
             "complete",
             track_complete=True,
+            show_ui=True,
         )
 
     def _maybe_send_ad(chat_id_int):
@@ -1651,39 +1686,93 @@ def register_features(bot):
 
         return False
 
-    def _make_progress_hook(chat_id_int, status_msg, t):
-        """Shared by every download path (direct, spotify, YouTube quality
-        picker) so there's one place that decides how often to update the
-        status message and what it looks like."""
+    def _make_progress_hook(
+        chat_id_int,
+        status_msg,
+        t,
+        show_ui=True,
+    ):
+        """Shared progress hook.
+
+        Progress messages are shown only in private chats.
+        """
+
         state = {"last_edit": 0}
 
         def progress_hook(d):
+            if not show_ui or status_msg is None:
+                return
+
             if d.get('status') == 'downloading':
                 now = time.time()
+
                 if now - state["last_edit"] > 2.0:
-                    percent = (d.get('_percent_str') or 'N/A').strip()
-                    eta = (d.get('_eta_str') or 'N/A').strip()
-                    size = d.get('_total_bytes_str') or d.get('_estimated_total_bytes_str', 'N/A')
+                    percent = (
+                        d.get('_percent_str') or 'N/A'
+                    ).strip()
+
+                    eta = (
+                        d.get('_eta_str') or 'N/A'
+                    ).strip()
+
+                    size = (
+                        d.get('_total_bytes_str')
+                        or d.get(
+                            '_estimated_total_bytes_str',
+                            'N/A',
+                        )
+                    )
+
                     if isinstance(size, str):
                         size = size.strip()
-                    log_text = t['downloading'].format(bar=_render_bar(percent), percent=percent, size=size, eta=eta)
+
+                    log_text = t['downloading'].format(
+                        bar=_render_bar(percent),
+                        percent=percent,
+                        size=size,
+                        eta=eta,
+                    )
+
                     try:
-                        bot.edit_message_text(log_text, chat_id_int, status_msg.message_id, parse_mode="Markdown")
+                        bot.edit_message_text(
+                            log_text,
+                            chat_id_int,
+                            status_msg.message_id,
+                            parse_mode="Markdown",
+                        )
                     except Exception:
                         pass
+
                     state["last_edit"] = now
 
         return progress_hook
 
-    def _send_download_result(chat_id_int, reply_to_id, url, platform, quality_requested, quality_used, info, entries, files, t):
+    def _send_download_result(
+        chat_id_int,
+        reply_to_id,
+        url,
+        platform,
+        quality_requested,
+        quality_used,
+        info,
+        entries,
+        files,
+        t,
+        show_ui=True,
+    ):
         """Builds the caption/buttons and sends the downloaded file(s) —
         one file directly, or a chunked media group for multi-item posts
         (Instagram carousels). Adds the "get audio" button when the result
         includes a video and the user didn't already request audio-only.
         Shared by the direct-download flow and the 'get audio' button."""
-        if quality_used != quality_requested:
-            bot.send_message(chat_id_int, t['quality_reduced'].format(quality=t[f'quality_{quality_used}']))
 
+        if quality_used != quality_requested and show_ui:
+            bot.send_message(
+                chat_id_int,
+                t['quality_reduced'].format(
+                    quality=t[f'quality_{quality_used}']
+                ),
+            )
         # Merge the parent result with the individual media entry.
         #
         # The parent result can contain the Instagram username ("channel")
@@ -1704,9 +1793,13 @@ def register_features(bot):
                 ):
                     metadata_source[key] = value
 
-        caption = _build_caption(
-            metadata_source,
-            url,
+        caption = (
+            _build_caption(
+                metadata_source,
+                url,
+            )
+            if show_ui
+            else ""
         )
 
         thumb_url = (
@@ -1722,12 +1815,33 @@ def register_features(bot):
         if offer_audio_button:
             audio_source_cache[post_id] = url
 
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton(text=t['view_link'], url=url))
-        if thumb_url:
-            markup.add(InlineKeyboardButton(text=t['dl_cover'], callback_data=f"thumb_{post_id}"))
-        if offer_audio_button:
-            markup.add(InlineKeyboardButton(text=t['get_audio_btn'], callback_data=f"audio_{post_id}"))
+        markup = None
+
+        if show_ui:
+            markup = InlineKeyboardMarkup()
+
+            markup.add(
+                InlineKeyboardButton(
+                    text=t['view_link'],
+                    url=url,
+                )
+            )
+
+            if thumb_url:
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t['dl_cover'],
+                        callback_data=f"thumb_{post_id}",
+                    )
+                )
+
+            if offer_audio_button:
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t['get_audio_btn'],
+                        callback_data=f"audio_{post_id}",
+                    )
+                )
 
         if len(valid_files) == 1:
             filepath = valid_files[0]
@@ -1903,6 +2017,7 @@ def register_features(bot):
         quality,
         t,
         status_msg,
+        show_ui=True,
     ):
         """
         Shared direct-download worker.
@@ -1915,6 +2030,7 @@ def register_features(bot):
             chat_id_int,
             status_msg,
             t,
+            show_ui=show_ui,
         )
 
         if not _acquire_download_slot(
@@ -1922,6 +2038,7 @@ def register_features(bot):
             chat_id_int,
             status_msg,
             t,
+            show_ui=show_ui,
         ):
             return
 
@@ -1929,6 +2046,7 @@ def register_features(bot):
             chat_id_int,
             "downloading",
             track_status=True,
+            show_ui=show_ui,
         )
 
         platform = (
@@ -1954,12 +2072,12 @@ def register_features(bot):
                 allow_fallback=allow_fallback,
                 progress_hook=progress_hook,
             )
-
-            bot.edit_message_text(
-                t["uploading"],
-                chat_id_int,
-                status_msg.message_id,
-            )
+            if show_ui and status_msg is not None:
+                bot.edit_message_text(
+                    t["uploading"],
+                    chat_id_int,
+                    status_msg.message_id,
+                )
 
             _send_download_result(
                 chat_id_int,
@@ -1972,26 +2090,31 @@ def register_features(bot):
                 entries,
                 files,
                 t,
+                show_ui=show_ui,
             )
 
             _send_duck_download_complete(
-                chat_id_int
-            )
-
-            bot.delete_message(
                 chat_id_int,
-                status_msg.message_id,
+                show_ui=show_ui,
             )
 
-            _maybe_send_ad(
-                chat_id_int
-            )
+            if show_ui and status_msg is not None:
+                try:
+                    bot.delete_message(
+                        chat_id_int,
+                        status_msg.message_id,
+                    )
+                except Exception:
+                    pass
+            if show_ui:
+                _maybe_send_ad(chat_id_int)
 
         except platforms.FileTooLargeError as e:
-
-            _send_duck_download_failed(
-                chat_id_int
-            )
+            if show_ui and status_msg is not None:
+                _send_duck_download_failed(
+                    chat_id_int,
+                    show_ui=show_ui,
+                )
 
             store.record_error(
                 platform=platform,
@@ -2012,10 +2135,11 @@ def register_features(bot):
                 pass
 
         except Exception as e:
-
-            _send_duck_download_failed(
-                chat_id_int
-            )
+            if show_ui and status_msg is not None:
+                _send_duck_download_failed(
+                    chat_id_int,
+                    show_ui=show_ui,
+                )
 
             store.record_error(
                 platform=platform,
@@ -3114,6 +3238,10 @@ def register_features(bot):
         chat_id_int = message.chat.id
         user_id = message.from_user.id
 
+        show_ui = _is_private_chat(
+            message.chat.type
+        )
+
         if store.is_banned(user_id):
             return  # silently ignore banned users
 
@@ -3128,7 +3256,7 @@ def register_features(bot):
             )
         ] = message
 
-        if not _check_sponsor_channel_gate(
+        if show_ui and not _check_sponsor_channel_gate(
             chat_id_int,
             user_id,
             t,
@@ -3136,10 +3264,10 @@ def register_features(bot):
             return
 
         url = message.text.strip()
-
-        _delete_previous_download_ducks(
-            chat_id_int
-        )
+        if show_ui:
+            _delete_previous_download_ducks(
+                chat_id_int
+            )
 
         platform = platforms.detect_platform(
             url
@@ -3161,17 +3289,26 @@ def register_features(bot):
             bot.reply_to(message, t['rate_limited'].format(limit=RATE_LIMIT_COUNT))
             return
 
-        status_msg = bot.reply_to(message, t['init'])
-        bot.send_chat_action(chat_id_int, 'typing')
+        status_msg = None
+        if show_ui:
+            status_msg = bot.reply_to(
+                message,
+                t['init'],
+            )
+            bot.send_chat_action(
+                chat_id_int,
+                'typing',
+            )
 
         if platform == "spotify":
-            progress_hook = _make_progress_hook(chat_id_int, status_msg, t)
+            progress_hook = _make_progress_hook(chat_id_int, status_msg, t, show_ui=show_ui,)
 
             if not _acquire_download_slot(
                 bot,
                 chat_id_int,
                 status_msg,
                 t,
+                show_ui=show_ui,
             ):
                 return
 
@@ -3179,15 +3316,21 @@ def register_features(bot):
                 chat_id_int,
                 "downloading",
                 track_status=True,
+                show_ui=show_ui,
             )
 
             try:
                 tracks = platforms.resolve_spotify_tracks(url)
                 for i, track in enumerate(tracks):
-                    if len(tracks) > 1:
+                    if show_ui and len(tracks) > 1:
                         bot.edit_message_text(
-                            t['spotify_searching'].format(i=i + 1, total=len(tracks), name=f"{track['artists']} - {track['name']}"),
-                            chat_id_int, status_msg.message_id,
+                            t['spotify_searching'].format(
+                                i=i + 1,
+                                total=len(tracks),
+                                name=f"{track['artists']} - {track['name']}",
+                            ),
+                            chat_id_int,
+                            status_msg.message_id,
                         )
                     filepath = platforms.download_spotify_track(track, progress_hook)
                     try:
@@ -3208,18 +3351,25 @@ def register_features(bot):
                         if os.path.exists(filepath):
                             os.remove(filepath)
                     store.record_download("spotify")
-                bot.delete_message(
-                    chat_id_int,
-                    status_msg.message_id,
-                )
+
+                if show_ui and status_msg is not None:
+                    try:
+                        bot.delete_message(
+                            chat_id_int,
+                            status_msg.message_id,
+                        )
+                    except Exception:
+                        pass
 
                 _send_duck_download_complete(
-                    chat_id_int
+                    chat_id_int,
+                    show_ui=show_ui,
                 )
 
-                _maybe_send_ad(
-                    chat_id_int
-                )
+                if show_ui:
+                    _maybe_send_ad(
+                        chat_id_int
+                    )
             except Exception as e:
 
                 _send_duck_download_failed(
@@ -3250,7 +3400,7 @@ def register_features(bot):
                 _download_semaphore.release()
             return
 
-        _run_direct_download(chat_id_int, message.message_id, url, user['quality'], t, status_msg)
+        _run_direct_download(chat_id_int, message.message_id, url, user['quality'], t, status_msg, show_ui=show_ui,)
 
     @bot.callback_query_handler(
         func=lambda call:
