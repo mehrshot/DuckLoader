@@ -19,8 +19,17 @@ import ads
 import platforms
 import store
 
-TOGGLE_KEYS = {"auto_quality_fallback", "sponsor_message"}  # bot-wide behavior flags, not platforms
+TOGGLE_KEYS = {
+    "auto_quality_fallback",
+    "sponsor_message",
+    "ad_requests_button",
+}
 
+TOGGLE_LABELS = {
+    "auto_quality_fallback": "auto_quality_fallback",
+    "sponsor_message": "sponsor_message",
+    "ad_requests_button": "toggle_ad_requests_button",
+}
 # user_id -> which text-input action a /settings panel button is waiting on
 _pending_action = {}
 
@@ -57,27 +66,31 @@ def _panel_markup(t):
             callback_data="adm_menu_ads",
         ),
         InlineKeyboardButton(
-            t["adm_users"],
-            callback_data="adm_menu_users",
+            t["adm_ad_requests"],
+            callback_data="adm_menu_ad_requests",
         ),
     )
 
     m.add(
+        InlineKeyboardButton(
+            t["adm_users"],
+            callback_data="adm_menu_users",
+        ),
         InlineKeyboardButton(
             t["adm_stats"],
             callback_data="adm_menu_stats",
         ),
-        InlineKeyboardButton(
-            t["adm_errors"],
-            callback_data="adm_menu_errors",
-        ),
     )
 
     m.add(
         InlineKeyboardButton(
+            t["adm_errors"],
+            callback_data="adm_menu_errors",
+        ),
+        InlineKeyboardButton(
             t["adm_duck"],
             callback_data="adm_menu_duck",
-        )
+        ),
     )
 
     m.add(
@@ -98,12 +111,54 @@ def _platforms_markup(flags, t) -> InlineKeyboardMarkup:
     return m
 
 
-def _toggles_markup(flags, t) -> InlineKeyboardMarkup:
-    m = InlineKeyboardMarkup(row_width=1)
-    for key in sorted(TOGGLE_KEYS):
-        icon = "✅" if flags.get(key, False) else "❌"
-        m.add(InlineKeyboardButton(f"{icon} {key}", callback_data=f"adm_toggle_{key}"))
-    m.add(InlineKeyboardButton(t['back'], callback_data='adm_menu_main'))
+def _toggles_markup(
+    flags,
+    t,
+) -> InlineKeyboardMarkup:
+    m = InlineKeyboardMarkup(
+        row_width=1
+    )
+
+    for key in sorted(
+        TOGGLE_KEYS
+    ):
+        icon = (
+            "✅"
+            if flags.get(
+                key,
+                False,
+            )
+            else "❌"
+        )
+
+        label_key = (
+            TOGGLE_LABELS.get(
+                key,
+                key,
+            )
+        )
+
+        label = t.get(
+            label_key,
+            key,
+        )
+
+        m.add(
+            InlineKeyboardButton(
+                f"{icon} {label}",
+                callback_data=(
+                    f"adm_toggle_{key}"
+                ),
+            )
+        )
+
+    m.add(
+        InlineKeyboardButton(
+            t["back"],
+            callback_data="adm_menu_main",
+        )
+    )
+
     return m
 
 
@@ -249,6 +304,178 @@ def build_panel(t):
     """Returns (text, markup) for the admin panel's home screen."""
     return t['adm_title'], _panel_markup(t)
 
+def _ad_request_status_label(
+    request,
+    t,
+):
+    status = request.get(
+        "status"
+    )
+
+    if status == "pending":
+        return t[
+            "ad_admin_request_status_pending"
+        ]
+
+    if status == "approved":
+        return t[
+            "ad_admin_request_status_approved"
+        ]
+
+    if status == "rejected":
+        return t[
+            "ad_admin_request_status_rejected"
+        ]
+
+    return status or "—"
+
+
+def _format_ad_request_for_admin(
+    request,
+    t,
+):
+    username = (
+        request.get(
+            "telegram_username"
+        )
+        or "ندارد"
+    )
+
+    return (
+        f"{t['ad_admin_new']}\n\n"
+        f"{t['ad_admin_request_id']}: "
+        f"{request.get('request_id', '—')}\n"
+        f"Status: "
+        f"{_ad_request_status_label(request, t)}\n\n"
+        f"{t['ad_admin_user']}\n"
+        f"{t['ad_admin_username']}: "
+        f"{username}\n"
+        f"{t['ad_admin_user_id']}: "
+        f"{request.get('user_id', '—')}\n"
+        f"{t['ad_admin_name']}: "
+        f"{request.get('telegram_name', '—')}\n\n"
+        f"{t['ad_admin_channel']}: "
+        f"{request.get('channel', '—')}\n"
+        f"{t['ad_admin_display_name']}: "
+        f"{request.get('display_name', '—')}\n"
+        f"{t['ad_admin_type']}: "
+        f"{request.get('ad_type', '—')}\n"
+        f"{t['ad_admin_duration']}: "
+        f"{request.get('duration', '—')}\n"
+        f"{t['ad_admin_notes']}: "
+        f"{request.get('notes', '—')}\n"
+        f"{t['ad_admin_created_at']}: "
+        f"{request.get('created_at', '—')}"
+    )
+
+
+def _ad_requests_markup(
+    requests,
+    t,
+) -> InlineKeyboardMarkup:
+    m = InlineKeyboardMarkup(
+        row_width=1
+    )
+
+    for request in requests[:10]:
+        request_id = request.get(
+            "request_id"
+        )
+
+        display_name = (
+            request.get(
+                "display_name"
+            )
+            or request.get(
+                "channel"
+            )
+            or request_id
+            or "—"
+        )
+
+        display_name = str(
+            display_name
+        )[:35]
+
+        m.add(
+            InlineKeyboardButton(
+                f"🆕 {request_id} — {display_name}",
+                callback_data=(
+                    "adm_adreq_view_"
+                    + str(request_id)
+                ),
+            )
+        )
+
+    m.add(
+        InlineKeyboardButton(
+            "🔄",
+            callback_data="adm_menu_ad_requests",
+        )
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["back"],
+            callback_data="adm_menu_main",
+        )
+    )
+
+    return m
+
+
+def _ad_request_action_markup(
+    request,
+    t,
+) -> InlineKeyboardMarkup:
+    m = InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    if request.get(
+        "status"
+    ) == "pending":
+        m.add(
+            InlineKeyboardButton(
+                t["ad_admin_approve"],
+                callback_data=(
+                    "adm_adreq_approve_"
+                    + str(
+                        request["request_id"]
+                    )
+                ),
+            ),
+            InlineKeyboardButton(
+                t["ad_admin_reject"],
+                callback_data=(
+                    "adm_adreq_reject_"
+                    + str(
+                        request["request_id"]
+                    )
+                ),
+            ),
+        )
+
+    m.add(
+        InlineKeyboardButton(
+            t["ad_admin_contact"],
+            url=(
+                "tg://user?id="
+                + str(
+                    request["user_id"]
+                )
+            ),
+        )
+    )
+
+    m.add(
+        InlineKeyboardButton(
+            t["back"],
+            callback_data="adm_menu_ad_requests",
+        )
+    )
+
+    return m
 
 def register_admin(bot, flags: dict, texts_for, my_settings_view):
     """`texts_for(chat_id)` returns that chat's TEXTS dict so admin replies
@@ -449,9 +676,234 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
         elif data == 'adm_menu_toggles':
             edit(t['adm_toggles_title'], _toggles_markup(flags, t))
         elif data == 'adm_menu_ads':
-            edit(t['adm_ads_title'], _ads_markup(t))
+            edit(
+                t["adm_ads_title"],
+                _ads_markup(t),
+            )
+
+        elif data == "adm_menu_ad_requests":
+            pending_requests = (
+                store.list_ad_requests(
+                    "pending"
+                )
+            )
+
+            if not pending_requests:
+                edit_plain(
+                    t["adm_ad_requests_empty"],
+                    _ad_requests_markup(
+                        [],
+                        t,
+                    ),
+                )
+            else:
+                text = (
+                    t["adm_ad_requests_title"]
+                    + "\n\n"
+                    + "⏳ Pending: "
+                    + str(
+                        len(
+                            pending_requests
+                        )
+                    )
+                )
+
+                edit_plain(
+                    text,
+                    _ad_requests_markup(
+                        pending_requests,
+                        t,
+                    ),
+                )
+
+        elif data.startswith(
+            "adm_adreq_view_"
+        ):
+            request_id = data.split(
+                "adm_adreq_view_",
+                1,
+            )[1]
+
+            request = (
+                store.get_ad_request(
+                    request_id
+                )
+            )
+
+            if not request:
+                bot.answer_callback_query(
+                    call.id,
+                    "Request not found.",
+                    show_alert=True,
+                )
+                return
+
+            edit_plain(
+                _format_ad_request_for_admin(
+                    request,
+                    t,
+                ),
+                _ad_request_action_markup(
+                    request,
+                    t,
+                ),
+            )
+
+        elif data.startswith(
+            "adm_adreq_approve_"
+        ):
+            request_id = data.split(
+                "adm_adreq_approve_",
+                1,
+            )[1]
+
+            request = (
+                store.get_ad_request(
+                    request_id
+                )
+            )
+
+            if not request:
+                bot.answer_callback_query(
+                    call.id,
+                    "Request not found.",
+                    show_alert=True,
+                )
+                return
+
+            if request.get(
+                "status"
+            ) != "pending":
+                bot.answer_callback_query(
+                    call.id,
+                    "This request has already been processed.",
+                    show_alert=True,
+                )
+                return
+
+            updated = (
+                store.update_ad_request(
+                    request_id,
+                    status="approved",
+                    reviewed_at=time.strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                )
+            )
+
+            if not updated:
+                bot.answer_callback_query(
+                    call.id,
+                    "Could not update request.",
+                    show_alert=True,
+                )
+                return
+
+            try:
+                user_t = texts_for(
+                    updated["user_id"]
+                )
+
+                bot.send_message(
+                    updated["user_id"],
+                    user_t[
+                        "ad_admin_approved"
+                    ],
+                )
+            except Exception:
+                pass
+
+            edit_plain(
+                _format_ad_request_for_admin(
+                    updated,
+                    t,
+                ),
+                _ad_request_action_markup(
+                    updated,
+                    t,
+                ),
+            )
+
+        elif data.startswith(
+            "adm_adreq_reject_"
+        ):
+            request_id = data.split(
+                "adm_adreq_reject_",
+                1,
+            )[1]
+
+            request = (
+                store.get_ad_request(
+                    request_id
+                )
+            )
+
+            if not request:
+                bot.answer_callback_query(
+                    call.id,
+                    "Request not found.",
+                    show_alert=True,
+                )
+                return
+
+            if request.get(
+                "status"
+            ) != "pending":
+                bot.answer_callback_query(
+                    call.id,
+                    "This request has already been processed.",
+                    show_alert=True,
+                )
+                return
+
+            updated = (
+                store.update_ad_request(
+                    request_id,
+                    status="rejected",
+                    reviewed_at=time.strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                )
+            )
+
+            if not updated:
+                bot.answer_callback_query(
+                    call.id,
+                    "Could not update request.",
+                    show_alert=True,
+                )
+                return
+
+            try:
+                user_t = texts_for(
+                    updated["user_id"]
+                )
+
+                bot.send_message(
+                    updated["user_id"],
+                    user_t[
+                        "ad_admin_rejected"
+                    ],
+                )
+            except Exception:
+                pass
+
+            edit_plain(
+                _format_ad_request_for_admin(
+                    updated,
+                    t,
+                ),
+                _ad_request_action_markup(
+                    updated,
+                    t,
+                ),
+            )
+
         elif data == 'adm_menu_users':
-            edit(t['adm_users_title'], _users_markup(t))
+            edit(
+                t["adm_users_title"],
+                _users_markup(t),
+            )
         elif data == 'adm_menu_mysettings':
             text, markup = my_settings_view(
                 chat_id_int

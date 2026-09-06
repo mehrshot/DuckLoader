@@ -19,6 +19,8 @@ STATS_FILE = "stats.json"
 ERROR_LOG_FILE = "error_log.json"
 ERROR_LOG_MAX = 200
 
+AD_REQUESTS_FILE = "ad_requests.json"
+
 DUCK_REACTIONS_FILE = "duck_reactions.json"
 
 DUCK_REACTION_KEYS = {
@@ -29,6 +31,7 @@ DUCK_REACTION_KEYS = {
 }
 
 _error_log_lock = threading.Lock()
+_ad_requests_lock = threading.Lock()
 
 DEFAULT_QUALITY = "best"  # "best" | "720p" | "audio"
 
@@ -42,6 +45,7 @@ DEFAULT_FLAGS = {
     "spotify": True,
     "youtube": False,
     "auto_quality_fallback": False,
+    "ad_requests_button": True,
 }
 
 
@@ -68,6 +72,194 @@ def load_flags() -> dict:
 def save_flags(flags: dict) -> None:
     _save(FLAGS_FILE, flags)
 
+# --- advertising requests ---
+
+def load_ad_requests() -> dict:
+    raw = _load(
+        AD_REQUESTS_FILE,
+        {},
+    )
+
+    if not isinstance(raw, dict):
+        return {}
+
+    return raw
+
+
+def save_ad_requests(
+    requests: dict,
+) -> None:
+    with _ad_requests_lock:
+        _save(
+            AD_REQUESTS_FILE,
+            requests,
+        )
+
+
+def create_ad_request(
+    user_id,
+    telegram_username: str,
+    telegram_name: str,
+) -> dict:
+    with _ad_requests_lock:
+        requests = _load(
+            AD_REQUESTS_FILE,
+            {},
+        )
+
+        request_id = None
+
+        while request_id is None or request_id in requests:
+            request_id = (
+                __import__("uuid")
+                .uuid4()
+                .hex[:8]
+                .upper()
+            )
+
+        created_at = time.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+        request = {
+            "request_id": request_id,
+            "status": "draft",
+            "step": "channel",
+            "user_id": user_id,
+            "telegram_username": telegram_username,
+            "telegram_name": telegram_name,
+            "channel": "",
+            "display_name": "",
+            "ad_type": "",
+            "duration": "",
+            "notes": "",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "admin_message_id": None,
+        }
+
+        requests[request_id] = request
+
+        _save(
+            AD_REQUESTS_FILE,
+            requests,
+        )
+
+        return request
+
+
+def get_ad_request(
+    request_id: str,
+):
+    requests = load_ad_requests()
+
+    return requests.get(
+        str(request_id)
+    )
+
+
+def update_ad_request(
+    request_id: str,
+    **changes,
+):
+    with _ad_requests_lock:
+        requests = _load(
+            AD_REQUESTS_FILE,
+            {},
+        )
+
+        request = requests.get(
+            str(request_id)
+        )
+
+        if not isinstance(
+            request,
+            dict,
+        ):
+            return None
+
+        request.update(
+            changes
+        )
+
+        request["updated_at"] = (
+            time.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        )
+
+        requests[str(request_id)] = (
+            request
+        )
+
+        _save(
+            AD_REQUESTS_FILE,
+            requests,
+        )
+
+        return request
+
+
+def list_ad_requests(
+    status: str = None,
+) -> list:
+    requests = load_ad_requests()
+
+    result = []
+
+    for request in requests.values():
+        if not isinstance(
+            request,
+            dict,
+        ):
+            continue
+
+        if (
+            status is not None
+            and request.get(
+                "status"
+            ) != status
+        ):
+            continue
+
+        result.append(
+            request
+        )
+
+    result.sort(
+        key=lambda item: item.get(
+            "created_at",
+            "",
+        ),
+        reverse=True,
+    )
+
+    return result
+
+
+def get_user_ad_request(
+    user_id,
+    status: str = None,
+):
+    requests = list_ad_requests()
+
+    for request in requests:
+        if request.get(
+            "user_id"
+        ) != user_id:
+            continue
+
+        if (
+            status is not None
+            and request.get(
+                "status"
+            ) != status
+        ):
+            continue
+
+        return request
+
+    return None
 
 # --- per-user settings ---
 # Old format (pre-v0.6) was {"chat_id": "fa"} — just a language code.

@@ -7,8 +7,16 @@ import time
 from collections import defaultdict
 from datetime import datetime
 
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo, InputMediaAudio
-import admin
+from telebot.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputMediaAudio,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)import admin
 import ads
 import platforms
 import store
@@ -34,6 +42,7 @@ MAX_CONCURRENT_DOWNLOADS = 1  # how many downloads run at once, bot-wide
 
 _recent_downloads = defaultdict(list)  # user_id -> [timestamps]
 _download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+AD_BUTTON_TEXT = "📣 تبلیغات در ربات"
 
 _duck_status_messages = {}
 _duck_complete_messages = {}
@@ -150,6 +159,53 @@ TEXTS = {
         'sponsor_gate_retry': "بعد از عضویت، همون لینک رو دوباره بفرست.",
         'yt_choose_quality': "🎬 {title}\n\nکیفیت مورد نظر رو انتخاب کن:",
         'yt_no_quality': "⚠️ متأسفانه هیچ کیفیتی از این ویدیو زیر سقف مجاز نیست.",
+        'ad_button': "📣 تبلیغات در ربات",
+        'ad_channel_prompt': "📣 لطفاً آیدی، یوزرنیم یا لینک کانالی که می‌خواهید تبلیغ کنید را ارسال کنید:",
+        'ad_display_name_prompt': "🏷 نام نمایشی موردنظرتان برای تبلیغ را وارد کنید:",
+        'ad_type_prompt': "📌 نوع تبلیغ را انتخاب کنید:",
+        'ad_duration_prompt': "⏱ مدت تبلیغ یا تعداد نمایش موردنظر را وارد کنید:",
+        'ad_notes_prompt': "📝 اگر توضیح یا درخواست دیگری دارید بنویسید.\nاگر ندارید، «ندارم» را ارسال کنید.",
+        'ad_cancel': "❌ لغو",
+        'ad_type_text': "📝 متنی",
+        'ad_type_image': "🖼 تصویری",
+        'ad_type_video': "🎬 ویدیویی",
+        'ad_type_post': "🔗 پست / لینک",
+        'ad_summary_title': "📋 خلاصه درخواست تبلیغات",
+        'ad_summary_channel': "📣 کانال",
+        'ad_summary_display_name': "🏷 نام نمایشی",
+        'ad_summary_type': "📌 نوع تبلیغ",
+        'ad_summary_duration': "⏱ مدت / تعداد نمایش",
+        'ad_summary_notes': "📝 توضیحات",
+        'ad_confirm_prompt': "آیا اطلاعات درخواست صحیح است؟",
+        'ad_submit': "✅ ارسال درخواست",
+        'ad_edit': "✏️ ویرایش",
+        'ad_submitted': "✅ درخواست تبلیغات شما با موفقیت ثبت شد.\n\nمدیر درخواست شما را بررسی می‌کند و در صورت تأیید با شما هماهنگ خواهد شد.",
+        'ad_cancelled': "❌ درخواست تبلیغات لغو شد.",
+        'ad_unavailable': "⚠️ ثبت درخواست تبلیغات در حال حاضر غیرفعال است.",
+        'ad_existing_pending': "⏳ شما یک درخواست تبلیغات در حال بررسی دارید.\n\nلطفاً تا بررسی درخواست قبلی منتظر بمانید.",
+        'ad_admin_new': "📣 درخواست جدید تبلیغات",
+        'ad_admin_user': "👤 کاربر",
+        'ad_admin_username': "یوزرنیم تلگرام",
+        'ad_admin_user_id': "Telegram ID",
+        'ad_admin_name': "نام تلگرام",
+        'ad_admin_channel': "📣 کانال / آیدی",
+        'ad_admin_display_name': "🏷 نام نمایشی",
+        'ad_admin_type': "📌 نوع تبلیغ",
+        'ad_admin_duration': "⏱ مدت / تعداد نمایش",
+        'ad_admin_notes': "📝 توضیحات",
+        'ad_admin_request_id': "🆔 شماره درخواست",
+        'ad_admin_created_at': "🕐 زمان ثبت",
+        'ad_admin_approve': "✅ تأیید",
+        'ad_admin_reject': "❌ رد",
+        'ad_admin_contact': "💬 تماس با کاربر",
+        'ad_admin_approved': "✅ درخواست تبلیغات شما تأیید شد.\n\nمدیر برای هماهنگی ادامه کار با شما در تماس خواهد بود.",
+        'ad_admin_rejected': "❌ درخواست تبلیغات شما در حال حاضر تأیید نشد.",
+        'ad_admin_requests_title': "📨 درخواست‌های تبلیغات",
+        'ad_admin_requests_empty': "✅ هیچ درخواست تبلیغاتی در انتظار بررسی نیست.",
+        'ad_admin_request_status_pending': "⏳ در انتظار بررسی",
+        'ad_admin_request_status_approved': "✅ تأیید شده",
+        'ad_admin_request_status_rejected': "❌ رد شده",
+        'toggle_ad_requests_button': "📣 دکمه تبلیغات در ربات",
         'adm_title': "🛠 **پنل مدیریت**",
         'adm_platforms': "🔒 پلتفرم‌ها",
         'adm_toggles': "⚙️ تنظیمات کلی",
@@ -193,6 +249,9 @@ TEXTS = {
         "adm_duck_saved": "✅ واکنش اردک برای «{event}» ذخیره شد.",
         "adm_duck_invalid_media": "❌ لطفاً یک استیکر یا GIF/Animation ارسال کنید.",
         "adm_duck_all_cleared": "✅ همه واکنش‌های اردک پاک شدند.",
+        'adm_ad_requests': "📨 درخواست‌های تبلیغات",
+        'adm_ad_requests_title': "📨 درخواست‌های تبلیغات",
+        'adm_ad_requests_empty': "✅ هیچ درخواست تبلیغاتی در انتظار بررسی نیست.",
     },
     'en': {
         'welcome': "🦆 **Welcome to DuckLoader!**\n\nI’m your little download duck. Send me a link and I’ll waddle off, fetch it, and bring it back to you. ⚡\n\nI support Instagram, SoundCloud, Spotify, and YouTube.\n\nChoose your preferred quality in /settings.\n\n🦆 You bring the link. I’ll bring the media.",
@@ -253,6 +312,53 @@ TEXTS = {
         'sponsor_gate_retry': "After joining, just resend your link.",
         'yt_choose_quality': "🎬 {title}\n\nChoose a quality:",
         'yt_no_quality': "⚠️ Unfortunately no quality of this video is under the allowed size limit.",
+        'ad_button': "📣 تبلیغات در ربات",
+        'ad_channel_prompt': "📣 Send the channel ID, username, or link you want to advertise:",
+        'ad_display_name_prompt': "🏷 Enter the display name you want for the advertisement:",
+        'ad_type_prompt': "📌 Choose the advertisement type:",
+        'ad_duration_prompt': "⏱ Enter the desired duration or number of displays:",
+        'ad_notes_prompt': "📝 Send any additional notes or requirements.\nIf you have none, send \"none\".",
+        'ad_cancel': "❌ Cancel",
+        'ad_type_text': "📝 Text",
+        'ad_type_image': "🖼 Image",
+        'ad_type_video': "🎬 Video",
+        'ad_type_post': "🔗 Post / Link",
+        'ad_summary_title': "📋 Advertisement Request Summary",
+        'ad_summary_channel': "📣 Channel",
+        'ad_summary_display_name': "🏷 Display Name",
+        'ad_summary_type': "📌 Ad Type",
+        'ad_summary_duration': "⏱ Duration / Displays",
+        'ad_summary_notes': "📝 Notes",
+        'ad_confirm_prompt': "Is the information correct?",
+        'ad_submit': "✅ Submit Request",
+        'ad_edit': "✏️ Edit",
+        'ad_submitted': "✅ Your advertising request has been submitted.\n\nThe admin will review it and contact you if it is approved.",
+        'ad_cancelled': "❌ Advertising request cancelled.",
+        'ad_unavailable': "⚠️ Advertising requests are currently disabled.",
+        'ad_existing_pending': "⏳ You already have an advertising request awaiting review.\n\nPlease wait for the previous request to be reviewed.",
+        'ad_admin_new': "📣 New Advertising Request",
+        'ad_admin_user': "👤 User",
+        'ad_admin_username': "Telegram Username",
+        'ad_admin_user_id': "Telegram ID",
+        'ad_admin_name': "Telegram Name",
+        'ad_admin_channel': "📣 Channel / ID",
+        'ad_admin_display_name': "🏷 Display Name",
+        'ad_admin_type': "📌 Advertisement Type",
+        'ad_admin_duration': "⏱ Duration / Displays",
+        'ad_admin_notes': "📝 Notes",
+        'ad_admin_request_id': "🆔 Request ID",
+        'ad_admin_created_at': "🕐 Created",
+        'ad_admin_approve': "✅ Approve",
+        'ad_admin_reject': "❌ Reject",
+        'ad_admin_contact': "💬 Contact User",
+        'ad_admin_approved': "✅ Your advertising request has been approved.\n\nThe admin will contact you to coordinate the next steps.",
+        'ad_admin_rejected': "❌ Your advertising request was not approved at this time.",
+        'ad_admin_requests_title': "📨 Advertising Requests",
+        'ad_admin_requests_empty': "✅ There are no advertising requests waiting for review.",
+        'ad_admin_request_status_pending': "⏳ Pending",
+        'ad_admin_request_status_approved': "✅ Approved",
+        'ad_admin_request_status_rejected': "❌ Rejected",
+        'toggle_ad_requests_button': "📣 Ad Requests Button",
         'adm_title': "🛠 **Admin Panel**",
         'adm_platforms': "🔒 Platforms",
         'adm_toggles': "⚙️ General Settings",
@@ -296,6 +402,9 @@ TEXTS = {
         "adm_duck_saved": "✅ Duck reaction for “{event}” saved.",
         "adm_duck_invalid_media": "❌ Please send a Sticker or GIF/Animation.",
         "adm_duck_all_cleared": "✅ All duck reactions cleared.",
+        'adm_ad_requests': "📨 Ad Requests",
+        'adm_ad_requests_title': "📨 Ad Requests",
+        'adm_ad_requests_empty': "✅ There are no advertising requests waiting for review.",
     }
 }
 
@@ -740,6 +849,164 @@ def _settings_markup(user: dict, t: dict) -> InlineKeyboardMarkup:
 
 def register_features(bot):
     flags = store.load_flags()
+
+    def _main_reply_markup():
+        if not flags.get(
+            "ad_requests_button",
+            False,
+        ):
+            return ReplyKeyboardRemove()
+
+        markup = ReplyKeyboardMarkup(
+            row_width=1,
+            resize_keyboard=True,
+        )
+
+        markup.add(
+            KeyboardButton(
+                AD_BUTTON_TEXT
+            )
+        )
+
+        return markup
+
+    def _ad_cancel_markup():
+        markup = InlineKeyboardMarkup(
+            row_width=1
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_cancel"],
+                callback_data="ad_cancel",
+            )
+        )
+
+        return markup
+
+    def _ad_type_markup(t):
+        markup = InlineKeyboardMarkup(
+            row_width=2
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_type_text"],
+                callback_data="ad_type_text",
+            ),
+            InlineKeyboardButton(
+                t["ad_type_image"],
+                callback_data="ad_type_image",
+            ),
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_type_video"],
+                callback_data="ad_type_video",
+            ),
+            InlineKeyboardButton(
+                t["ad_type_post"],
+                callback_data="ad_type_post",
+            ),
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_cancel"],
+                callback_data="ad_cancel",
+            )
+        )
+
+        return markup
+
+    def _format_ad_summary(
+        request,
+        t,
+    ):
+        return (
+            f"{t['ad_summary_title']}\n\n"
+            f"{t['ad_summary_channel']}: "
+            f"{request.get('channel', '')}\n"
+            f"{t['ad_summary_display_name']}: "
+            f"{request.get('display_name', '')}\n"
+            f"{t['ad_summary_type']}: "
+            f"{request.get('ad_type', '')}\n"
+            f"{t['ad_summary_duration']}: "
+            f"{request.get('duration', '')}\n"
+            f"{t['ad_summary_notes']}: "
+            f"{request.get('notes', '')}\n\n"
+            f"{t['ad_confirm_prompt']}"
+        )
+
+    def _ad_confirmation_markup(t):
+        markup = InlineKeyboardMarkup(
+            row_width=2
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_submit"],
+                callback_data="ad_submit",
+            ),
+            InlineKeyboardButton(
+                t["ad_edit"],
+                callback_data="ad_edit",
+            ),
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                t["ad_cancel"],
+                callback_data="ad_cancel",
+            )
+        )
+
+        return markup
+
+    def _send_ad_prompt(
+        chat_id_int,
+        request,
+        t,
+    ):
+        step = request.get(
+            "step"
+        )
+
+        if step == "channel":
+            bot.send_message(
+                chat_id_int,
+                t["ad_channel_prompt"],
+                reply_markup=_ad_cancel_markup(),
+            )
+
+        elif step == "display_name":
+            bot.send_message(
+                chat_id_int,
+                t["ad_display_name_prompt"],
+                reply_markup=_ad_cancel_markup(),
+            )
+
+        elif step == "type":
+            bot.send_message(
+                chat_id_int,
+                t["ad_type_prompt"],
+                reply_markup=_ad_type_markup(t),
+            )
+
+        elif step == "duration":
+            bot.send_message(
+                chat_id_int,
+                t["ad_duration_prompt"],
+                reply_markup=_ad_cancel_markup(),
+            )
+
+        elif step == "notes":
+            bot.send_message(
+                chat_id_int,
+                t["ad_notes_prompt"],
+                reply_markup=_ad_cancel_markup(),
+            )
 
     def _my_settings_view(chat_id):
         user = store.get_user(user_settings, chat_id)
@@ -1486,13 +1753,15 @@ def register_features(bot):
             message.chat.id
         )
 
+        is_new_user = (
+            chat_id not in user_settings
+        )
+
         user = store.get_user(
             user_settings,
             chat_id,
         )
 
-        # New users default to English.
-        # Existing users keep their saved language.
         language = user.get(
             "lang",
             "en",
@@ -1523,13 +1792,20 @@ def register_features(bot):
             "start",
         )
 
-        bot.reply_to(
-            message,
-            t["welcome"],
-            reply_markup=_start_language_markup(),
-            parse_mode="Markdown",
-        )
-
+        if is_new_user:
+            bot.reply_to(
+                message,
+                t["welcome"],
+                reply_markup=_start_language_markup(),
+                parse_mode="Markdown",
+            )
+        else:
+            bot.reply_to(
+                message,
+                t["welcome"],
+                reply_markup=_main_reply_markup(),
+                parse_mode="Markdown",
+            )
 
     @bot.message_handler(
         commands=["help"]
@@ -1546,9 +1822,9 @@ def register_features(bot):
         bot.reply_to(
             message,
             t["welcome"],
+            reply_markup=_main_reply_markup(),
             parse_mode="Markdown",
         )
-
     @bot.message_handler(commands=["whoami"])
     def whoami(message):
         bot.reply_to(message, f"🆔 `{message.from_user.id}`", parse_mode="Markdown")
@@ -1583,6 +1859,659 @@ def register_features(bot):
             reply_markup=_settings_markup(user, t), parse_mode="Markdown",
         )
         bot.answer_callback_query(call.id)
+
+    @bot.message_handler(
+        func=lambda msg:
+            bool(msg.text)
+            and msg.text.strip()
+            == AD_BUTTON_TEXT
+    )
+    def start_ad_request(message):
+        user_id = message.from_user.id
+        chat_id_int = message.chat.id
+        chat_id_str = str(
+            message.chat.id
+        )
+
+        if store.is_banned(
+            user_id
+        ):
+            return
+
+        if not flags.get(
+            "ad_requests_button",
+            False,
+        ):
+            bot.send_message(
+                chat_id_int,
+                _texts_for(
+                    chat_id_str
+                )["ad_unavailable"],
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+
+        t = _texts_for(
+            chat_id_str
+        )
+
+        existing_draft = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
+        )
+
+        if existing_draft:
+            _send_ad_prompt(
+                chat_id_int,
+                existing_draft,
+                t,
+            )
+            return
+
+        existing_pending = (
+            store.get_user_ad_request(
+                user_id,
+                "pending",
+            )
+        )
+
+        if existing_pending:
+            bot.send_message(
+                chat_id_int,
+                t["ad_existing_pending"],
+                reply_markup=_main_reply_markup(),
+            )
+            return
+
+        telegram_username = (
+            message.from_user.username
+            or ""
+        )
+
+        if telegram_username:
+            telegram_username = (
+                "@"
+                + telegram_username
+            )
+
+        telegram_name = " ".join(
+            part
+            for part in (
+                message.from_user.first_name,
+                message.from_user.last_name,
+            )
+            if part
+        ).strip()
+
+        if not telegram_name:
+            telegram_name = "—"
+
+        request = (
+            store.create_ad_request(
+                user_id=user_id,
+                telegram_username=telegram_username,
+                telegram_name=telegram_name,
+            )
+        )
+
+        bot.send_message(
+            chat_id_int,
+            t["ad_channel_prompt"],
+            reply_markup=_ad_cancel_markup(),
+        )
+
+    @bot.message_handler(
+        func=lambda msg:
+            bool(msg.text)
+            and store.get_user_ad_request(
+                msg.from_user.id,
+                "draft",
+            ) is not None
+    )
+    def handle_ad_request_input(message):
+        user_id = (
+            message.from_user.id
+        )
+
+        chat_id_int = (
+            message.chat.id
+        )
+
+        chat_id_str = str(
+            message.chat.id
+        )
+
+        request = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
+        )
+
+        if not request:
+            return
+
+        t = _texts_for(
+            chat_id_str
+        )
+
+        text = (
+            message.text
+            or ""
+        ).strip()
+
+        if text.lower() in {
+            "لغو",
+            "cancel",
+        }:
+            store.update_ad_request(
+                request["request_id"],
+                status="cancelled",
+            )
+
+            bot.send_message(
+                chat_id_int,
+                t["ad_cancelled"],
+                reply_markup=_main_reply_markup(),
+            )
+            return
+
+        step = request.get(
+            "step"
+        )
+
+        if step == "channel":
+            store.update_ad_request(
+                request["request_id"],
+                channel=text,
+                step="display_name",
+            )
+
+        elif step == "display_name":
+            store.update_ad_request(
+                request["request_id"],
+                display_name=text,
+                step="type",
+            )
+
+        elif step == "duration":
+            store.update_ad_request(
+                request["request_id"],
+                duration=text,
+                step="notes",
+            )
+
+        elif step == "notes":
+            updated = (
+                store.update_ad_request(
+                    request["request_id"],
+                    notes=text,
+                )
+            )
+
+            if not updated:
+                return
+
+            bot.send_message(
+                chat_id_int,
+                _format_ad_summary(
+                    updated,
+                    t,
+                ),
+                reply_markup=_ad_confirmation_markup(t),
+            )
+            return
+
+        updated = (
+            store.get_ad_request(
+                request["request_id"]
+            )
+        )
+
+        if updated:
+            _send_ad_prompt(
+                chat_id_int,
+                updated,
+                t,
+            )
+
+    @bot.callback_query_handler(
+        func=lambda call:
+            call.data.startswith(
+                "ad_type_"
+            )
+    )
+    def handle_ad_type_callback(
+        call
+    ):
+        chat_id_int = (
+            call.message.chat.id
+        )
+
+        chat_id_str = str(
+            chat_id_int
+        )
+
+        user_id = (
+            call.from_user.id
+        )
+
+        t = _texts_for(
+            chat_id_str
+        )
+
+        request = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
+        )
+
+        if not request:
+            bot.answer_callback_query(
+                call.id,
+                t["ad_cancelled"],
+                show_alert=True,
+            )
+            return
+
+        type_key = (
+            call.data.split(
+                "ad_type_",
+                1,
+            )[1]
+        )
+
+        type_labels = {
+            "text": t["ad_type_text"],
+            "image": t["ad_type_image"],
+            "video": t["ad_type_video"],
+            "post": t["ad_type_post"],
+        }
+
+        selected_type = (
+            type_labels.get(
+                type_key
+            )
+        )
+
+        if not selected_type:
+            bot.answer_callback_query(
+                call.id,
+                "Invalid selection.",
+                show_alert=True,
+            )
+            return
+
+        updated = (
+            store.update_ad_request(
+                request["request_id"],
+                ad_type=selected_type,
+                step="duration",
+            )
+        )
+
+        bot.answer_callback_query(
+            call.id
+        )
+
+        try:
+            bot.edit_message_reply_markup(
+                chat_id_int,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        if updated:
+            _send_ad_prompt(
+                chat_id_int,
+                updated,
+                t,
+            )
+
+    @bot.callback_query_handler(
+        func=lambda call:
+            call.data == "ad_cancel"
+    )
+    def handle_ad_cancel(
+        call
+    ):
+        chat_id_int = (
+            call.message.chat.id
+        )
+
+        chat_id_str = str(
+            chat_id_int
+        )
+
+        user_id = (
+            call.from_user.id
+        )
+
+        t = _texts_for(
+            chat_id_str
+        )
+
+        request = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
+        )
+
+        if request:
+            store.update_ad_request(
+                request["request_id"],
+                status="cancelled",
+            )
+
+        try:
+            bot.edit_message_reply_markup(
+                chat_id_int,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        bot.answer_callback_query(
+            call.id
+        )
+
+        bot.send_message(
+            chat_id_int,
+            t["ad_cancelled"],
+            reply_markup=_main_reply_markup(),
+        )
+
+    @bot.callback_query_handler(
+        func=lambda call:
+            call.data == "ad_edit"
+    )
+    def handle_ad_edit(
+        call
+    ):
+        chat_id_int = (
+            call.message.chat.id
+        )
+
+        chat_id_str = str(
+            chat_id_int
+        )
+
+        user_id = (
+            call.from_user.id
+        )
+
+        t = _texts_for(
+            chat_id_str
+        )
+
+        request = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
+        )
+
+        if not request:
+            bot.answer_callback_query(
+                call.id,
+                t["ad_cancelled"],
+                show_alert=True,
+            )
+            return
+
+        updated = (
+            store.update_ad_request(
+                request["request_id"],
+                channel="",
+                display_name="",
+                ad_type="",
+                duration="",
+                notes="",
+                step="channel",
+            )
+        )
+
+        bot.answer_callback_query(
+            call.id
+        )
+
+        try:
+            bot.edit_message_reply_markup(
+                chat_id_int,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        if updated:
+            _send_ad_prompt(
+                chat_id_int,
+                updated,
+                t,
+            )
+
+    @bot.callback_query_handler(
+        func=lambda call:
+            call.data == "ad_submit"
+    )
+    def handle_ad_submit(
+        call
+    ):
+        chat_id_int = (
+            call.message.chat.id
+        )
+
+        chat_id_str = str(
+            chat_id_int
+        )
+
+        user_id = (
+            call.from_user.id
+        )
+
+        t = _texts_for(
+            chat_id_str
+        )
+
+        request = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
+        )
+
+        if not request:
+            bot.answer_callback_query(
+                call.id,
+                t["ad_cancelled"],
+                show_alert=True,
+            )
+            return
+
+        required_fields = (
+            "channel",
+            "display_name",
+            "ad_type",
+            "duration",
+            "notes",
+        )
+
+        if any(
+            not str(
+                request.get(
+                    field,
+                    ""
+                )
+            ).strip()
+            for field in required_fields
+        ):
+            bot.answer_callback_query(
+                call.id,
+                "اطلاعات درخواست کامل نیست.",
+                show_alert=True,
+            )
+            return
+
+        owner_id = int(
+            os.environ.get(
+                "OWNER_ID",
+                "0",
+            ) or "0"
+        )
+
+        if owner_id == 0:
+            bot.answer_callback_query(
+                call.id,
+                "Admin is not configured.",
+                show_alert=True,
+            )
+            return
+
+        pending = (
+            store.update_ad_request(
+                request["request_id"],
+                status="pending",
+            )
+        )
+
+        if not pending:
+            bot.answer_callback_query(
+                call.id,
+                "Could not save request.",
+                show_alert=True,
+            )
+            return
+
+        username_text = (
+            pending.get(
+                "telegram_username"
+            )
+            or "ندارد"
+        )
+
+        admin_texts = _texts_for(
+            owner_id
+        )
+
+        admin_message = (
+            f"{admin_texts['ad_admin_new']}\n\n"
+            f"{admin_texts['ad_admin_request_id']}: "
+            f"{pending['request_id']}\n\n"
+            f"{admin_texts['ad_admin_user']}\n"
+            f"{admin_texts['ad_admin_username']}: "
+            f"{username_text}\n"
+            f"{admin_texts['ad_admin_user_id']}: "
+            f"{pending['user_id']}\n"
+            f"{admin_texts['ad_admin_name']}: "
+            f"{pending.get('telegram_name', '—')}\n\n"
+            f"{admin_texts['ad_admin_channel']}: "
+            f"{pending.get('channel', '—')}\n"
+            f"{admin_texts['ad_admin_display_name']}: "
+            f"{pending.get('display_name', '—')}\n"
+            f"{admin_texts['ad_admin_type']}: "
+            f"{pending.get('ad_type', '—')}\n"
+            f"{admin_texts['ad_admin_duration']}: "
+            f"{pending.get('duration', '—')}\n"
+            f"{admin_texts['ad_admin_notes']}: "
+            f"{pending.get('notes', '—')}\n"
+            f"{admin_texts['ad_admin_created_at']}: "
+            f"{pending.get('created_at', '—')}"
+        )
+
+        markup = InlineKeyboardMarkup(
+            row_width=2
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                admin_texts[
+                    "ad_admin_approve"
+                ],
+                callback_data=(
+                    "adm_adreq_approve_"
+                    + pending["request_id"]
+                ),
+            ),
+            InlineKeyboardButton(
+                admin_texts[
+                    "ad_admin_reject"
+                ],
+                callback_data=(
+                    "adm_adreq_reject_"
+                    + pending["request_id"]
+                ),
+            ),
+        )
+
+        markup.add(
+            InlineKeyboardButton(
+                admin_texts[
+                    "ad_admin_contact"
+                ],
+                url=(
+                    "tg://user?id="
+                    + str(
+                        pending["user_id"]
+                    )
+                ),
+            )
+        )
+
+        try:
+            admin_message_result = (
+                bot.send_message(
+                    owner_id,
+                    admin_message,
+                    reply_markup=markup,
+                )
+            )
+
+        except Exception:
+            store.update_ad_request(
+                pending["request_id"],
+                status="draft",
+            )
+
+            bot.answer_callback_query(
+                call.id,
+                "ارسال درخواست به مدیر انجام نشد. دوباره تلاش کنید.",
+                show_alert=True,
+            )
+            return
+
+        store.update_ad_request(
+            pending["request_id"],
+            admin_message_id=(
+                admin_message_result.message_id
+            ),
+        )
+
+        try:
+            bot.edit_message_reply_markup(
+                chat_id_int,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        bot.answer_callback_query(
+            call.id
+        )
+
+        bot.send_message(
+            chat_id_int,
+            t["ad_submitted"],
+            reply_markup=_main_reply_markup(),
+        )
 
     @bot.message_handler(func=lambda msg: bool(msg.text) and platforms.detect_platform(msg.text) is not None)
     def handle_media_link(message):
