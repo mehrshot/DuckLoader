@@ -1896,18 +1896,28 @@ def register_features(bot):
         bot.reply_to(message, t['settings_msg'], reply_markup=_settings_markup(user, t), parse_mode="Markdown")
 
     @bot.callback_query_handler(
-        func=lambda call: call.data in {
-            "ad_lang_en",
-            "ad_lang_fa",
-        }
+        func=lambda call:
+            call.data in {
+                "ad_lang_en",
+                "ad_lang_fa",
+            }
     )
-    def handle_ad_language_callback(call):
-        chat_id = call.message.chat.id
-        user_id = call.from_user.id
+    def handle_ad_language_callback(
+        call
+    ):
+        chat_id_int = (
+            call.message.chat.id
+        )
 
-        request = store.get_user_ad_request(
-            user_id,
-            "draft",
+        user_id = (
+            call.from_user.id
+        )
+
+        request = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
+            )
         )
 
         if not request:
@@ -1924,18 +1934,31 @@ def register_features(bot):
             else "fa"
         )
 
-        request = store.update_ad_request(
-            request["request_id"],
-            form_lang=new_lang,
+        updated = (
+            store.update_ad_request(
+                request["request_id"],
+                form_lang=new_lang,
+            )
         )
 
-        bot.answer_callback_query(call.id)
+        bot.answer_callback_query(
+            call.id
+        )
 
-        if request:
+        if updated:
+            try:
+                bot.edit_message_reply_markup(
+                    chat_id_int,
+                    call.message.message_id,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+
             _send_ad_prompt(
-                chat_id,
-                request,
-                _ad_texts(request),
+                chat_id_int,
+                updated,
+                _ad_texts(updated),
             )
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('lang_') or call.data.startswith('quality_'))
@@ -1961,29 +1984,21 @@ def register_features(bot):
     @bot.message_handler(
         func=lambda msg:
             bool(msg.text)
-            and msg.text.strip()
-            == AD_BUTTON_TEXT
+            and msg.text.strip() == AD_BUTTON_TEXT
     )
-
-    def _start_ad_request(message):
+    def start_ad_request(message):
+        _start_ad_request(message)
         user_id = message.from_user.id
         chat_id_int = message.chat.id
 
         if store.is_banned(user_id):
             return
 
-        if not flags.get("ad_requests_button", False):
-            t = TEXTS["fa"]
-            bot.send_message(
-                chat_id_int,
-                t["ad_unavailable"],
-                reply_markup=ReplyKeyboardRemove(),
+        existing_draft = (
+            store.get_user_ad_request(
+                user_id,
+                "draft",
             )
-            return
-
-        existing_draft = store.get_user_ad_request(
-            user_id,
-            "draft",
         )
 
         if existing_draft:
@@ -1994,13 +2009,16 @@ def register_features(bot):
             )
             return
 
-        existing_pending = store.get_user_ad_request(
-            user_id,
-            "pending",
+        existing_pending = (
+            store.get_user_ad_request(
+                user_id,
+                "pending",
+            )
         )
 
         if existing_pending:
             t = _ad_texts(existing_pending)
+
             bot.send_message(
                 chat_id_int,
                 t["ad_existing_pending"],
@@ -2013,7 +2031,9 @@ def register_features(bot):
         )
 
         if telegram_username:
-            telegram_username = "@" + telegram_username
+            telegram_username = (
+                "@" + telegram_username
+            )
 
         telegram_name = " ".join(
             part
@@ -2037,6 +2057,12 @@ def register_features(bot):
                 TEXTS["fa"]
             ),
         )
+    
+    @bot.message_handler(
+        commands=["adrequest"]
+    )
+    def adrequest_command(message):
+        _start_ad_request(message)
 
     @bot.message_handler(
         func=lambda msg:
@@ -2465,6 +2491,16 @@ def register_features(bot):
             or "ندارد"
         )
 
+        admin_type_labels = {
+            "sponsor_channel": "Sponsor Channel",
+            "post_download": "Post-Download Ad",
+        }
+
+        admin_type = admin_type_labels.get(
+            pending.get("ad_type"),
+            pending.get("ad_type", "—"),
+        )
+
         admin_texts = _texts_for(
             owner_id
         )
@@ -2485,7 +2521,7 @@ def register_features(bot):
             f"{admin_texts['ad_admin_display_name']}: "
             f"{pending.get('display_name', '—')}\n"
             f"{admin_texts['ad_admin_type']}: "
-            f"{pending.get('ad_type', '—')}\n"
+            f"{admin_type}\n"
             f"{admin_texts['ad_admin_duration']}: "
             f"{pending.get('duration', '—')}\n"
             f"{admin_texts['ad_admin_notes']}: "
