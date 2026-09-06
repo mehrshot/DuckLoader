@@ -1,8 +1,43 @@
+# Secrets
 .env
+.env.*
+*.pem
+*.key
+
+# Authentication cookies
+cookies.txt
+instagram_cookies.txt
+*.cookies.txt
+
+# Python
 venv/
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Runtime/cache
+.cache/
+cache/
 downloads/
-*.zip
-*.txt
+*.log
+
+# Runtime data
 *.json
+
+# Backups
+*.backup
+*.bak
+*.old
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
