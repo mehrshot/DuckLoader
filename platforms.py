@@ -2938,15 +2938,21 @@ def probe_youtube_qualities(url: str) -> dict:
     # ---------------------------------------------------------------
 
     if (
-        audio_size > 0
-        and audio_size <= MAX_TELEGRAM_BYTES
+        best_audio
+        and (
+            audio_size <= 0
+            or audio_size <= MAX_TELEGRAM_BYTES
+        )
     ):
         options.append(
             {
                 "kind": "audio",
                 "label": "Audio",
                 "height": 0,
-                "size_bytes": audio_size,
+                "size_bytes": max(
+                    audio_size,
+                    0,
+                ),
             }
         )
 

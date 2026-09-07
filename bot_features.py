@@ -3963,8 +3963,7 @@ def register_features(bot):
 
         try:
             callback_payload = call.data[
-                len("ytq_"):
-            ]
+                len("ytq_"):]
 
             video_id, choice = (
                 callback_payload.rsplit(
@@ -3984,15 +3983,6 @@ def register_features(bot):
         bot.answer_callback_query(
             call.id
         )
-
-        if show_ui and status_msg is not None:
-            try:
-                bot.delete_message(
-                    chat_id_int,
-                    status_msg.message_id,
-                )
-            except Exception:
-                pass
 
         status_msg = None
 
