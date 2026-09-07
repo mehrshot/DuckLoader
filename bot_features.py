@@ -1336,14 +1336,13 @@ def register_features(bot):
         if message_id is None:
             return
 
-        if show_ui and status_msg is not None:
-            try:
-                bot.delete_message(
-                    chat_id_int,
-                    status_msg.message_id,
-                )
-            except Exception:
-                pass
+        try:
+            bot.delete_message(
+                chat_id_int,
+                message_id,
+            )
+        except Exception:
+            pass
 
     def _send_duck_reaction(
         chat_id_int,
@@ -1779,12 +1778,15 @@ def register_features(bot):
         includes a video and the user didn't already request audio-only.
         Shared by the direct-download flow and the 'get audio' button."""
 
-        if quality_used != quality_requested and show_ui:
+        if (
+            quality_used != quality_requested
+            and platform != "soundcloud"
+        ):
             bot.send_message(
                 chat_id_int,
                 t['quality_reduced'].format(
                     quality=t[f'quality_{quality_used}']
-                ),
+                )
             )
 
         # Merge the parent result with the individual media entry.
