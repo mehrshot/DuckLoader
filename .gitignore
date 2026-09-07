@@ -17,6 +17,7 @@ __pycache__/
 *$py.class
 
 # Runtime/cache
+.cache
 .cache/
 cache/
 downloads/
