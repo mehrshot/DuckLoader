@@ -1848,24 +1848,13 @@ def _download_with_selector(
         ]
 
     if extract_audio:
-        # Download the original thumbnail so it can be embedded
-        # into the final MP3.
-        ydl_opts["writethumbnail"] = True
-
         ydl_opts["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "320",
             },
-            {
-                "key": "FFmpegMetadata",
-            },
-            {
-                "key": "EmbedThumbnail",
-            },
         ]
-
     ffmpeg_location = _ffmpeg_location()
 
     if ffmpeg_location:
