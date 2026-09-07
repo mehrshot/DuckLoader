@@ -92,6 +92,15 @@ QUALITY_FORMATS = {
     "720p": "best[height<=720]/best/all",
     "audio": "bestaudio/best",
 }
+
+INSTAGRAM_QUALITY_FORMATS = {
+    "best": "best/all",
+    "1080p": "best[height<=1080]/best/all",
+    "720p": "best[height<=720]/best/all",
+    "480p": "best[height<=480]/best/all",
+    "360p": "best[height<=360]/best/all",
+}
+
 YOUTUBE_QUALITY_FORMATS = {
     "best": "bestvideo+bestaudio/best/all",
     "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best/all",
@@ -2575,6 +2584,37 @@ def download_direct(
     # ---------------------------------------------------------------
     # Normal direct-download path
     # ---------------------------------------------------------------
+
+    # ---------------------------------------------------------------
+    # Instagram-specific quality path
+    # ---------------------------------------------------------------
+    if "instagram.com" in url.lower():
+
+        instagram_quality = (
+            quality
+            if quality in INSTAGRAM_QUALITY_FORMATS
+            else "best"
+        )
+
+        fmt = INSTAGRAM_QUALITY_FORMATS[
+            instagram_quality
+        ]
+
+        info, entries, filepaths = (
+            _download_with_selector(
+                url,
+                fmt,
+                False,
+                progress_hook,
+            )
+        )
+
+        return (
+            info,
+            entries,
+            filepaths,
+            instagram_quality,
+        )
 
     start = (
         QUALITY_LADDER.index(

@@ -34,7 +34,10 @@ DUCK_REACTION_KEYS = {
 _error_log_lock = threading.Lock()
 _ad_requests_lock = threading.Lock()
 
-DEFAULT_QUALITY = "best"  # "best" | "720p" | "audio"
+DEFAULT_QUALITY = "best"  # YouTube / general default quality
+DEFAULT_INSTAGRAM_QUALITY = "best"
+DEFAULT_LOW_DATA_MODE = False
+DEFAULT_LANGUAGE = "en"
 
 # True = enabled. Platform keys gate downloads (admin: /lock, /unlock).
 # auto_quality_fallback is a bot-wide behavior toggle, not a platform
@@ -296,22 +299,76 @@ def get_user_ad_request(
 # language preference gets lost.
 
 def load_user_settings() -> dict:
-    raw = _load(SETTINGS_FILE, {})
+    raw = _load(
+        SETTINGS_FILE,
+        {},
+    )
+
     migrated = {}
+
     for chat_id, value in raw.items():
+
         if isinstance(value, str):
-            migrated[chat_id] = {"lang": value, "quality": DEFAULT_QUALITY}
-        else:
-            value.setdefault(
-                "lang",
-                "en",
+            value = {
+                "lang": value,
+                "quality": DEFAULT_QUALITY,
+            }
+        elif not isinstance(value, dict):
+            value = {}
+
+        value.setdefault(
+            "lang",
+            DEFAULT_LANGUAGE,
+        )
+
+        value.setdefault(
+            "quality",
+            DEFAULT_QUALITY,
+        )
+
+        value.setdefault(
+            "instagram_quality",
+            DEFAULT_INSTAGRAM_QUALITY,
+        )
+
+        value.setdefault(
+            "low_data_mode",
+            DEFAULT_LOW_DATA_MODE,
+        )
+
+        if value.get("lang") not in {
+            "fa",
+            "en",
+        }:
+            value["lang"] = DEFAULT_LANGUAGE
+
+        if value.get("quality") not in {
+            "best",
+            "720p",
+            "audio",
+        }:
+            value["quality"] = DEFAULT_QUALITY
+
+        if value.get("instagram_quality") not in {
+            "best",
+            "1080p",
+            "720p",
+            "480p",
+            "360p",
+        }:
+            value["instagram_quality"] = (
+                DEFAULT_INSTAGRAM_QUALITY
             )
 
-            value.setdefault(
-                "quality",
-                DEFAULT_QUALITY,
+        value["low_data_mode"] = bool(
+            value.get(
+                "low_data_mode",
+                DEFAULT_LOW_DATA_MODE,
             )
-            migrated[chat_id] = value
+        )
+
+        migrated[str(chat_id)] = value
+
     return migrated
 
 
@@ -326,8 +383,10 @@ def get_user(
     return settings.get(
         str(chat_id),
         {
-            "lang": "en",
+            "lang": DEFAULT_LANGUAGE,
             "quality": DEFAULT_QUALITY,
+            "instagram_quality": DEFAULT_INSTAGRAM_QUALITY,
+            "low_data_mode": DEFAULT_LOW_DATA_MODE,
         },
     )
 

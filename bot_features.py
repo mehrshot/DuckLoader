@@ -135,11 +135,11 @@ TEXTS = {
     'fa': {
         'welcome': (
             "🦆 **به داکلودر خوش اومدی!**\n\n"
-            " کافیه لینکت رو بفرستی،"
+            "کافیه لینکت رو بفرستی، "
             "می‌رم پیداش می‌کنم و برات برمی‌گردونمش. ⚡\n\n"
-            "فعلا هم از اینستاگرام، یوتیوب، تیک تاک، اسپاتیفای و ساندکلاد"
+            "فعلا هم از اینستاگرام، یوتیوب، تیک تاک، اسپاتیفای و ساندکلاد "
             "پشتیبانی می‌کنم.\n\n"
-            "زبان دلخواهت رو میتونی از /settings انتخاب کنی.\n\n"
+            "زبان و کیفیت دلخواهت رو میتونی از /settings انتخاب کنی.\n\n"
             "🦆 لینکتو بفرست تا شروع کنیم!"
         ),        'init': "⏳ در حال برقراری ارتباط...",
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
@@ -170,10 +170,70 @@ TEXTS = {
         'audio_expired': "⚠️ این دکمه دیگه معتبر نیست (بات ری‌استارت شده). لینک رو دوباره بفرست.",
         'cover_loading': "⏳ در حال دریافت کاور...",
         'cover_error': "⚠️ کاور این پست یافت نشد.",
-        'settings_msg': "⚙️ **تنظیمات ربات**\n\nزبان و کیفیت دانلود دلخواهت رو انتخاب کن:",
-        'quality_best': "🎬 بهترین",
-        'quality_720p': "📱 ۷۲۰p",
-        'quality_audio': "🎵 فقط صدا",
+        'settings_msg': (
+            "⚙️ **تنظیمات داکلودر**\n\n"
+            "تنظیمات شخصی خودت را از بخش‌های زیر مدیریت کن.\n"
+            "هر تغییر بلافاصله ذخیره می‌شود."
+        ),
+
+        'settings_quality': "🎬 کیفیت پیش‌فرض اینستاگرام",
+        'settings_low_data': "📶 حالت مصرف اینترنت کم",
+        'settings_language': "🌐 زبان",
+        'settings_current': "📋 تنظیمات فعلی",
+        'settings_reset': "♻️ بازنشانی تنظیمات",
+
+        'settings_back': "↩️ بازگشت",
+        'settings_close': "✖️ بستن",
+
+        'instagram_quality_title': "🎬 **کیفیت پیش‌فرض اینستاگرام**",
+
+        'instagram_quality_help': (
+            "کیفیتی که اینجا انتخاب می‌کنی، برای دانلودهای اینستاگرام "
+            "به‌صورت پیش‌فرض استفاده می‌شود.\n\n"
+            "💎 بهترین: بالاترین کیفیت موجود\n"
+            "📺 1080p: 1080p حداکثر\n"
+            "📱 720p: 720p حداکثر\n"
+            "🪶 480p: 480p حداکثر\n"
+            "🪶 360p: 360p حداکثر"
+        ),
+
+        'instagram_quality_best': "💎 بهترین کیفیت",
+        'instagram_quality_1080': "📺 1080p",
+        'instagram_quality_720': "📱 720p",
+        'instagram_quality_480': "🪶 480p",
+        'instagram_quality_360': "🪶 360p",
+
+        'low_data_title': "📶 **حالت مصرف اینترنت کم**",
+
+        'low_data_help': (
+            "وقتی این حالت فعال باشد، دانلودهای اینستاگرام "
+            "به حداکثر 480p محدود می‌شوند تا حجم اینترنت کمتری مصرف شود.\n\n"
+            "این گزینه فقط روی اینستاگرام تأثیر دارد و تنظیمات یوتیوب "
+            "و سایر پلتفرم‌ها را تغییر نمی‌دهد."
+        ),
+
+        'low_data_on': "✅ فعال",
+        'low_data_off': "⭕️ غیرفعال",
+
+        'current_settings_title': "📋 **تنظیمات فعلی شما:**",
+
+        'current_instagram_quality': "🎬 کیفیت اینستاگرام",
+        'current_low_data': "📶 مصرف اینترنت کم",
+        'current_language': "🌐 زبان",
+
+        'language_title': "🌐 **زبان رابط کاربری**",
+        'language_help': "زبان مورد استفاده در پیام‌ها و منوهای داکلودر را انتخاب کن.",
+
+        'reset_title': "♻️ **بازنشانی تنظیمات**",
+
+        'reset_warning': (
+            "⚠️ همه تنظیمات شخصی شما به مقادیر پیش‌فرض برمی‌گردند.\n\n"
+            "این کار قابل بازگشت نیست."
+        ),
+
+        'reset_confirm': "✅ بله، بازنشانی کن",
+        'reset_cancel': "❌ انصراف",
+        'reset_done': "✅ تنظیمات شما به حالت پیش‌فرض بازگردانده شد.",
         'not_owner': "⛔️ این دستور فقط برای مدیر بات است.",
         'lock_usage': "استفاده: /{cmd} <{options}>",
         'toggle_usage': "استفاده: /toggle <{options}>",
@@ -369,10 +429,68 @@ TEXTS = {
         'audio_expired': "⚠️ This button is no longer valid (the bot restarted). Please resend the link.",
         'cover_loading': "⏳ Fetching cover...",
         'cover_error': "⚠️ Cover not found.",
-        'settings_msg': "⚙️ **Bot Settings**\n\nChoose your language and preferred download quality:",
-        'quality_best': "🎬 Best",
-        'quality_720p': "📱 720p",
-        'quality_audio': "🎵 Audio only",
+        'settings_msg': (
+            "⚙️ **DuckLoader Settings**\n\n"
+            "Manage your personal preferences using the sections below.\n"
+            "Changes are saved immediately."
+        ),
+
+        'settings_quality': "🎬 Instagram Default Quality",
+        'settings_low_data': "📶 Low Data Mode",
+        'settings_language': "🌐 Language",
+        'settings_current': "📋 Current Settings",
+        'settings_reset': "♻️ Reset Settings",
+
+        'settings_back': "↩️ Back",
+        'settings_close': "✖️ Close",
+
+        'instagram_quality_title': "🎬 **Instagram Default Quality**",
+
+        'instagram_quality_help': (
+            "This setting controls the default quality used for Instagram downloads.\n\n"
+            "💎 Best: highest available quality\n"
+            "📺 1080p: up to 1080p\n"
+            "📱 720p: up to 720p\n"
+            "🪶 480p: up to 480p\n"
+            "🪶 360p: up to 360p"
+        ),
+
+        'instagram_quality_best': "💎 Best Quality",
+        'instagram_quality_1080': "📺 1080p",
+        'instagram_quality_720': "📱 720p",
+        'instagram_quality_480': "🪶 480p",
+        'instagram_quality_360': "🪶 360p",
+
+        'low_data_title': "📶 **Low Data Mode**",
+
+        'low_data_help': (
+            "When enabled, Instagram downloads are limited to a maximum of 480p "
+            "to reduce data usage.\n\n"
+            "This only affects Instagram. YouTube and other platforms are not changed."
+        ),
+
+        'low_data_on': "✅ Enabled",
+        'low_data_off': "⭕️ Disabled",
+
+        'current_settings_title': "📋 **Your Current Settings:**",
+
+        'current_instagram_quality': "🎬 Instagram Quality",
+        'current_low_data': "📶 Low Data Mode",
+        'current_language': "🌐 Language",
+
+        'language_title': "🌐 **Interface Language**",
+        'language_help': "Choose the language used for DuckLoader messages and menus.",
+
+        'reset_title': "♻️ **Reset Settings**",
+
+        'reset_warning': (
+            "⚠️ All of your personal settings will be returned to their defaults.\n\n"
+            "This action cannot be undone."
+        ),
+
+        'reset_confirm': "✅ Yes, Reset",
+        'reset_cancel': "❌ Cancel",
+        'reset_done': "✅ Your settings have been reset to their defaults.",
         'not_owner': "⛔️ This command is for the bot admin only.",
         'lock_usage': "Usage: /{cmd} <{options}>",
         'toggle_usage': "Usage: /toggle <{options}>",
@@ -999,21 +1117,270 @@ def _start_language_markup() -> InlineKeyboardMarkup:
 
     return markup
 
-def _settings_markup(user: dict, t: dict) -> InlineKeyboardMarkup:
-    markup = InlineKeyboardMarkup(row_width=2)
-    fa_text = "🇮🇷 فارسی ✅" if user['lang'] == 'fa' else "🇮🇷 فارسی"
-    en_text = "🇺🇸 English ✅" if user['lang'] == 'en' else "🇺🇸 English"
-    markup.add(
-        InlineKeyboardButton(text=fa_text, callback_data="lang_fa"),
-        InlineKeyboardButton(text=en_text, callback_data="lang_en"),
+def _settings_markup(
+    user: dict,
+    t: dict,
+) -> InlineKeyboardMarkup:
+
+    markup = InlineKeyboardMarkup(
+        row_width=1
     )
 
-    quality_buttons = []
-    for key in ("best", "720p", "audio"):
-        label = t[f'quality_{key}']
-        text = f"{label} ✅" if user['quality'] == key else label
-        quality_buttons.append(InlineKeyboardButton(text=text, callback_data=f"quality_{key}"))
-    markup.row(*quality_buttons)
+    markup.add(
+        InlineKeyboardButton(
+            text=t["settings_quality"],
+            callback_data="settings_quality",
+        )
+    )
+
+    low_data_text = (
+        f"{t['settings_low_data']} ✅"
+        if user.get("low_data_mode", False)
+        else t["settings_low_data"]
+    )
+
+    markup.add(
+        InlineKeyboardButton(
+            text=low_data_text,
+            callback_data="settings_low_data",
+        )
+    )
+
+    markup.add(
+        InlineKeyboardButton(
+            text=t["settings_language"],
+            callback_data="settings_language",
+        )
+    )
+    
+    """markup.add(
+        InlineKeyboardButton(
+            text=t["settings_current"],
+            callback_data="settings_current",
+        )
+    )"""
+    
+    markup.add(
+        InlineKeyboardButton(
+            text=t["settings_reset"],
+            callback_data="settings_reset",
+        )
+    )
+
+    return markup
+
+def _instagram_quality_markup(
+    user: dict,
+    t: dict,
+) -> InlineKeyboardMarkup:
+
+    markup = InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    qualities = (
+        (
+            "best",
+            t["instagram_quality_best"],
+        ),
+        (
+            "1080p",
+            t["instagram_quality_1080"],
+        ),
+        (
+            "720p",
+            t["instagram_quality_720"],
+        ),
+        (
+            "480p",
+            t["instagram_quality_480"],
+        ),
+        (
+            "360p",
+            t["instagram_quality_360"],
+        ),
+    )
+
+    buttons = []
+
+    for key, label in qualities:
+
+        text = (
+            f"{label} ✅"
+            if user.get(
+                "instagram_quality",
+                "best",
+            ) == key
+            else label
+        )
+
+        buttons.append(
+            InlineKeyboardButton(
+                text=text,
+                callback_data=f"igquality_{key}",
+            )
+        )
+
+    for index in range(
+        0,
+        len(buttons),
+        2,
+    ):
+        markup.row(
+            *buttons[index:index + 2]
+        )
+
+    markup.add(
+        InlineKeyboardButton(
+            text=t["settings_back"],
+            callback_data="settings_home",
+        )
+    )
+
+    return markup
+
+
+def _low_data_markup(
+    user: dict,
+    t: dict,
+) -> InlineKeyboardMarkup:
+
+    markup = InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    enabled = user.get(
+        "low_data_mode",
+        False,
+    )
+
+    markup.row(
+        InlineKeyboardButton(
+            text=(
+                f"{t['low_data_on']} ✅"
+                if enabled
+                else t["low_data_on"]
+            ),
+            callback_data="lowdata_on",
+        ),
+        InlineKeyboardButton(
+            text=(
+                f"{t['low_data_off']} ✅"
+                if not enabled
+                else t["low_data_off"]
+            ),
+            callback_data="lowdata_off",
+        ),
+    )
+
+    markup.add(
+        InlineKeyboardButton(
+            text=t["settings_back"],
+            callback_data="settings_home",
+        )
+    )
+
+    return markup
+
+
+def _language_markup(
+    user: dict,
+    t: dict,
+) -> InlineKeyboardMarkup:
+
+    markup = InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    markup.row(
+        InlineKeyboardButton(
+            text=(
+                "🇮🇷 فارسی ✅"
+                if user.get("lang") == "fa"
+                else "🇮🇷 فارسی"
+            ),
+            callback_data="setlang_fa",
+        ),
+        InlineKeyboardButton(
+            text=(
+                "🇺🇸 English ✅"
+                if user.get("lang") == "en"
+                else "🇺🇸 English"
+            ),
+            callback_data="setlang_en",
+        ),
+    )
+
+    markup.add(
+        InlineKeyboardButton(
+            text=t["settings_back"],
+            callback_data="settings_home",
+        )
+    )
+
+    return markup
+
+
+def _current_settings_text(
+    user: dict,
+    t: dict,
+) -> str:
+
+    language_name = (
+        "فارسی"
+        if user.get("lang") == "fa"
+        else "English"
+    )
+
+    quality_labels = {
+        "best": t["instagram_quality_best"],
+        "1080p": t["instagram_quality_1080"],
+        "720p": t["instagram_quality_720"],
+        "480p": t["instagram_quality_480"],
+        "360p": t["instagram_quality_360"],
+    }
+
+    quality_name = quality_labels.get(
+        user.get("instagram_quality"),
+        t["instagram_quality_best"],
+    )
+
+    low_data_name = (
+        t["low_data_on"]
+        if user.get("low_data_mode", False)
+        else t["low_data_off"]
+    )
+
+    return (
+        f"{t['current_settings_title']}\n\n"
+        f"• {t['current_instagram_quality']}: "
+        f"{quality_name}\n"
+        f"• {t['current_low_data']}: "
+        f"{low_data_name}\n"
+        f"• {t['current_language']}: "
+        f"{language_name}"
+    )
+
+
+def _reset_markup(
+    t: dict,
+) -> InlineKeyboardMarkup:
+
+    markup = InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    markup.row(
+        InlineKeyboardButton(
+            text=t["reset_confirm"],
+            callback_data="settings_reset_confirm",
+        ),
+        InlineKeyboardButton(
+            text=t["reset_cancel"],
+            callback_data="settings_home",
+        ),
+    )
+
     return markup
 
 
@@ -2494,16 +2861,55 @@ def register_features(bot):
     def whoami(message):
         bot.reply_to(message, f"🆔 `{message.from_user.id}`", parse_mode="Markdown")
 
-    @bot.message_handler(commands=["settings"])
+    @bot.message_handler(
+        commands=["settings"]
+    )
     def open_settings(message):
-        if admin.is_owner(message.from_user.id):
-            text, markup = admin.build_panel(_texts_for(message.chat.id))
-            bot.reply_to(message, text, reply_markup=markup, parse_mode="Markdown")
+
+        if admin.is_owner(
+            message.from_user.id
+        ):
+            text, markup = admin.build_panel(
+                _texts_for(
+                    message.chat.id
+                )
+            )
+
+            bot.reply_to(
+                message,
+                text,
+                reply_markup=markup,
+                parse_mode="Markdown",
+            )
+
             return
 
-        user = store.get_user(user_settings, message.chat.id)
-        t = TEXTS[user['lang']]
-        bot.reply_to(message, t['settings_msg'], reply_markup=_settings_markup(user, t), parse_mode="Markdown")
+        user = store.get_user(
+            user_settings,
+            message.chat.id,
+        )
+
+        t = TEXTS[
+            user.get(
+                "lang",
+                "en",
+            )
+        ]
+
+        settings_text = (
+            f"{t['settings_msg']}\n\n"
+            f"{_current_settings_text(user, t)}"
+        )
+
+        bot.reply_to(
+            message,
+            settings_text,
+            reply_markup=_settings_markup(
+                user,
+                t,
+            ),
+            parse_mode="Markdown",
+        )
 
     @bot.callback_query_handler(
         func=lambda call:
@@ -2571,25 +2977,408 @@ def register_features(bot):
                 _ad_texts(updated),
             )
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith('lang_') or call.data.startswith('quality_'))
+    @bot.callback_query_handler(
+        func=lambda call:
+            call.data.startswith("settings_")
+            or call.data.startswith("igquality_")
+            or call.data.startswith("lowdata_")
+            or call.data.startswith("setlang_")
+    )
     def handle_settings_callback(call):
-        chat_id = str(call.message.chat.id)
-        user = store.get_user(user_settings, chat_id)
 
-        if call.data.startswith('lang_'):
-            user['lang'] = call.data.split('_', 1)[1]
-        else:
-            user['quality'] = call.data.split('_', 1)[1]
-
-        user_settings[chat_id] = user
-        store.save_user_settings(user_settings)
-
-        t = TEXTS[user['lang']]
-        bot.edit_message_text(
-            t['settings_msg'], int(chat_id), call.message.message_id,
-            reply_markup=_settings_markup(user, t), parse_mode="Markdown",
+        chat_id = str(
+            call.message.chat.id
         )
-        bot.answer_callback_query(call.id)
+
+        user = store.get_user(
+            user_settings,
+            chat_id,
+        )
+
+        data = call.data
+
+        if data == "settings_home":
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            settings_text = (
+                f"{t['settings_msg']}\n\n"
+                f"{_current_settings_text(user, t)}"
+            )
+
+            bot.edit_message_text(
+                settings_text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_settings_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data == "settings_quality":
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            text = (
+                f"{t['instagram_quality_title']}\n\n"
+                f"{t['instagram_quality_help']}"
+            )
+
+            bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_instagram_quality_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data.startswith("igquality_"):
+
+            selected = data.split(
+                "_",
+                1,
+            )[1]
+
+            if selected not in {
+                "best",
+                "1080p",
+                "720p",
+                "480p",
+                "360p",
+            }:
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid selection.",
+                    show_alert=True,
+                )
+                return
+
+            user["instagram_quality"] = selected
+            user_settings[chat_id] = user
+
+            store.save_user_settings(
+                user_settings
+            )
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            text = (
+                f"{t['instagram_quality_title']}\n\n"
+                f"{t['instagram_quality_help']}"
+            )
+
+            bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_instagram_quality_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data == "settings_low_data":
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            text = (
+                f"{t['low_data_title']}\n\n"
+                f"{t['low_data_help']}"
+            )
+
+            bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_low_data_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data.startswith("lowdata_"):
+
+            selected = data.split(
+                "_",
+                1,
+            )[1]
+
+            if selected not in {
+                "on",
+                "off",
+            }:
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid selection.",
+                    show_alert=True,
+                )
+                return
+
+            user["low_data_mode"] = (
+                selected == "on"
+            )
+
+            user_settings[chat_id] = user
+
+            store.save_user_settings(
+                user_settings
+            )
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            text = (
+                f"{t['low_data_title']}\n\n"
+                f"{t['low_data_help']}"
+            )
+
+            bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_low_data_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data == "settings_language":
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            text = (
+                f"{t['language_title']}\n\n"
+                f"{t['language_help']}"
+            )
+
+            bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_language_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data.startswith("setlang_"):
+
+            selected = data.split(
+                "_",
+                1,
+            )[1]
+
+            if selected not in {
+                "fa",
+                "en",
+            }:
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid language.",
+                    show_alert=True,
+                )
+                return
+
+            user["lang"] = selected
+
+            user_settings[chat_id] = user
+
+            store.save_user_settings(
+                user_settings
+            )
+
+            t = TEXTS[
+                selected
+            ]
+
+            settings_text = (
+                f"{t['settings_msg']}\n\n"
+                f"{_current_settings_text(user, t)}"
+            )
+
+            bot.edit_message_text(
+                settings_text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_settings_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data == "settings_current":
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            bot.edit_message_text(
+                _current_settings_text(
+                    user,
+                    t,
+                ),
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton(
+                        text=t["settings_back"],
+                        callback_data="settings_home",
+                    )
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data == "settings_reset":
+
+            t = TEXTS[
+                user.get(
+                    "lang",
+                    "en",
+                )
+            ]
+
+            bot.edit_message_text(
+                f"{t['reset_title']}\n\n"
+                f"{t['reset_warning']}",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_reset_markup(
+                    t
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
+
+        if data == "settings_reset_confirm":
+
+            user = {
+                "lang": store.DEFAULT_LANGUAGE,
+                "quality": store.DEFAULT_QUALITY,
+                "instagram_quality": store.DEFAULT_INSTAGRAM_QUALITY,
+                "low_data_mode": store.DEFAULT_LOW_DATA_MODE,
+            }
+
+            user_settings[chat_id] = user
+
+            store.save_user_settings(
+                user_settings
+            )
+
+            t = TEXTS[
+                user["lang"]
+            ]
+
+            bot.edit_message_text(
+                t["reset_done"],
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_settings_markup(
+                    user,
+                    t,
+                ),
+                parse_mode="Markdown",
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+            return
 
     @bot.message_handler(commands=["adrequest"])
     @bot.message_handler(
@@ -3481,7 +4270,36 @@ def register_features(bot):
                 _download_semaphore.release()
             return
 
-        _run_direct_download(chat_id_int, message.message_id, url, user['quality'], t, status_msg, show_ui=show_ui,)
+        download_quality = (
+            user.get(
+                "instagram_quality",
+                "best",
+            )
+            if platform == "instagram"
+            else user.get(
+                "quality",
+                "best",
+            )
+        )
+
+        if (
+            platform == "instagram"
+            and user.get(
+                "low_data_mode",
+                False,
+            )
+        ):
+            download_quality = "480p"
+
+        _run_direct_download(
+            chat_id_int,
+            message.message_id,
+            url,
+            download_quality,
+            t,
+            status_msg,
+            show_ui=show_ui,
+        )
 
     @bot.callback_query_handler(
         func=lambda call:
