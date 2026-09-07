@@ -29,6 +29,8 @@ import time
 import uuid
 import urllib.parse
 import urllib.request
+import html
+import requests
 
 import yt_dlp
 
@@ -116,6 +118,35 @@ def detect_platform(text: str):
     for platform, pattern in PLATFORM_PATTERNS.items():
         if pattern.search(text):
             return platform
+    return None
+
+
+def extract_url(text: str) -> str | None:
+    """Extract the first supported platform URL from arbitrary text."""
+
+    if not text:
+        return None
+
+    patterns = (
+        r"https?://(?:www\.)?(?:instagram\.com)/\S+",
+        r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/\S+",
+        r"https?://(?:www\.)?(?:tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/\S+",
+        r"https?://(?:www\.)?(?:soundcloud\.com|on\.soundcloud\.com)/\S+",
+        r"https?://(?:(?:open\.)?spotify\.com)/\S+",
+    )
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(0).rstrip(
+                ".,!?)]}>"
+            )
+
     return None
 
 def _is_youtube_url(url: str) -> bool:
@@ -316,6 +347,484 @@ def _youtube_extra_opts(clients) -> dict:
         )
 
     return opts
+
+def _is_tiktok_photo_url(
+    url: str,
+) -> bool:
+    return bool(
+        re.search(
+            r"https?://(?:www\.)?tiktok\.com/"
+            r"@[^/]+/photo/\d+",
+            url,
+            re.IGNORECASE,
+        )
+    )
+
+def resolve_tiktok_url(
+    url: str,
+) -> str:
+    """Resolve TikTok short/share URLs without downloading media."""
+
+    try:
+        response = requests.get(
+            url,
+            allow_redirects=True,
+            timeout=20,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/151.0 Safari/537.36"
+                ),
+            },
+        )
+
+        response.raise_for_status()
+
+        return response.url
+
+    except Exception:
+        return url
+
+def _get_tiktok_item_id(
+    url: str,
+) -> str | None:
+    match = re.search(
+        r"/(?:photo|video)/"
+        r"(?P<id>\d+)",
+        url,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return match.group(
+        "id"
+    )  
+
+def _resolve_tiktok_photo(
+    url: str
+) -> dict:
+    """
+    Resolve a TikTok photo/slideshow post.
+
+    Strategy:
+    1. Resolve the URL.
+    2. Convert /photo/{id} to /video/{id}.
+    3. Load the public TikTok page.
+    4. Extract TikTok's embedded item data.
+    5. Read image_post_info.images.
+    """
+
+    resolved_url = resolve_tiktok_url(
+        url
+    )
+
+    item_id = _get_tiktok_item_id(
+        resolved_url
+    )
+
+    if not item_id:
+        raise ValueError(
+            "Could not determine the TikTok photo ID."
+        )
+
+    video_url = re.sub(
+        r"/photo/(\d+)",
+        r"/video/\1",
+        resolved_url,
+        flags=re.IGNORECASE,
+    )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/151.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.tiktok.com/",
+    }
+
+    session = requests.Session()
+
+    try:
+        response = session.get(
+            video_url,
+            headers=headers,
+            timeout=30,
+            allow_redirects=True,
+        )
+
+        response.raise_for_status()
+
+        text = response.text
+
+        # ---------------------------------------------------------------
+        # Search all likely JSON blobs containing the TikTok item.
+        # ---------------------------------------------------------------
+
+        json_candidates = []
+
+        patterns = [
+            r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"'
+            r'[^>]*>(.*?)</script>',
+
+            r'<script[^>]+id="SIGI_STATE"'
+            r'[^>]*>(.*?)</script>',
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(
+                pattern,
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+
+            for raw_json in matches:
+                raw_json = raw_json.strip()
+
+                if raw_json:
+                    try:
+                        json_candidates.append(
+                            json.loads(raw_json)
+                        )
+                    except json.JSONDecodeError:
+                        continue
+
+        # ---------------------------------------------------------------
+        # Recursively search the JSON for the matching aweme/item.
+        # ---------------------------------------------------------------
+
+        def find_item(obj):
+            if isinstance(
+                obj,
+                dict,
+            ):
+                # Direct aweme item.
+                obj_id = (
+                    obj.get("aweme_id")
+                    or obj.get("id")
+                )
+
+                if (
+                    obj_id
+                    and str(obj_id) == str(item_id)
+                ):
+                    return obj
+
+                # Search nested dictionaries.
+                for value in obj.values():
+                    found = find_item(
+                        value
+                    )
+
+                    if found is not None:
+                        return found
+
+            elif isinstance(
+                obj,
+                list,
+            ):
+                for value in obj:
+                    found = find_item(
+                        value
+                    )
+
+                    if found is not None:
+                        return found
+
+            return None
+
+        item = None
+
+        for candidate in json_candidates:
+            item = find_item(
+                candidate
+            )
+
+            if item is not None:
+                break
+
+        # ---------------------------------------------------------------
+        # Extract slideshow images.
+        # ---------------------------------------------------------------
+
+        if item:
+            image_post_info = (
+                item.get("image_post_info")
+                or item.get("imagePostInfo")
+                or item.get("imagePost")
+                or {}
+            )
+
+            images = (
+                image_post_info.get("images")
+                or []
+            )
+
+            image_urls = []
+
+            for image in images:
+                if not isinstance(
+                    image,
+                    dict,
+                ):
+                    continue
+
+                image_url = (
+                    image.get("display_image")
+                    or image.get("displayImage")
+                    or image.get("imageURL")
+                    or image.get("imageUrl")
+                    or {}
+                )
+
+                if isinstance(
+                    image_url,
+                    dict,
+                ):
+                    urls = (
+                        image_url.get("url_list")
+                        or image_url.get("urlList")
+                        or []
+                    )
+
+                    if urls:
+                        image_urls.append(
+                            urls[-1]
+                        )
+
+                elif isinstance(
+                    image_url,
+                    str,
+                ):
+                    image_urls.append(
+                        image_url
+                    )
+
+            image_urls = list(
+                dict.fromkeys(
+                    image_urls
+                )
+            )
+
+            if image_urls:
+                author = (
+                    item.get("author")
+                    or {}
+                )
+
+                return {
+                    "id": (
+                        item.get("aweme_id")
+                        or item.get("id")
+                        or item_id
+                    ),
+                    "url": resolved_url,
+                    "title": (
+                        item.get("desc")
+                        or ""
+                    ),
+                    "username": (
+                        author.get("unique_id")
+                        or author.get("uniqueId")
+                        or ""
+                    ),
+                    "images": image_urls,
+                    "item": item,
+                }
+
+    except Exception as e:
+        logger.warning(
+            "TikTok webpage photo resolver failed: %s",
+            e,
+        )
+
+    raise ValueError(
+        "Could not extract photos from this TikTok post."
+    )
+
+def _download_tiktok_photo_image(
+    image_url: str,
+    item_id: str,
+    index: int,
+) -> str:
+    """Download one TikTok slideshow image."""
+
+    response = requests.get(
+        image_url,
+        timeout=30,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/151.0 Safari/537.36"
+            ),
+            "Referer": "https://www.tiktok.com/",
+        },
+    )
+
+    response.raise_for_status()
+
+    content_type = (
+        response.headers.get(
+            "Content-Type",
+            "",
+        ).lower()
+    )
+
+    if "png" in content_type:
+        extension = "png"
+    elif "webp" in content_type:
+        extension = "webp"
+    else:
+        extension = "jpg"
+
+    filename = (
+        f"{item_id}_{index}.{extension}"
+    )
+
+    filepath = os.path.join(
+        DOWNLOAD_DIR,
+        filename,
+    )
+
+    with open(
+        filepath,
+        "wb",
+    ) as file:
+        file.write(
+            response.content
+        )
+
+    return filepath
+
+def download_tiktok_photo(
+    url: str,
+    progress_hook=None,
+):
+    """
+    Download every image in a TikTok photo/slideshow post.
+
+    Returns the same general structure used by the bot:
+        info, entries, filepaths
+    """
+
+    os.makedirs(
+        DOWNLOAD_DIR,
+        exist_ok=True,
+    )
+
+    resolved = _resolve_tiktok_photo(
+        url
+    )
+
+    image_urls = (
+        resolved.get("images")
+        or []
+    )
+
+    if not image_urls:
+        raise ValueError(
+            "No images were found in this TikTok photo post."
+        )
+
+    filepaths = []
+    entries = []
+
+    for index, image_url in enumerate(
+        image_urls,
+        start=1,
+    ):
+        filepath = (
+            _download_tiktok_photo_image(
+                image_url,
+                resolved["id"],
+                index,
+            )
+        )
+
+        filepaths.append(
+            filepath
+        )
+
+        entries.append(
+            {
+                "id": (
+                    f"{resolved['id']}_{index}"
+                ),
+                "extractor": "TikTok",
+                "extractor_key": "TikTok",
+                "url": image_url,
+                "title": resolved.get(
+                    "title",
+                    "",
+                ),
+                "uploader": resolved.get(
+                    "username",
+                    "",
+                ),
+                "channel": resolved.get(
+                    "username",
+                    "",
+                ),
+                "thumbnail": image_url,
+            }
+        )
+
+        if progress_hook:
+            progress_hook(
+                {
+                    "status": "downloading",
+                    "_percent_str": f"{round((index / len(image_urls)) * 100)}%",
+                    "_eta_str": "N/A",
+                    "_total_bytes_str": "N/A",
+                }
+            )
+
+    info = {
+        "id": resolved["id"],
+        "extractor": "TikTok",
+        "extractor_key": "TikTok",
+        "webpage_url": resolved["url"],
+        "title": resolved.get(
+            "title",
+            "",
+        ),
+        "uploader": resolved.get(
+            "username",
+            "",
+        ),
+        "channel": resolved.get(
+            "username",
+            "",
+        ),
+        "thumbnail": (
+            image_urls[0]
+            if image_urls
+            else None
+        ),
+    }
+
+    return (
+        info,
+        entries,
+        filepaths,
+    )
+
+
 
 def _is_instagram_story_url(
     url: str,
@@ -1892,15 +2401,51 @@ def download_direct(
     progress_hook=None,
 ):
     """
-    Download media from Instagram / YouTube / SoundCloud.
+    Download media from Instagram / YouTube / SoundCloud / TikTok.
+
+    TikTok photo/slideshow posts are handled separately because
+    yt-dlp does not currently extract TikTok /photo/ URLs directly.
 
     Size is checked AFTER the real file exists instead of performing
     another yt-dlp extraction beforehand.
     """
 
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    os.makedirs(
+        DOWNLOAD_DIR,
+        exist_ok=True,
+    )
 
-    is_soundcloud = "soundcloud.com" in url.lower()
+    is_soundcloud = (
+        "soundcloud.com" in url.lower()
+    )
+
+    # ---------------------------------------------------------------
+    # TikTok
+    # ---------------------------------------------------------------
+
+    resolved_url = url
+
+    if "tiktok.com" in url.lower():
+        resolved_url = resolve_tiktok_url(
+            url
+        )
+
+        if _is_tiktok_photo_url(
+            resolved_url
+        ):
+            info, entries, filepaths = (
+                download_tiktok_photo(
+                    resolved_url,
+                    progress_hook,
+                )
+            )
+
+            return (
+                info,
+                entries,
+                filepaths,
+                "best",
+            )
 
     # ---------------------------------------------------------------
     # SoundCloud
@@ -1915,14 +2460,18 @@ def download_direct(
             fmt,
             True,
             progress_hook,
-        ) + ("audio",)
+        ) + (
+            "audio",
+        )
 
     # ---------------------------------------------------------------
     # Normal direct-download path
     # ---------------------------------------------------------------
 
     start = (
-        QUALITY_LADDER.index(quality)
+        QUALITY_LADDER.index(
+            quality
+        )
         if quality in QUALITY_LADDER
         else 0
     )
@@ -1937,7 +2486,10 @@ def download_direct(
 
     for tier in tiers_to_try:
 
-        fmt = _format_for(url, tier)
+        fmt = _format_for(
+            url,
+            tier,
+        )
 
         try:
 

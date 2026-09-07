@@ -1336,13 +1336,14 @@ def register_features(bot):
         if message_id is None:
             return
 
-        try:
-            bot.delete_message(
-                chat_id_int,
-                message_id,
-            )
-        except Exception:
-            pass
+        if show_ui and status_msg is not None:
+            try:
+                bot.delete_message(
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
 
     def _send_duck_reaction(
         chat_id_int,
@@ -2224,7 +2225,13 @@ def register_features(bot):
         show_ui=True,
     ):
         chat_id_int = message.chat.id
-        url = message.text.strip()
+
+        url = platforms.extract_url(
+            message.text
+        )
+
+        if not url:
+            return
 
         status_msg = None
 
@@ -2257,20 +2264,23 @@ def register_features(bot):
                 url,
             )
 
-            bot.edit_message_text(
-                t["youtube_failed"],
-                chat_id_int,
-                status_msg.message_id,
-            )
+            if show_ui and status_msg is not None:
+                bot.edit_message_text(
+                    t["youtube_failed"],
+                    chat_id_int,
+                    status_msg.message_id,
+                )
 
             return
 
         if not probe.get("options"):
-            bot.edit_message_text(
-                t["yt_no_quality"],
-                chat_id_int,
-                status_msg.message_id,
-            )
+            if show_ui and status_msg is not None:
+                bot.edit_message_text(
+                    t["yt_no_quality"],
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+
             return
 
         digits = str.maketrans(
@@ -2349,13 +2359,14 @@ def register_features(bot):
 
         markup.add(*buttons)
 
-        try:
-            bot.delete_message(
-                chat_id_int,
-                status_msg.message_id,
-            )
-        except Exception:
-            pass
+        if show_ui and status_msg is not None:
+            try:
+                bot.delete_message(
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
 
         caption = (
             t["yt_choose_quality"].format(
@@ -3313,7 +3324,20 @@ def register_features(bot):
         ):
             return
 
-        url = message.text.strip()
+        url = platforms.extract_url(
+            message.text
+        )
+
+        if (
+            "tiktok.com" in url.lower()
+        ):
+            url = platforms.resolve_tiktok_url(
+                url
+            )
+
+        if not url:
+            return
+
         if show_ui:
             _delete_previous_download_ducks(
                 chat_id_int
@@ -3332,7 +3356,7 @@ def register_features(bot):
         # audio only — in that case there's nothing to pick, so it goes
         # through the same direct-download path as every other platform.
         if platform == "youtube" and user['quality'] != 'audio':
-            _send_youtube_quality_picker(message, t, user['lang'])
+            _send_youtube_quality_picker(message, t, user['lang'], show_ui=show_ui,)
             return
 
         if _is_rate_limited(user_id):
@@ -3900,6 +3924,11 @@ def register_features(bot):
         chat_id_int = call.message.chat.id
         user_id = call.from_user.id
 
+        show_ui = (
+            call.message.chat.type
+            == "private"
+        )
+
         t = _texts_for(
             chat_id_str
         )
@@ -3931,9 +3960,17 @@ def register_features(bot):
             return
 
         try:
-            _, video_id, choice = (
-                call.data.split("_", 2)
+            callback_payload = call.data[
+                len("ytq_"):
+            ]
+
+            video_id, choice = (
+                callback_payload.rsplit(
+                    "_",
+                    1,
+                )
             )
+
         except ValueError:
             bot.answer_callback_query(
                 call.id,
@@ -3946,23 +3983,28 @@ def register_features(bot):
             call.id
         )
 
-        try:
-            bot.delete_message(
-                chat_id_int,
-                call.message.message_id,
-            )
-        except Exception:
-            pass
+        if show_ui and status_msg is not None:
+            try:
+                bot.delete_message(
+                    chat_id_int,
+                    status_msg.message_id,
+                )
+            except Exception:
+                pass
 
-        status_msg = bot.send_message(
-            chat_id_int,
-            t["init"],
-        )
+        status_msg = None
+
+        if show_ui:
+            status_msg = bot.send_message(
+                chat_id_int,
+                t["init"],
+            )
 
         progress_hook = _make_progress_hook(
             chat_id_int,
             status_msg,
             t,
+            show_ui=show_ui,
         )
 
         if not _acquire_download_slot(
@@ -3970,6 +4012,7 @@ def register_features(bot):
             chat_id_int,
             status_msg,
             t,
+            show_ui=show_ui,
         ):
             return
 
@@ -3977,6 +4020,7 @@ def register_features(bot):
             chat_id_int,
             "downloading",
             track_status=True,
+            show_ui=show_ui,
         )
 
         try:
@@ -3989,9 +4033,10 @@ def register_features(bot):
                 )
             )
 
-            _finish_duck_download(
-                chat_id_int
-            )
+            if show_ui:
+                _finish_duck_download(
+                    chat_id_int
+                )
 
             if show_ui and status_msg is not None:
                 bot.edit_message_text(
@@ -4051,16 +4096,17 @@ def register_features(bot):
                 error=str(e),
             )
 
-            try:
-                bot.edit_message_text(
-                    t["too_large"].format(
-                        size=str(e)
-                    ),
-                    chat_id_int,
-                    status_msg.message_id,
-                )
-            except Exception:
-                pass
+            if show_ui and status_msg is not None:
+                try:
+                    bot.edit_message_text(
+                        t["too_large"].format(
+                            size=str(e)
+                        ),
+                        chat_id_int,
+                        status_msg.message_id,
+                    )
+                except Exception:
+                    pass
 
         except Exception as e:
 
@@ -4081,14 +4127,15 @@ def register_features(bot):
                 choice,
             )
 
-            try:
-                bot.edit_message_text(
-                    t["youtube_failed"],
-                    chat_id_int,
-                    status_msg.message_id,
-                )
-            except Exception:
-                pass
+            if show_ui and status_msg is not None:
+                try:
+                    bot.edit_message_text(
+                        t["youtube_failed"],
+                        chat_id_int,
+                        status_msg.message_id,
+                    )
+                except Exception:
+                    pass
 
         finally:
 
