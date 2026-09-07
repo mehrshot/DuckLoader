@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 thumb_cache = {}
 audio_source_cache = {}  # post_id -> original url, for the "get audio" button under video posts
 last_link_messages = {}
+caption_cache = {}
+
 user_settings = store.load_user_settings()
 
 # --- rate limiting + concurrency cap ---
@@ -82,21 +84,27 @@ def _acquire_download_slot(
     with _queue_lock:
         if _queue_waiting_count >= MAX_QUEUE_WAITING:
             if show_ui and status_msg is not None:
-                bot.edit_message_text(
+                try:
+                    bot.edit_message_text(
                     t['server_busy'],
                     chat_id_int,
                     status_msg.message_id,
-                )
+                    )
+                except Exception:
+                    pass
             return False
 
         _queue_waiting_count += 1
 
     if show_ui and status_msg is not None:
-        bot.edit_message_text(
-            t['queued'],
-            chat_id_int,
-            status_msg.message_id,
-        )
+        try:
+            bot.edit_message_text(
+                t['queued'],
+                chat_id_int,
+                status_msg.message_id,
+            )
+        except Exception:
+            pass
 
     _download_semaphore.acquire()
 
@@ -157,6 +165,8 @@ TEXTS = {
         'view_link': "🔗 مشاهده در پلتفرم اصلی",
         'dl_cover': "🖼 دانلود کاور",
         'get_audio_btn': "🎵 دریافت صدا",
+        'get_caption': '👁 دریافت کپشن',
+        'hide_caption': '🙈 مخفی کردن کپشن',
         'audio_expired': "⚠️ این دکمه دیگه معتبر نیست (بات ری‌استارت شده). لینک رو دوباره بفرست.",
         'cover_loading': "⏳ در حال دریافت کاور...",
         'cover_error': "⚠️ کاور این پست یافت نشد.",
@@ -354,6 +364,8 @@ TEXTS = {
         'view_link': "🔗 View Original",
         'dl_cover': "🖼 Download Cover",
         'get_audio_btn': "🎵 Get Audio",
+        'get_caption': '👁 Get Caption',
+        'hide_caption': '🙈 Hide Caption',
         'audio_expired': "⚠️ This button is no longer valid (the bot restarted). Please resend the link.",
         'cover_loading': "⏳ Fetching cover...",
         'cover_error': "⚠️ Cover not found.",
@@ -1732,16 +1744,16 @@ def register_features(bot):
                         size=size,
                         eta=eta,
                     )
-
-                    try:
-                        bot.edit_message_text(
-                            log_text,
-                            chat_id_int,
-                            status_msg.message_id,
-                            parse_mode="Markdown",
-                        )
-                    except Exception:
-                        pass
+                    if show_ui and status_msg is not None:
+                        try:
+                            bot.edit_message_text(
+                                log_text,
+                                chat_id_int,
+                                status_msg.message_id,
+                                parse_mode="Markdown",
+                            )
+                        except Exception:
+                            pass
 
                     state["last_edit"] = now
 
@@ -1773,6 +1785,7 @@ def register_features(bot):
                     quality=t[f'quality_{quality_used}']
                 ),
             )
+
         # Merge the parent result with the individual media entry.
         #
         # The parent result can contain the Instagram username ("channel")
@@ -1793,14 +1806,17 @@ def register_features(bot):
                 ):
                     metadata_source[key] = value
 
-        caption = (
-            _build_caption(
-                metadata_source,
-                url,
-            )
-            if show_ui
-            else ""
+        full_caption = _build_caption(
+            metadata_source,
+            url,
         )
+
+        if show_ui:
+            caption = full_caption
+        else:
+            caption = (
+                "🦆 Downloaded with @DuckDownloader_Bot"
+            )
 
         thumb_url = (
             metadata_source.get("thumbnail")
@@ -1840,6 +1856,21 @@ def register_features(bot):
                     InlineKeyboardButton(
                         text=t['get_audio_btn'],
                         callback_data=f"audio_{post_id}",
+                    )
+                )
+
+        elif len(valid_files) == 1:
+            group_kind = platforms.media_kind(
+                valid_files[0]
+            )
+
+            if group_kind == "video":
+                markup = InlineKeyboardMarkup()
+
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t["get_caption"],
+                        callback_data=f"caption_{post_id}",
                     )
                 )
 
@@ -1884,7 +1915,15 @@ def register_features(bot):
                         cover_url=thumb_url,
                     )
                 
-            bot.send_chat_action(chat_id_int, 'upload_video' if kind == 'video' else 'upload_audio' if kind == 'audio' else 'upload_photo')
+            if show_ui:
+                bot.send_chat_action(
+                    chat_id_int,
+                    'upload_video'
+                    if kind == 'video'
+                    else 'upload_audio'
+                    if kind == 'audio'
+                    else 'upload_photo',
+                )
 
             try:
                 with open(filepath, "rb") as media_file:
@@ -1914,7 +1953,7 @@ def register_features(bot):
                             except (TypeError, ValueError):
                                 video_height = None
 
-                        bot.send_video(
+                        sent_message = bot.send_video(
                             chat_id_int,
                             media_file,
                             caption=caption,
@@ -1931,6 +1970,13 @@ def register_features(bot):
 
                             timeout=600,
                         )
+                        if not show_ui:
+                            caption_cache[post_id] = {
+                                "chat_id": chat_id_int,
+                                "message_id": sent_message.message_id,
+                                "caption": full_caption,
+                                "visible": False,
+                            }
                     elif kind == "audio":
                         audio_duration = metadata_source.get("duration") or 0
 
@@ -2175,15 +2221,18 @@ def register_features(bot):
         message,
         t,
         lang,
+        show_ui=True,
     ):
         chat_id_int = message.chat.id
         url = message.text.strip()
 
-        status_msg = bot.reply_to(
-            message,
-            t["init"],
-        )
+        status_msg = None
 
+        if show_ui:
+            status_msg = bot.reply_to(
+                message,
+                t["init"],
+            )
         try:
             probe = platforms.probe_youtube_qualities(
                 url
@@ -2192,7 +2241,8 @@ def register_features(bot):
         except Exception as e:
 
             _send_duck_download_failed(
-                chat_id_int
+                chat_id_int,
+                show_ui=show_ui,
             )
 
             store.record_error(
@@ -3373,7 +3423,8 @@ def register_features(bot):
             except Exception as e:
 
                 _send_duck_download_failed(
-                    chat_id_int
+                    chat_id_int,
+                    show_ui=show_ui,
                 )
 
                 store.record_error(
@@ -3649,6 +3700,87 @@ def register_features(bot):
         handle_media_link(
             last_message
         )
+    
+    @bot.callback_query_handler(
+        func=lambda call: call.data.startswith(
+            "caption_"
+        )
+    )
+    def handle_caption_toggle(call):
+        if call.message.chat.type == "private":
+            bot.answer_callback_query(
+                call.id
+            )
+            return
+
+        chat_id_str = str(
+            call.message.chat.id
+        )
+
+        t = _texts_for(
+            chat_id_str
+        )
+
+        post_id = call.data.split(
+            "caption_",
+            1,
+        )[1]
+
+        data = caption_cache.get(
+            post_id
+        )
+
+        if not data:
+            bot.answer_callback_query(
+                call.id,
+                "This caption is no longer available.",
+                show_alert=True,
+            )
+            return
+
+        visible = not data.get(
+            "visible",
+            False,
+        )
+
+        data["visible"] = visible
+
+        if visible:
+            caption = data["caption"]
+            button_text = t["hide_caption"]
+        else:
+            caption = (
+                "🦆 Downloaded with @DuckDownloader_Bot"
+            )
+            button_text = t["get_caption"]
+
+        markup = InlineKeyboardMarkup()
+
+        markup.add(
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"caption_{post_id}",
+            )
+        )
+
+        try:
+            bot.edit_message_caption(
+                chat_id=data["chat_id"],
+                message_id=data["message_id"],
+                caption=caption,
+                reply_markup=markup,
+            )
+
+            bot.answer_callback_query(
+                call.id
+            )
+
+        except Exception:
+            bot.answer_callback_query(
+                call.id,
+                "Could not update the caption.",
+                show_alert=True,
+            )
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('thumb_'))
     def handle_thumbnail_callback(call):
@@ -3861,11 +3993,12 @@ def register_features(bot):
                 chat_id_int
             )
 
-            bot.edit_message_text(
-                t["uploading"],
-                chat_id_int,
-                status_msg.message_id,
-            )
+            if show_ui and status_msg is not None:
+                bot.edit_message_text(
+                    t["uploading"],
+                    chat_id_int,
+                    status_msg.message_id,
+                )
 
             source_url = (
                 f"https://www.youtube.com/watch?v={video_id}"
@@ -3882,23 +4015,30 @@ def register_features(bot):
                 entries,
                 files,
                 t,
+                show_ui=show_ui,
             )
 
             _send_duck_download_complete(
-                chat_id_int
+                chat_id_int,
+                show_ui=show_ui,
             )
 
             try:
-                bot.delete_message(
-                    chat_id_int,
-                    status_msg.message_id,
-                )
+                if show_ui and status_msg is not None:
+                    try:
+                        bot.delete_message(
+                            chat_id_int,
+                            status_msg.message_id,
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
-            _maybe_send_ad(
-                chat_id_int
-            )
+            if show_ui:
+                _maybe_send_ad(
+                    chat_id_int
+                )
 
         except platforms.FileTooLargeError as e:
 
