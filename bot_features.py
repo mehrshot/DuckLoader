@@ -1915,8 +1915,12 @@ def register_features(bot):
                         total_tracks=metadata_source.get("track_count"),
                         disc_number=metadata_source.get("disc_number"),
                         total_discs=metadata_source.get("disc_count"),
-                        cover_url=thumb_url,
-                    )
+                        cover_url=(
+                            None
+                            if platform == "youtube"
+                            else thumb_url
+                        ),
+                     )
                 
             if show_ui:
                 bot.send_chat_action(

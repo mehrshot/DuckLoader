@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # Lightweight YouTube probe cache
 # ---------------------------------------------------------------------------
 
-YOUTUBE_PROBE_CACHE_TTL = 300  # 5 minutes
+YOUTUBE_PROBE_CACHE_TTL = 900  # 15 minutes
 YOUTUBE_PROBE_CACHE_MAX = 64
 
 _youtube_probe_cache = {}
@@ -1234,19 +1234,16 @@ def _extract_resilient(
     Lightweight yt-dlp extraction with platform-specific
     authentication.
 
-    YouTube:
-        Uses the configured YouTube player clients/cookies.
-
-    Instagram:
-        Uses the dedicated Instagram cookie file/browser session.
-
-    Other platforms:
-        Use the base options unchanged.
+    Logs each YouTube client attempt and its duration so
+    slow extraction/retry behavior can be distinguished
+    from actual file-transfer or FFmpeg time.
     """
 
     last_error = None
 
-    is_youtube = _is_youtube_url(target)
+    is_youtube = _is_youtube_url(
+        target
+    )
 
     is_instagram = (
         "instagram.com" in target.lower()
@@ -1257,13 +1254,22 @@ def _extract_resilient(
     else:
         attempts = [None]
 
-    for clients in attempts:
+    for attempt_number, clients in enumerate(
+        attempts,
+        start=1,
+    ):
 
-        opts = dict(ydl_opts_base)
+        started = time.monotonic()
+
+        opts = dict(
+            ydl_opts_base
+        )
 
         if is_youtube and clients:
             opts.update(
-                _youtube_extra_opts(clients)
+                _youtube_extra_opts(
+                    clients
+                )
             )
 
         elif is_instagram:
@@ -1277,9 +1283,20 @@ def _extract_resilient(
             if proxy:
                 opts["proxy"] = proxy
 
+        logger.info(
+            "yt-dlp attempt %d/%d started | youtube=%s | clients=%s | target=%s",
+            attempt_number,
+            len(attempts),
+            is_youtube,
+            clients,
+            target,
+        )
+
         try:
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with yt_dlp.YoutubeDL(
+                opts
+            ) as ydl:
 
                 info = ydl.extract_info(
                     target,
@@ -1287,20 +1304,60 @@ def _extract_resilient(
                     process=process,
                 )
 
-                return info, ydl
+            elapsed = (
+                time.monotonic()
+                - started
+            )
+
+            logger.info(
+                "yt-dlp attempt %d/%d succeeded | clients=%s | elapsed=%.2fs | download=%s",
+                attempt_number,
+                len(attempts),
+                clients,
+                elapsed,
+                download,
+            )
+
+            return info, ydl
 
         except Exception as e:
 
+            elapsed = (
+                time.monotonic()
+                - started
+            )
+
             last_error = e
 
-            if is_youtube:
-                retryable = any(
+            retryable = (
+                is_youtube
+                and any(
                     hint in str(e).lower()
                     for hint in _RETRYABLE_ERROR_HINTS
                 )
+            )
 
-                if retryable:
-                    continue
+            if retryable:
+
+                logger.warning(
+                    "yt-dlp attempt %d/%d failed; retrying | clients=%s | elapsed=%.2fs | error=%s",
+                    attempt_number,
+                    len(attempts),
+                    clients,
+                    elapsed,
+                    str(e)[:500],
+                )
+
+                continue
+
+            logger.error(
+                "yt-dlp attempt %d/%d failed permanently | clients=%s | elapsed=%.2fs | error=%s",
+                attempt_number,
+                len(attempts),
+                clients,
+                elapsed,
+                str(e)[:500],
+            )
 
             raise
 
@@ -2062,6 +2119,14 @@ def _download_with_selector(
                     else raw_path
                 )
 
+            elif (
+                _is_youtube_url(url)
+                and format_selector.startswith(
+                    "bestaudio"
+                )
+            ):
+                path = raw_path
+
             else:
                 # After yt-dlp merges video + audio,
                 # locate the final MP4 explicitly.
@@ -2360,20 +2425,74 @@ def _download_with_selector(
             if proxy:
                 opts["proxy"] = proxy
 
+        attempt_number = attempts.index(clients) + 1
+        started = time.monotonic()
+
+        logger.info(
+            "YouTube quality download attempt %d/%d started | clients=%s | selector=%s | extract_audio=%s",
+            attempt_number,
+            len(attempts),
+            clients,
+            format_selector,
+            extract_audio,
+        )
+
         try:
 
             with yt_dlp.YoutubeDL(opts) as ydl:
-                return _attempt(ydl)
+                result = _attempt(ydl)
+
+            elapsed = (
+                time.monotonic()
+                - started
+            )
+
+            logger.info(
+                "YouTube quality download attempt %d/%d succeeded | clients=%s | elapsed=%.2fs",
+                attempt_number,
+                len(attempts),
+                clients,
+                elapsed,
+            )
+
+            return result
 
         except Exception as e:
 
-            if _is_youtube_url(url):
-                if any(
+            elapsed = (
+                time.monotonic()
+                - started
+            )
+
+            retryable = (
+                _is_youtube_url(url)
+                and any(
                     hint in str(e).lower()
                     for hint in _RETRYABLE_ERROR_HINTS
-                ):
-                    last_error = e
-                    continue
+                )
+            )
+
+            if retryable:
+                logger.warning(
+                    "YouTube quality download attempt %d/%d failed AFTER/AROUND download; retrying | clients=%s | elapsed=%.2fs | error=%s",
+                    attempt_number,
+                    len(attempts),
+                    clients,
+                    elapsed,
+                    str(e)[:500],
+                )
+
+                last_error = e
+                continue
+
+            logger.error(
+                "YouTube quality download attempt %d/%d failed permanently | clients=%s | elapsed=%.2fs | error=%s",
+                attempt_number,
+                len(attempts),
+                clients,
+                elapsed,
+                str(e)[:500],
+            )
 
             raise
 
@@ -2689,18 +2808,36 @@ def probe_youtube_qualities(url: str) -> dict:
     # ---------------------------------------------------------------
     # Check cache
     # ---------------------------------------------------------------
-    now = time.monotonic()
 
-    with _youtube_probe_cache_lock:
-        cached = _youtube_probe_cache.get(cache_key)
+    def _get_cached_probe():
+        now = time.monotonic()
 
-        if cached:
+        with _youtube_probe_cache_lock:
+            cached = _youtube_probe_cache.get(
+                cache_key
+            )
+
+            if not cached:
+                return None
+
             cached_time, cached_result = cached
 
-            if now - cached_time < YOUTUBE_PROBE_CACHE_TTL:
+            if (
+                now - cached_time
+                < YOUTUBE_PROBE_CACHE_TTL
+            ):
                 return cached_result
 
-            del _youtube_probe_cache[cache_key]
+            del _youtube_probe_cache[
+                cache_key
+            ]
+
+        return None
+
+    cached_result = _get_cached_probe()
+
+    if cached_result is not None:
+        return cached_result
 
     probe_opts = {
         "quiet": True,
@@ -2711,6 +2848,13 @@ def probe_youtube_qualities(url: str) -> dict:
 
     # Only allow one metadata probe at a time on the 2-core VPS.
     with _youtube_probe_semaphore:
+
+        # Another request may have populated the cache
+        # while this request was waiting for the semaphore.
+        cached_result = _get_cached_probe()
+
+        if cached_result is not None:
+            return cached_result
 
         info, _ = _extract_resilient(
             probe_opts,
@@ -2990,8 +3134,8 @@ def download_youtube_quality(
 
     if height_or_audio == "audio":
 
-        selector = "bestaudio/best"
-        extract_audio = True
+        selector = "bestaudio[ext=m4a]/bestaudio/best"
+        extract_audio = False
 
     else:
 
@@ -3142,150 +3286,273 @@ def tag_audio_file(
     total_discs: int | None = None,
 ) -> None:
     """
-    Write professional ID3 metadata and embedded cover art
-    into an MP3 file.
+    Write metadata to MP3 or M4A files.
+
+    MP3:
+        Uses ID3 tags.
+
+    M4A:
+        Uses MP4/M4A atoms directly.
     """
 
-    if not filepath.lower().endswith(".mp3"):
+    if not filepath:
         return
 
+    lower_path = filepath.lower()
+
     try:
-        import mimetypes
-        import urllib.request
+        if lower_path.endswith(".mp3"):
+            import mimetypes
+            import urllib.request
 
-        from mutagen.id3 import (
-            ID3,
-            ID3NoHeaderError,
-            TIT2,
-            TPE1,
-            TALB,
-            TPE2,
-            TDRC,
-            TRCK,
-            TPOS,
-            APIC,
-        )
-
-        try:
-            tags = ID3(filepath)
-        except ID3NoHeaderError:
-            tags = ID3()
-
-        if title:
-            tags["TIT2"] = TIT2(
-                encoding=3,
-                text=[title],
+            from mutagen.id3 import (
+                ID3,
+                ID3NoHeaderError,
+                TIT2,
+                TPE1,
+                TALB,
+                TPE2,
+                TDRC,
+                TRCK,
+                TPOS,
+                APIC,
             )
 
-        if artist:
-            tags["TPE1"] = TPE1(
-                encoding=3,
-                text=[artist],
-            )
-
-        if album:
-            tags["TALB"] = TALB(
-                encoding=3,
-                text=[album],
-            )
-
-        if album_artist:
-            tags["TPE2"] = TPE2(
-                encoding=3,
-                text=[album_artist],
-            )
-
-        if release_date:
-            tags["TDRC"] = TDRC(
-                encoding=3,
-                text=[str(release_date)],
-            )
-
-        if track_number:
-            track_text = str(track_number)
-
-            if total_tracks:
-                track_text = f"{track_number}/{total_tracks}"
-
-            tags["TRCK"] = TRCK(
-                encoding=3,
-                text=[track_text],
-            )
-
-        if disc_number:
-            disc_text = str(disc_number)
-
-            if total_discs:
-                disc_text = f"{disc_number}/{total_discs}"
-
-            tags["TPOS"] = TPOS(
-                encoding=3,
-                text=[disc_text],
-            )
-
-        if cover_url:
             try:
-                request = urllib.request.Request(
-                    cover_url,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 "
-                            "(Windows NT 10.0; Win64; x64)"
-                        )
-                    },
+                tags = ID3(filepath)
+            except ID3NoHeaderError:
+                tags = ID3()
+
+            if title:
+                tags["TIT2"] = TIT2(
+                    encoding=3,
+                    text=[title],
                 )
 
-                with urllib.request.urlopen(
-                    request,
-                    timeout=15,
-                ) as response:
-                    cover_bytes = response.read()
-                    content_type = (
-                        response.headers.get("Content-Type")
-                        or ""
-                    ).split(";")[0].lower()
+            if artist:
+                tags["TPE1"] = TPE1(
+                    encoding=3,
+                    text=[artist],
+                )
 
-                if content_type not in {
-                    "image/jpeg",
-                    "image/png",
-                }:
-                    guessed_type, _ = mimetypes.guess_type(
-                        cover_url
+            if album:
+                tags["TALB"] = TALB(
+                    encoding=3,
+                    text=[album],
+                )
+
+            if album_artist:
+                tags["TPE2"] = TPE2(
+                    encoding=3,
+                    text=[album_artist],
+                )
+
+            if release_date:
+                tags["TDRC"] = TDRC(
+                    encoding=3,
+                    text=[str(release_date)],
+                )
+
+            if track_number:
+                track_text = str(track_number)
+
+                if total_tracks:
+                    track_text = (
+                        f"{track_number}/{total_tracks}"
                     )
 
-                    if guessed_type in {
+                tags["TRCK"] = TRCK(
+                    encoding=3,
+                    text=[track_text],
+                )
+
+            if disc_number:
+                disc_text = str(disc_number)
+
+                if total_discs:
+                    disc_text = (
+                        f"{disc_number}/{total_discs}"
+                    )
+
+                tags["TPOS"] = TPOS(
+                    encoding=3,
+                    text=[disc_text],
+                )
+
+            if cover_url:
+                try:
+                    request = urllib.request.Request(
+                        cover_url,
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 "
+                                "(Windows NT 10.0; Win64; x64)"
+                            )
+                        },
+                    )
+
+                    with urllib.request.urlopen(
+                        request,
+                        timeout=10,
+                    ) as response:
+                        cover_bytes = response.read()
+                        content_type = (
+                            response.headers.get(
+                                "Content-Type"
+                            )
+                            or ""
+                        ).split(";")[0].lower()
+
+                    if content_type not in {
                         "image/jpeg",
                         "image/png",
                     }:
-                        content_type = guessed_type
+                        guessed_type, _ = (
+                            mimetypes.guess_type(
+                                cover_url
+                            )
+                        )
+
+                        if guessed_type in {
+                            "image/jpeg",
+                            "image/png",
+                        }:
+                            content_type = guessed_type
+                        else:
+                            content_type = "image/jpeg"
+
+                    tags.delall("APIC")
+
+                    tags["APIC"] = APIC(
+                        encoding=3,
+                        mime=content_type,
+                        type=3,
+                        desc="Cover",
+                        data=cover_bytes,
+                    )
+
+                except Exception as e:
+                    logger.warning(
+                        "Could not embed MP3 cover art into %s: %s",
+                        filepath,
+                        e,
+                    )
+
+            tags.save(
+                filepath,
+                v2_version=3,
+            )
+
+            return
+
+        if lower_path.endswith(".m4a"):
+            from mutagen.mp4 import (
+                MP4,
+                MP4Cover,
+            )
+            import mimetypes
+            import urllib.request
+
+            audio = MP4(filepath)
+
+            if audio.tags is None:
+                audio.add_tags()
+
+            if title:
+                audio.tags["\xa9nam"] = [title]
+
+            if artist:
+                audio.tags["\xa9ART"] = [artist]
+
+            if album:
+                audio.tags["\xa9alb"] = [album]
+
+            if album_artist:
+                audio.tags["aART"] = [album_artist]
+
+            if release_date:
+                audio.tags["\xa9day"] = [
+                    str(release_date)
+                ]
+
+            if track_number:
+                audio.tags["trkn"] = [
+                    (
+                        int(track_number),
+                        int(total_tracks or 0),
+                    )
+                ]
+
+            if disc_number:
+                audio.tags["disk"] = [
+                    (
+                        int(disc_number),
+                        int(total_discs or 0),
+                    )
+                ]
+
+            if cover_url:
+                try:
+                    request = urllib.request.Request(
+                        cover_url,
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 "
+                                "(Windows NT 10.0; Win64; x64)"
+                            )
+                        },
+                    )
+
+                    with urllib.request.urlopen(
+                        request,
+                        timeout=10,
+                    ) as response:
+                        cover_bytes = response.read()
+                        content_type = (
+                            response.headers.get(
+                                "Content-Type"
+                            )
+                            or ""
+                        ).split(";")[0].lower()
+
+                    if (
+                        content_type == "image/png"
+                        or ".png" in cover_url.lower()
+                    ):
+                        image_format = (
+                            MP4Cover.FORMAT_PNG
+                        )
                     else:
-                        content_type = "image/jpeg"
+                        image_format = (
+                            MP4Cover.FORMAT_JPEG
+                        )
 
-                tags.delall("APIC")
+                    audio.tags["covr"] = [
+                        MP4Cover(
+                            cover_bytes,
+                            imageformat=image_format,
+                        )
+                    ]
 
-                tags["APIC"] = APIC(
-                    encoding=3,
-                    mime=content_type,
-                    type=3,
-                    desc="Cover",
-                    data=cover_bytes,
-                )
+                except Exception as e:
+                    logger.warning(
+                        "Could not embed M4A cover art into %s: %s",
+                        filepath,
+                        e,
+                    )
 
-            except Exception as e:
-                logger.warning(
-                    "Could not embed cover art into %s: %s",
-                    filepath,
-                    e,
-                )
+            audio.save()
 
-        tags.save(
+            return
+
+        logger.warning(
+            "Audio tagging skipped for unsupported file type: %s",
             filepath,
-            v2_version=3,
         )
 
     except Exception as e:
         logger.exception(
-            "MP3 tagging failed for %s: %s",
+            "Audio tagging failed for %s: %s",
             filepath,
             e,
         )

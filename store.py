@@ -60,8 +60,31 @@ def _load(path, default):
 
 
 def _save(path, data) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    temp_path = f"{path}.tmp"
+
+    with open(
+        temp_path,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+        f.flush()
+        os.fsync(
+            f.fileno()
+        )
+
+    os.replace(
+        temp_path,
+        path,
+    )
 
 
 # --- feature flags (platform locks + bot-wide toggles) ---
@@ -311,41 +334,132 @@ def get_user(
 
 # --- known users, for /broadcast ---
 
+_known_users_cache = None
+_known_users_lock = threading.Lock()
+
+
 def load_known_users() -> list:
-    return _load(USERS_FILE, [])
+    global _known_users_cache
+
+    with _known_users_lock:
+        if _known_users_cache is None:
+            _known_users_cache = _load(
+                USERS_FILE,
+                [],
+            )
+
+        return _known_users_cache
 
 
 def track_user(chat_id) -> None:
-    users = load_known_users()
-    if chat_id not in users:
-        users.append(chat_id)
-        _save(USERS_FILE, users)
+    global _known_users_cache
 
+    with _known_users_lock:
+
+        if _known_users_cache is None:
+            _known_users_cache = _load(
+                USERS_FILE,
+                [],
+            )
+
+        if chat_id in _known_users_cache:
+            return
+
+        _known_users_cache.append(
+            chat_id
+        )
+
+        _save(
+            USERS_FILE,
+            _known_users_cache,
+        )
 
 # --- bans ---
 
 def load_banned() -> list:
     return _load(BANNED_FILE, [])
 
+# --- bans ---
+
+_banned_users_cache = None
+_banned_users_lock = threading.Lock()
+
+
+def load_banned() -> list:
+    global _banned_users_cache
+
+    with _banned_users_lock:
+
+        if _banned_users_cache is None:
+            _banned_users_cache = _load(
+                BANNED_FILE,
+                [],
+            )
+
+        return _banned_users_cache
+
 
 def is_banned(user_id) -> bool:
-    return user_id in load_banned()
+    global _banned_users_cache
+
+    with _banned_users_lock:
+        if _banned_users_cache is None:
+            _banned_users_cache = _load(
+                BANNED_FILE,
+                [],
+            )
+
+        return user_id in _banned_users_cache
 
 
 def ban_user(user_id) -> None:
-    banned = load_banned()
-    if user_id not in banned:
-        banned.append(user_id)
-        _save(BANNED_FILE, banned)
+    global _banned_users_cache
+
+    with _banned_users_lock:
+
+        if _banned_users_cache is None:
+            _banned_users_cache = _load(
+                BANNED_FILE,
+                [],
+            )
+
+        if user_id in _banned_users_cache:
+            return
+
+        _banned_users_cache.append(
+            user_id
+        )
+
+        _save(
+            BANNED_FILE,
+            _banned_users_cache,
+        )
 
 
 def unban_user(user_id) -> bool:
-    banned = load_banned()
-    if user_id in banned:
-        banned.remove(user_id)
-        _save(BANNED_FILE, banned)
+    global _banned_users_cache
+
+    with _banned_users_lock:
+
+        if _banned_users_cache is None:
+            _banned_users_cache = _load(
+                BANNED_FILE,
+                [],
+            )
+
+        if user_id not in _banned_users_cache:
+            return False
+
+        _banned_users_cache.remove(
+            user_id
+        )
+
+        _save(
+            BANNED_FILE,
+            _banned_users_cache,
+        )
+
         return True
-    return False
 
 
 # --- usage stats ---
