@@ -3608,56 +3608,288 @@ def _duration_close_enough(candidate_seconds, expected_ms, tolerance_seconds=20)
         return True  # can't compare — don't block a match just because duration is missing
     return abs(candidate_seconds - (expected_ms / 1000)) <= tolerance_seconds
 
+def download_spotify_track(
+    track: dict,
+    progress_hook=None,
+) -> str:
+    """
+    Find and download the best matching audio for a Spotify track.
 
-def download_spotify_track(track: dict, progress_hook=None) -> str:
-    """Finds and downloads the best-matching audio for a Spotify track.
-    Tries SoundCloud first — it's generally more reliable since it doesn't
-    involve YouTube's bot checks at all — and falls back to YouTube search
-    only if SoundCloud doesn't have a good match. "Good match" is checked by
-    comparing the found track's length against Spotify's own duration
-    rather than trusting whatever a search returns first, since search
-    engines rarely return zero results even for a bad match."""
-    query_text = f"{track['artists']} - {track['name']}"
-    attempts = [
-        (f"scsearch1:{query_text}", False),
-        (f"ytsearch1:{query_text} audio", True),
+    Strategy:
+    1. Search SoundCloud first.
+    2. Search YouTube if SoundCloud has no suitable result.
+    3. Retrieve flat search results so search results are not accidentally
+       consumed or returned as an empty playlist.
+    4. Compare candidate duration against Spotify's official duration.
+    5. Download the exact matched result URL.
+    """
+
+    query_text = (
+        f"{track['artists']} - {track['name']}"
+    )
+
+    search_attempts = [
+        (
+            f"scsearch5:{query_text}",
+            "soundcloud",
+            False,
+        ),
+        (
+            f"ytsearch5:{query_text} audio",
+            "youtube",
+            True,
+        ),
     ]
 
-    filepath = None
     last_error = None
-    for query, needs_proxy_for_probe in attempts:
-        try:
-            probe_opts = {"quiet": True, "no_warnings": True, "socket_timeout": 30, "noplaylist": True}
-            info, _ = _extract_resilient(probe_opts, query, download=False, use_proxy=needs_proxy_for_probe)
-            entry = info["entries"][0] if info.get("_type") == "playlist" else info
-            if not entry:
-                continue
-            if not _duration_close_enough(entry.get("duration"), track.get("duration_ms")):
-                continue  # this source's top result doesn't look like the right track
 
-            _, _, filepaths = _download_with_selector(query, "bestaudio/best", True, progress_hook)
+    for (
+        query,
+        source_type,
+        needs_proxy_for_probe,
+    ) in search_attempts:
+
+        try:
+            search_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "socket_timeout": 30,
+                "extract_flat": True,
+                "playlistend": 5,
+            }
+
+            if needs_proxy_for_probe:
+                proxy = _get_random_proxy()
+
+                if proxy:
+                    search_opts["proxy"] = proxy
+
+            # -----------------------------------------------------------
+            # Dedicated search extraction.
+            #
+            # Do NOT use _extract_resilient() here. Search results are
+            # playlist-like objects, and we only need lightweight flat
+            # metadata from them.
+            # -----------------------------------------------------------
+            with yt_dlp.YoutubeDL(
+                search_opts
+            ) as search_ydl:
+
+                info = search_ydl.extract_info(
+                    query,
+                    download=False,
+                )
+
+            if not info:
+                logger.warning(
+                    "Spotify search returned no info | "
+                    "source=%s | query=%s",
+                    source_type,
+                    query,
+                )
+                continue
+
+            entries = [
+                entry
+                for entry in (
+                    info.get("entries")
+                    or []
+                )
+                if entry
+            ]
+
+            if not entries:
+                logger.warning(
+                    "Spotify search returned zero entries | "
+                    "source=%s | query=%s | info_type=%s",
+                    source_type,
+                    query,
+                    info.get("_type"),
+                )
+                continue
+
+            logger.info(
+                "Spotify search returned %d entries | "
+                "source=%s | query=%s",
+                len(entries),
+                source_type,
+                query,
+            )
+
+            # -----------------------------------------------------------
+            # Find a duration-compatible result.
+            # -----------------------------------------------------------
+            matched_entry = None
+
+            for entry in entries:
+
+                if _duration_close_enough(
+                    entry.get("duration"),
+                    track.get("duration_ms"),
+                ):
+                    matched_entry = entry
+                    break
+
+            if matched_entry is None:
+                logger.warning(
+                    "Spotify search returned entries but none matched "
+                    "Spotify duration | source=%s | candidates=%d | query=%s",
+                    source_type,
+                    len(entries),
+                    query,
+                )
+                continue
+
+            # -----------------------------------------------------------
+            # Resolve the actual webpage URL.
+            # -----------------------------------------------------------
+            source_url = (
+                matched_entry.get(
+                    "webpage_url"
+                )
+                or matched_entry.get(
+                    "original_url"
+                )
+            )
+
+            if (
+                not source_url
+                and source_type == "youtube"
+            ):
+                video_id = matched_entry.get(
+                    "id"
+                )
+
+                if video_id:
+                    source_url = (
+                        "https://www.youtube.com/watch?v="
+                        f"{video_id}"
+                    )
+
+            if not source_url:
+                source_url = matched_entry.get(
+                    "url"
+                )
+
+            if not source_url:
+                logger.warning(
+                    "Spotify matched result has no usable URL | "
+                    "source=%s | title=%s",
+                    source_type,
+                    matched_entry.get("title"),
+                )
+                continue
+
+            logger.info(
+                "Spotify match selected | "
+                "source=%s | title=%s | duration=%s | url=%s",
+                source_type,
+                matched_entry.get("title"),
+                matched_entry.get("duration"),
+                source_url,
+            )
+
+            # -----------------------------------------------------------
+            # Download the exact matched source.
+            #
+            # YouTube uses the same public extraction path that we
+            # already proved works for your other YouTube downloads.
+            # -----------------------------------------------------------
+            if (
+                source_type == "youtube"
+                and _is_youtube_url(source_url)
+            ):
+
+                (
+                    _,
+                    _,
+                    filepaths,
+                ) = _download_with_selector(
+                    source_url,
+                    "bestaudio[ext=m4a]/bestaudio/best",
+                    True,
+                    progress_hook,
+                    youtube_client_attempts=[
+                        ["default"]
+                    ],
+                    youtube_use_browser_cookies=False,
+                )
+
+            else:
+
+                (
+                    _,
+                    _,
+                    filepaths,
+                ) = _download_with_selector(
+                    source_url,
+                    "bestaudio/best",
+                    True,
+                    progress_hook,
+                )
+
+            if not filepaths:
+                raise Exception(
+                    "Matched source downloaded no file."
+                )
+
             filepath = filepaths[0]
-            break
+
+            if not filepath:
+                raise Exception(
+                    "Matched source returned an empty filepath."
+                )
+
+            # -----------------------------------------------------------
+            # Apply Spotify metadata and album artwork.
+            # -----------------------------------------------------------
+            tag_audio_file(
+                filepath,
+                title=track["name"],
+                artist=track["artists"],
+                album=track["album"],
+                cover_url=track["cover_url"],
+                album_artist=track.get(
+                    "album_artist",
+                    "",
+                ),
+                release_date=track.get(
+                    "release_date",
+                    "",
+                ),
+                track_number=track.get(
+                    "track_number"
+                ),
+                total_tracks=track.get(
+                    "total_tracks"
+                ),
+                disc_number=track.get(
+                    "disc_number"
+                ),
+            )
+
+            return filepath
+
         except Exception as e:
+
             last_error = e
+
+            logger.warning(
+                "Spotify source attempt failed | "
+                "source=%s | query=%s | error=%s",
+                source_type,
+                query,
+                str(e)[:300],
+            )
+
             continue
 
-    if not filepath:
-        raise last_error or Exception("No matching audio found on SoundCloud or YouTube.")
-
-    tag_audio_file(
-        filepath,
-        title=track["name"],
-        artist=track["artists"],
-        album=track["album"],
-        cover_url=track["cover_url"],
-        album_artist=track.get("album_artist", ""),
-        release_date=track.get("release_date", ""),
-        track_number=track.get("track_number"),
-        total_tracks=track.get("total_tracks"),
-        disc_number=track.get("disc_number"),
+    raise (
+        last_error
+        or Exception(
+            "No matching audio found on SoundCloud or YouTube."
+        )
     )
-    return filepath
 
 
 def tag_audio_file(
