@@ -5,3 +5,4 @@ curl-cffi>=0.16.0
 spotipy>=2.25.1
 python-dotenv>=1.1.1
 mutagen>=1.48.1
+playwright>=1.54,<2

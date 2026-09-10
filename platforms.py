@@ -328,6 +328,24 @@ def _client_attempts():
         return [[c.strip() for c in override.split(",")]]
     return PLAYER_CLIENT_ATTEMPTS
 
+def _browser_cookie_source(env_prefix: str):
+    browser = os.environ.get(
+        f"{env_prefix}_COOKIES_BROWSER",
+        "",
+    ).strip()
+
+    if not browser:
+        return None
+
+    profile = os.environ.get(
+        f"{env_prefix}_COOKIES_PROFILE",
+        "",
+    ).strip() or None
+
+    return (
+        browser,
+        profile,
+    )
 
 def _youtube_extra_opts(clients) -> dict:
     opts = {
@@ -338,22 +356,20 @@ def _youtube_extra_opts(clients) -> dict:
         }
     }
 
-    cookiefile = os.environ.get(
-        "YOUTUBE_COOKIE_FILE",
-        "cookies.txt",
+    browser_spec = _browser_cookie_source(
+        "YTDLP"
     )
 
-    if cookiefile and os.path.exists(cookiefile):
-        opts["cookiefile"] = cookiefile
-
-    browser = os.environ.get(
-        "YTDLP_COOKIES_BROWSER"
-    )
-
-    if browser:
-        opts["cookiesfrombrowser"] = (
-            browser,
+    if browser_spec:
+        opts["cookiesfrombrowser"] = browser_spec
+    else:
+        cookiefile = os.environ.get(
+            "YOUTUBE_COOKIE_FILE",
+            "cookies.txt",
         )
+
+        if cookiefile and os.path.exists(cookiefile):
+            opts["cookiefile"] = cookiefile
 
     return opts
 
@@ -851,29 +867,26 @@ def _instagram_extra_opts() -> dict:
     """
     Instagram-specific authentication.
 
-    Instagram stories frequently require an authenticated
-    Instagram session. Keep these cookies separate from the
-    YouTube cookies.
+    Prefer the persistent browser profile when configured.
+    Fall back to the legacy cookie file otherwise.
     """
 
     opts = {}
 
-    cookiefile = os.environ.get(
-        "INSTAGRAM_COOKIE_FILE",
-        "instagram_cookies.txt",
+    browser_spec = _browser_cookie_source(
+        "INSTAGRAM"
     )
 
-    if cookiefile and os.path.exists(cookiefile):
-        opts["cookiefile"] = cookiefile
-
-    browser = os.environ.get(
-        "INSTAGRAM_COOKIES_BROWSER"
-    )
-
-    if browser:
-        opts["cookiesfrombrowser"] = (
-            browser,
+    if browser_spec:
+        opts["cookiesfrombrowser"] = browser_spec
+    else:
+        cookiefile = os.environ.get(
+            "INSTAGRAM_COOKIE_FILE",
+            "instagram_cookies.txt",
         )
+
+        if cookiefile and os.path.exists(cookiefile):
+            opts["cookiefile"] = cookiefile
 
     return opts
 
@@ -1886,15 +1899,18 @@ def _download_with_selector(
 
     else:
 
-        cookiefile = os.environ.get(
-            "YOUTUBE_COOKIE_FILE",
-            "cookies.txt",
-        )
-
-        if cookiefile and os.path.exists(cookiefile):
-            ydl_opts["cookiefile"] = (
-                cookiefile
+        if not _is_youtube_url(url):
+            cookiefile = os.environ.get(
+                "YOUTUBE_COOKIE_FILE",
+                "cookies.txt",
             )
+
+            if cookiefile and os.path.exists(
+                cookiefile
+            ):
+                ydl_opts["cookiefile"] = (
+                    cookiefile
+                )
 
         # For YouTube video downloads, prefer:
     #
