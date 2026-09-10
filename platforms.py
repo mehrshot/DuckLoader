@@ -347,7 +347,10 @@ def _browser_cookie_source(env_prefix: str):
         profile,
     )
 
-def _youtube_extra_opts(clients) -> dict:
+def _youtube_extra_opts(
+    clients,
+    use_cookies: bool = True,
+) -> dict:
     opts = {
         "extractor_args": {
             "youtube": {
@@ -356,20 +359,27 @@ def _youtube_extra_opts(clients) -> dict:
         }
     }
 
-    browser_spec = _browser_cookie_source(
-        "YTDLP"
+    if not use_cookies:
+        return opts
+
+    cookiefile = os.environ.get(
+        "YOUTUBE_COOKIE_FILE",
+        "cookies.txt",
     )
 
-    if browser_spec:
-        opts["cookiesfrombrowser"] = browser_spec
-    else:
-        cookiefile = os.environ.get(
-            "YOUTUBE_COOKIE_FILE",
-            "cookies.txt",
+    if cookiefile and os.path.exists(cookiefile):
+        opts["cookiefile"] = (
+            cookiefile
         )
 
-        if cookiefile and os.path.exists(cookiefile):
-            opts["cookiefile"] = cookiefile
+    browser = os.environ.get(
+        "YTDLP_COOKIES_BROWSER"
+    )
+
+    if browser:
+        opts["cookiesfrombrowser"] = (
+            browser,
+        )
 
     return opts
 
@@ -1850,7 +1860,7 @@ def _download_with_selector(
     progress_hook=None,
     use_proxy: bool = False,
     youtube_client_attempts=None,
-    youtube_use_browser_cookies=True,
+    youtube_use_browser_cookies: bool = True,
 ):
     """
     Download media with yt-dlp.
@@ -1894,25 +1904,29 @@ def _download_with_selector(
         instagram_opts = (
             _instagram_extra_opts()
         )
-
         ydl_opts.update(
             instagram_opts
         )
 
+    elif _is_youtube_url(url):
+        pass
+
     else:
 
-        if not _is_youtube_url(url):
-            cookiefile = os.environ.get(
-                "YOUTUBE_COOKIE_FILE",
-                "cookies.txt",
-            )
+        cookiefile = os.environ.get(
+            "YOUTUBE_COOKIE_FILE",
+            "cookies.txt",
+        )
 
-            if cookiefile and os.path.exists(
+        if (
+            cookiefile
+            and os.path.exists(
                 cookiefile
-            ):
-                ydl_opts["cookiefile"] = (
-                    cookiefile
-                )
+            )
+        ):
+            ydl_opts["cookiefile"] = (
+                cookiefile
+            )
 
         # For YouTube video downloads, prefer:
     #
@@ -3044,23 +3058,98 @@ def probe_youtube_qualities(url: str) -> dict:
         "noplaylist": True,
     }
 
-    # Only allow one metadata probe at a time on the 2-core VPS.
-    with _youtube_probe_semaphore:
+    info = None
 
-        # Another request may have populated the cache
-        # while this request was waiting for the semaphore.
-        cached_result = _get_cached_probe()
-
-        if cached_result is not None:
-            return cached_result
-
-        info, _ = _extract_resilient(
-            probe_opts,
-            url,
-            download=False,
-            process=False,
+    # ---------------------------------------------------------------
+    # First try public YouTube extraction.
+    #
+    # Ordinary public videos can expose a much richer format list
+    # without the authenticated browser session. This is especially
+    # important when YouTube gives the logged-in session SABR-only
+    # formats.
+    # ---------------------------------------------------------------
+    try:
+        public_probe_opts = dict(
+            probe_opts
         )
 
+        public_probe_opts.update(
+            _youtube_extra_opts(
+                ["default"],
+                use_cookies=False,
+            )
+        )
+
+        with _youtube_probe_semaphore:
+            with yt_dlp.YoutubeDL(
+                public_probe_opts
+            ) as public_ydl:
+                public_info = (
+                    public_ydl.extract_info(
+                        url,
+                        download=False,
+                        process=False,
+                    )
+                )
+
+        public_formats = (
+            public_info.get("formats")
+            if public_info
+            else []
+        ) or []
+
+        public_video_formats = [
+            f
+            for f in public_formats
+            if (
+                f.get("vcodec")
+                not in (None, "none")
+                and f.get("height")
+            )
+        ]
+
+        public_max_height = max(
+            (
+                f.get("height") or 0
+                for f in public_video_formats
+            ),
+            default=0,
+        )
+
+        if (
+            public_max_height
+            <= MIN_ACCEPTABLE_MAX_HEIGHT
+        ):
+            raise Exception(
+                "Public YouTube probe returned "
+                f"only {public_max_height}p."
+            )
+
+        info = public_info
+
+        logger.info(
+            "YouTube public probe succeeded | "
+            "video_id=%s | max_height=%sp",
+            public_info.get("id"),
+            public_max_height,
+        )
+
+    except Exception as public_error:
+        logger.info(
+            "YouTube public probe was not rich enough; "
+            "falling back to authenticated extraction | "
+            "url=%s | error=%s",
+            url,
+            str(public_error)[:300],
+        )
+
+        with _youtube_probe_semaphore:
+            info, _ = _extract_resilient(
+                probe_opts,
+                url,
+                download=False,
+                process=False,
+            )
     if not info:
         raise Exception("Media info not found.")
 
@@ -3420,18 +3509,41 @@ def download_youtube_quality(
         youtube_client_attempts = None
         youtube_use_browser_cookies = True
 
-    return _download_with_selector(
-        url,
-        selector,
-        extract_audio,
-        progress_hook,
-        youtube_client_attempts=(
-            youtube_client_attempts
-        ),
-        youtube_use_browser_cookies=(
-            youtube_use_browser_cookies
-        ),
-    )
+    # ---------------------------------------------------------------
+    # Public YouTube extraction first.
+    # This is the path that successfully exposed 1080p+ for videos
+    # where the authenticated session was restricted to 360p.
+    # ---------------------------------------------------------------
+    try:
+
+        return _download_with_selector(
+            url,
+            selector,
+            extract_audio,
+            progress_hook,
+            youtube_client_attempts=[
+                ["default"]
+            ],
+            youtube_use_browser_cookies=False,
+        )
+
+    except Exception as public_error:
+
+        logger.warning(
+            "Public YouTube quality download failed; "
+            "retrying with authenticated cookies | "
+            "video_id=%s | quality=%s | error=%s",
+            video_id,
+            height_or_audio,
+            str(public_error)[:300],
+        )
+
+        return _download_with_selector(
+            url,
+            selector,
+            extract_audio,
+            progress_hook,
+        )
 
 def get_spotify_client():
     import spotipy
