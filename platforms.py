@@ -1849,6 +1849,8 @@ def _download_with_selector(
     extract_audio: bool,
     progress_hook=None,
     use_proxy: bool = False,
+    youtube_client_attempts=None,
+    youtube_use_browser_cookies=True,
 ):
     """
     Download media with yt-dlp.
@@ -2416,7 +2418,11 @@ def _download_with_selector(
     # ---------------------------------------------------------------
 
     if _is_youtube_url(url):
-        attempts = _client_attempts()
+        attempts = (
+            youtube_client_attempts
+            if youtube_client_attempts is not None
+            else _client_attempts()
+        )
     else:
         attempts = [None]
 
@@ -2425,9 +2431,38 @@ def _download_with_selector(
         opts = dict(ydl_opts)
 
         if _is_youtube_url(url) and clients:
-            opts.update(
-                _youtube_extra_opts(clients)
-            )
+            if youtube_use_browser_cookies:
+                opts.update(
+                    _youtube_extra_opts(
+                        clients
+                    )
+                )
+            else:
+                extractor_args = dict(
+                    opts.get(
+                        "extractor_args"
+                    )
+                    or {}
+                )
+
+                youtube_args = dict(
+                    extractor_args.get(
+                        "youtube"
+                    )
+                    or {}
+                )
+
+                youtube_args[
+                    "player_client"
+                ] = clients
+
+                extractor_args[
+                    "youtube"
+                ] = youtube_args
+
+                opts[
+                    "extractor_args"
+                ] = extractor_args
 
         elif "instagram.com" in url.lower():
             opts.update(
@@ -2722,32 +2757,139 @@ def _bucket_youtube_formats(info: dict) -> list:
         if not fmt:
             return 0
 
-        exact = fmt.get("filesize")
+        exact = (
+            fmt.get("filesize")
+            or fmt.get("filesize_approx")
+        )
+
         if exact:
             return int(exact)
 
-        approximate = fmt.get("filesize_approx")
-        if approximate:
-            return int(approximate)
-
         if duration:
-            # Video-only streams: use VIDEO bitrate.
-            vbr = fmt.get("vbr")
-            if vbr:
-                return int(float(vbr) * 1000 / 8 * duration)
+            bitrate = (
+                fmt.get("vbr")
+                or fmt.get("abr")
+                or fmt.get("tbr")
+            )
 
-            # Audio-only streams: use AUDIO bitrate.
-            abr = fmt.get("abr")
-            if abr:
-                return int(float(abr) * 1000 / 8 * duration)
-
-            # Final fallback.
-            tbr = fmt.get("tbr")
-            if tbr:
-                return int(float(tbr) * 1000 / 8 * duration)
+            if bitrate:
+                return int(
+                    float(bitrate)
+                    * 1000
+                    / 8
+                    * duration
+                )
 
         return 0
 
+    def _audio_format_has_usable_size(
+        fmt: dict,
+    ) -> bool:
+        if not fmt:
+            return False
+
+        if (
+            fmt.get("filesize")
+            or fmt.get("filesize_approx")
+        ):
+            return True
+
+        if duration and (
+            fmt.get("abr")
+            or fmt.get("tbr")
+        ):
+            return True
+
+        return False
+
+    # ---------------------------------------------------------------
+    # Recover standalone audio when the primary video client only
+    # exposes HLS/SABR audio entries without usable size metadata.
+    # ---------------------------------------------------------------
+    if not any(
+        _audio_format_has_usable_size(fmt)
+        for fmt in audio_formats
+    ):
+        try:
+            audio_probe_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "socket_timeout": 20,
+                "noplaylist": True,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": [
+                            "default"
+                        ]
+                    }
+                },
+            }
+
+            with yt_dlp.YoutubeDL(
+                audio_probe_opts
+            ) as audio_ydl:
+                audio_info = audio_ydl.extract_info(
+                    url,
+                    download=False,
+                    process=False,
+                )
+
+            fallback_formats = (
+                audio_info.get("formats")
+                or []
+            )
+
+            usable_fallback = [
+                f
+                for f in fallback_formats
+                if (
+                    f.get("vcodec")
+                    in (None, "none")
+                    and f.get("acodec")
+                    not in (None, "none")
+                    and (
+                        f.get("filesize")
+                        or f.get("filesize_approx")
+                        or (
+                            duration
+                            and (
+                                f.get("abr")
+                                or f.get("tbr")
+                            )
+                        )
+                    )
+                )
+            ]
+
+            if usable_fallback:
+                audio_formats = (
+                    usable_fallback
+                )
+
+                logger.info(
+                    "YouTube audio fallback succeeded | "
+                    "url=%s | formats=%d",
+                    url,
+                    len(audio_formats),
+                )
+            else:
+                logger.warning(
+                    "YouTube audio fallback returned "
+                    "no usable standalone audio | url=%s",
+                    url,
+                )
+
+        except Exception as e:
+            logger.warning(
+                "YouTube audio fallback probe failed | "
+                "url=%s | error=%s",
+                url,
+                str(e)[:300],
+            )
+
+    # ---------------------------------------------------------------
+    # Select best audio
+    # ---------------------------------------------------------------
     # Prefer the M4A audio stream because that is what the downloader uses.
     preferred_audio = [
         f for f in audio_formats
@@ -2937,11 +3079,68 @@ def probe_youtube_qualities(url: str) -> dict:
     ]
 
     audio_formats = [
-        f
-        for f in formats
+        f for f in formats
         if f.get("vcodec") in (None, "none")
         and f.get("acodec") not in (None, "none")
     ]
+
+    # The video probe intentionally uses default + web_safari because
+    # that combination gives us the high-resolution video formats.
+    # Depending on the account/client response, it may expose only
+    # combined HLS video+audio formats and no standalone audio stream.
+    #
+    # In that case, do one small secondary probe using yt-dlp's normal
+    # default client WITHOUT browser cookies. Public YouTube videos
+    # commonly expose the standalone M4A audio formats through this path.
+    if not audio_formats:
+        try:
+            audio_probe_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "socket_timeout": 30,
+                "noplaylist": True,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["default"],
+                    }
+                },
+            }
+
+            with yt_dlp.YoutubeDL(
+                audio_probe_opts
+            ) as audio_ydl:
+                audio_info = audio_ydl.extract_info(
+                    url,
+                    download=False,
+                    process=False,
+                )
+
+            audio_probe_formats = (
+                audio_info.get("formats")
+                or []
+            )
+
+            audio_formats = [
+                f
+                for f in audio_probe_formats
+                if f.get("vcodec") in (None, "none")
+                and f.get("acodec") not in (None, "none")
+            ]
+
+            logger.info(
+                "YouTube audio fallback probe | "
+                "url=%s | audio_formats=%d",
+                url,
+                len(audio_formats),
+            )
+
+        except Exception as e:
+            logger.warning(
+                "YouTube audio fallback probe failed | "
+                "url=%s | error=%s",
+                url,
+                str(e)[:300],
+            )
 
     def codec_rank(fmt: dict) -> int:
         """
@@ -3190,12 +3389,24 @@ def download_youtube_quality(
 
     if height_or_audio == "audio":
 
-        selector = "bestaudio[ext=m4a]/bestaudio/best"
-        extract_audio = False
+        selector = (
+            "bestaudio[ext=m4a]"
+            "/bestaudio"
+            "/best"
+        )
+
+        extract_audio = True
+
+        youtube_client_attempts = [
+            ["default"]
+        ]
+
+        youtube_use_browser_cookies = False
 
     else:
-
-        height = int(height_or_audio)
+        height = int(
+            height_or_audio
+        )
 
         selector = (
             f"bestvideo[height<={height}]"
@@ -3206,11 +3417,20 @@ def download_youtube_quality(
 
         extract_audio = False
 
+        youtube_client_attempts = None
+        youtube_use_browser_cookies = True
+
     return _download_with_selector(
         url,
         selector,
         extract_audio,
         progress_hook,
+        youtube_client_attempts=(
+            youtube_client_attempts
+        ),
+        youtube_use_browser_cookies=(
+            youtube_use_browser_cookies
+        ),
     )
 
 def get_spotify_client():
