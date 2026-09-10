@@ -873,32 +873,51 @@ def _is_instagram_story_url(
         )
     )
 
+
 def _instagram_extra_opts() -> dict:
     """
-    Instagram-specific authentication.
+    Return authentication options for all Instagram downloads.
 
-    Prefer the persistent browser profile when configured.
-    Fall back to the legacy cookie file otherwise.
+    DuckLoader deliberately uses the exported Netscape cookie file instead
+    of --cookies-from-browser. The cookie file has already been verified
+    against an Instagram Story on the VPS.
+
+    Using one explicit absolute path also guarantees that Stories, Reels,
+    posts, carousels, and other Instagram URLs use the same authenticated
+    session.
     """
 
-    opts = {}
+    cookiefile = os.environ.get(
+        "INSTAGRAM_COOKIE_FILE",
+        "/home/mahshot/DuckLoaderBot/instagram_cookies.txt",
+    ).strip()
 
-    browser_spec = _browser_cookie_source(
-        "INSTAGRAM"
+    if not cookiefile:
+        logger.warning(
+            "Instagram authentication: INSTAGRAM_COOKIE_FILE is empty."
+        )
+        return {}
+
+    cookiefile = os.path.abspath(
+        os.path.expanduser(cookiefile)
     )
 
-    if browser_spec:
-        opts["cookiesfrombrowser"] = browser_spec
-    else:
-        cookiefile = os.environ.get(
-            "INSTAGRAM_COOKIE_FILE",
-            "instagram_cookies.txt",
+    if not os.path.isfile(cookiefile):
+        logger.error(
+            "Instagram authentication: cookie file not found | path=%s",
+            cookiefile,
         )
+        return {}
 
-        if cookiefile and os.path.exists(cookiefile):
-            opts["cookiefile"] = cookiefile
+    logger.info(
+        "Instagram authentication: using cookie file | path=%s",
+        cookiefile,
+    )
 
-    return opts
+    return {
+        "cookiefile": cookiefile,
+    }
+
 
 def _get_instagram_view_count(*objects):
     """
@@ -1309,7 +1328,10 @@ def _extract_resilient(
                 _instagram_extra_opts()
             )
 
-        if use_proxy:
+        if (
+            use_proxy
+            and not is_instagram
+        ):
             proxy = _get_random_proxy()
 
             if proxy:
