@@ -2071,58 +2071,90 @@ def register_features(bot):
         t,
         show_ui=True,
     ):
-        """Shared progress hook.
+        """
+        Shared yt-dlp progress hook.
 
-        Progress messages are shown only in private chats.
+        The previous implementation edited the Telegram status message
+        every ~2 seconds from inside yt-dlp's download callback. Telegram
+        API requests are synchronous, so a slow API response could stall the
+        actual media download.
+
+        This version:
+          - updates at most once every 8 seconds
+          - ignores repeated progress values
+          - never lets a Telegram edit failure affect the download
+          - keeps the progress UI for private chats
         """
 
-        state = {"last_edit": 0}
+        state = {
+            "last_edit": 0.0,
+            "last_percent": None,
+        }
 
         def progress_hook(d):
             if not show_ui or status_msg is None:
                 return
 
-            if d.get('status') == 'downloading':
-                now = time.time()
+            if d.get("status") != "downloading":
+                return
 
-                if now - state["last_edit"] > 2.0:
-                    percent = (
-                        d.get('_percent_str') or 'N/A'
-                    ).strip()
+            now = time.monotonic()
 
-                    eta = (
-                        d.get('_eta_str') or 'N/A'
-                    ).strip()
+            percent = (
+                d.get("_percent_str")
+                or "N/A"
+            ).strip()
 
-                    size = (
-                        d.get('_total_bytes_str')
-                        or d.get(
-                            '_estimated_total_bytes_str',
-                            'N/A',
-                        )
-                    )
+            if percent == state["last_percent"]:
+                if (
+                    now - state["last_edit"]
+                    < 8.0
+                ):
+                    return
 
-                    if isinstance(size, str):
-                        size = size.strip()
+            if (
+                now - state["last_edit"]
+                < 8.0
+            ):
+                return
 
-                    log_text = t['downloading'].format(
-                        bar=_render_bar(percent),
-                        percent=percent,
-                        size=size,
-                        eta=eta,
-                    )
-                    if show_ui and status_msg is not None:
-                        try:
-                            bot.edit_message_text(
-                                log_text,
-                                chat_id_int,
-                                status_msg.message_id,
-                                parse_mode="Markdown",
-                            )
-                        except Exception:
-                            pass
+            eta = (
+                d.get("_eta_str")
+                or "N/A"
+            ).strip()
 
-                    state["last_edit"] = now
+            size = (
+                d.get("_total_bytes_str")
+                or d.get(
+                    "_estimated_total_bytes_str",
+                    "N/A",
+                )
+            )
+
+            if isinstance(size, str):
+                size = size.strip()
+
+            log_text = t["downloading"].format(
+                bar=_render_bar(percent),
+                percent=percent,
+                size=size,
+                eta=eta,
+            )
+
+            try:
+                bot.edit_message_text(
+                    log_text,
+                    chat_id_int,
+                    status_msg.message_id,
+                    parse_mode="Markdown",
+                )
+
+                state["last_edit"] = now
+                state["last_percent"] = percent
+
+            except Exception:
+                state["last_edit"] = now
+                state["last_percent"] = percent
 
         return progress_hook
 

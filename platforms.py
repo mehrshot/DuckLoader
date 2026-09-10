@@ -103,7 +103,10 @@ INSTAGRAM_QUALITY_FORMATS = {
 
 YOUTUBE_QUALITY_FORMATS = {
     "best": "bestvideo+bestaudio/best/all",
-    "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best/all",
+    "1080p": "bestvideo[height<=1080][vcodec^=avc1]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/all",
+    "720p": "bestvideo[height<=720][vcodec^=avc1]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]/best/all",
+    "480p": "bestvideo[height<=480][vcodec^=avc1]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]/best/all",
+    "360p": "bestvideo[height<=360][vcodec^=avc1]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]/best/all",
     "audio": "bestaudio/best",
 }
 
@@ -362,26 +365,73 @@ def _youtube_extra_opts(
     if not use_cookies:
         return opts
 
+    # ---------------------------------------------------------------
+    # Prefer an explicit YouTube cookie file.
+    # This is deterministic under systemd and does not depend on a
+    # browser installation or profile location.
+    # ---------------------------------------------------------------
     cookiefile = os.environ.get(
         "YOUTUBE_COOKIE_FILE",
         "cookies.txt",
-    )
+    ).strip()
 
-    if cookiefile and os.path.exists(cookiefile):
-        opts["cookiefile"] = (
-            cookiefile
+    if cookiefile:
+        cookiefile = os.path.abspath(
+            os.path.expanduser(cookiefile)
         )
 
+        if os.path.isfile(cookiefile):
+            opts["cookiefile"] = cookiefile
+
+            logger.info(
+                "YouTube authentication: using cookie file | path=%s",
+                cookiefile,
+            )
+
+            return opts
+
+    # ---------------------------------------------------------------
+    # Fall back to an explicitly configured browser source.
+    # IMPORTANT: do not invent/default to Chrome. If the environment
+    # does not specify a browser, return without cookies instead of
+    # causing yt-dlp to search ~/.config/google-chrome.
+    # ---------------------------------------------------------------
     browser = os.environ.get(
-        "YTDLP_COOKIES_BROWSER"
-    )
+        "YTDLP_COOKIES_BROWSER",
+        "",
+    ).strip()
 
     if browser:
-        opts["cookiesfrombrowser"] = (
-            browser,
-        )
+        profile = os.environ.get(
+            "YTDLP_COOKIES_PROFILE",
+            "",
+        ).strip()
+
+        if profile:
+            opts["cookiesfrombrowser"] = (
+                browser,
+                profile,
+            )
+
+            logger.info(
+                "YouTube authentication: using browser session | "
+                "browser=%s | profile=%s",
+                browser,
+                profile,
+            )
+        else:
+            opts["cookiesfrombrowser"] = (
+                browser,
+            )
+
+            logger.info(
+                "YouTube authentication: using browser session | "
+                "browser=%s",
+                browser,
+            )
 
     return opts
+
 
 def _is_tiktok_photo_url(
     url: str,
@@ -3492,14 +3542,18 @@ def download_youtube_quality(
     """
     Download one specific YouTube resolution.
 
-    H.264/AAC is preferred through yt-dlp format sorting,
-    but other codecs remain available when necessary.
+    Strategy:
+    1. Try the public YouTube path first.
+    2. If it fails, retry with explicitly configured authenticated
+       YouTube cookies.
+    3. Never assume that a default Chrome profile exists.
     """
 
-    url = f"https://www.youtube.com/watch?v={video_id}"
+    url = (
+        f"https://www.youtube.com/watch?v={video_id}"
+    )
 
     if height_or_audio == "audio":
-
         selector = (
             "bestaudio[ext=m4a]"
             "/bestaudio"
@@ -3508,11 +3562,14 @@ def download_youtube_quality(
 
         extract_audio = True
 
-        youtube_client_attempts = [
+        # Audio currently uses the public path.
+        public_clients = [
             ["default"]
         ]
 
-        youtube_use_browser_cookies = False
+        authenticated_clients = [
+            ["default"]
+        ]
 
     else:
         height = int(
@@ -3520,6 +3577,8 @@ def download_youtube_quality(
         )
 
         selector = (
+            f"bestvideo[height<={height}][vcodec^=avc1]"
+            f"+bestaudio/"
             f"bestvideo[height<={height}]"
             f"+bestaudio/"
             f"best[height<={height}]"
@@ -3528,44 +3587,71 @@ def download_youtube_quality(
 
         extract_audio = False
 
-        youtube_client_attempts = None
-        youtube_use_browser_cookies = True
+        public_clients = [
+            ["default"]
+        ]
+
+        authenticated_clients = [
+            ["default", "web_safari"]
+        ]
 
     # ---------------------------------------------------------------
-    # Public YouTube extraction first.
-    # This is the path that successfully exposed 1080p+ for videos
-    # where the authenticated session was restricted to 360p.
+    # 1. Public YouTube attempt
     # ---------------------------------------------------------------
     try:
-
         return _download_with_selector(
             url,
             selector,
             extract_audio,
             progress_hook,
-            youtube_client_attempts=[
-                ["default"]
-            ],
+            youtube_client_attempts=public_clients,
             youtube_use_browser_cookies=False,
         )
 
     except Exception as public_error:
-
         logger.warning(
             "Public YouTube quality download failed; "
-            "retrying with authenticated cookies | "
+            "checking authenticated fallback | "
             "video_id=%s | quality=%s | error=%s",
             video_id,
             height_or_audio,
             str(public_error)[:300],
         )
 
-        return _download_with_selector(
-            url,
-            selector,
-            extract_audio,
-            progress_hook,
+    # ---------------------------------------------------------------
+    # 2. Authenticated fallback
+    # ---------------------------------------------------------------
+    youtube_cookie_opts = _youtube_extra_opts(
+        authenticated_clients[0],
+        use_cookies=True,
+    )
+
+    has_cookie_source = (
+        "cookiefile" in youtube_cookie_opts
+        or "cookiesfrombrowser" in youtube_cookie_opts
+    )
+
+    if not has_cookie_source:
+        logger.error(
+            "YouTube authenticated fallback unavailable: "
+            "no valid YOUTUBE_COOKIE_FILE or "
+            "YTDLP_COOKIES_BROWSER is configured."
         )
+
+        raise Exception(
+            "Public YouTube download failed and no authenticated "
+            "YouTube cookie source is configured."
+        )
+
+    return _download_with_selector(
+        url,
+        selector,
+        extract_audio,
+        progress_hook,
+        youtube_client_attempts=authenticated_clients,
+        youtube_use_browser_cookies=True,
+    )
+
 
 def get_spotify_client():
     import spotipy
