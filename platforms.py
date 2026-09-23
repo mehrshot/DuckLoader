@@ -928,23 +928,58 @@ def _instagram_extra_opts() -> dict:
     """
     Return authentication options for all Instagram downloads.
 
-    DuckLoader deliberately uses the exported Netscape cookie file instead
-    of --cookies-from-browser. The cookie file has already been verified
-    against an Instagram Story on the VPS.
+    Prefer the dedicated Chrome profile configured through
+    INSTAGRAM_COOKIES_BROWSER / INSTAGRAM_COOKIES_PROFILE.
 
-    Using one explicit absolute path also guarantees that Stories, Reels,
-    posts, carousels, and other Instagram URLs use the same authenticated
-    session.
+    Fall back to INSTAGRAM_COOKIE_FILE only when browser-based
+    authentication is not configured.
     """
+
+    # ---------------------------------------------------------------
+    # Preferred: authenticated Chrome profile
+    # ---------------------------------------------------------------
+
+    browser = os.environ.get(
+        "INSTAGRAM_COOKIES_BROWSER",
+        "",
+    ).strip()
+
+    profile = os.environ.get(
+        "INSTAGRAM_COOKIES_PROFILE",
+        "",
+    ).strip()
+
+    if browser:
+        browser_spec = (browser,)
+
+        if profile:
+            browser_spec = (
+                browser,
+                profile,
+            )
+
+        logger.info(
+            "Instagram authentication: using browser cookies | browser=%s | profile=%s",
+            browser,
+            profile or "default",
+        )
+
+        return {
+            "cookiesfrombrowser": browser_spec,
+        }
+
+    # ---------------------------------------------------------------
+    # Fallback: static cookie file
+    # ---------------------------------------------------------------
 
     cookiefile = os.environ.get(
         "INSTAGRAM_COOKIE_FILE",
-        "/home/mahshot/DuckLoaderBot/instagram_cookies.txt",
+        "",
     ).strip()
 
     if not cookiefile:
         logger.warning(
-            "Instagram authentication: INSTAGRAM_COOKIE_FILE is empty."
+            "Instagram authentication: no browser or cookie-file authentication configured."
         )
         return {}
 
