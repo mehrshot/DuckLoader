@@ -256,9 +256,23 @@ ROTATING_PROXIES=socks5://127.0.0.1:9050,socks5://127.0.0.1:9051
 | `INSTAGRAM_COOKIES_PROFILE` | No | Browser profile (name or path) for `INSTAGRAM_COOKIES_BROWSER` |
 | `TIKTOK_COOKIE_FILE` / `TIKTOK_COOKIES_BROWSER` | No | Logged-in TikTok cookies (age-restricted videos) |
 | `YTDLP_PLAYER_CLIENT` | No | Override YouTube player clients |
-| `BOT_WORKER_THREADS` | No | Telegram handler threads (default 24) |
+| `BOT_WORKER_THREADS` | No | Telegram handler threads (default 96) |
+| `MAX_CONCURRENT_DOWNLOADS` | No | Downloads running at once, bot-wide (default 4) |
+| `INSTAGRAM_MAX_CONCURRENT` | No | Instagram downloads running at once (default 3) |
+| `MAX_QUEUE_WAITING` | No | Requests allowed to wait in the queue (default 40) |
+| `MEDIA_CACHE_TTL_HOURS` | No | How long an uploaded file is re-sent by file_id for the same link (default 72) |
 | `SPOTIFY_MAX_TRACKS` | No | Max tracks fetched from one album/playlist link (default 50) |
 | `MAX_PLAYLIST_ENTRIES` | No | Max items from one link, e.g. a highlight or SoundCloud set (default 30) |
+
+### Handling traffic spikes
+
+- A link that was already downloaded (same media, same quality) is re-sent instantly by its Telegram `file_id` for `MEDIA_CACHE_TTL_HOURS`. When many people send the same link at the same moment, only the first one downloads it; the rest wait and get the uploaded copy.
+- Sending the same link again while it is still downloading is ignored with a short notice.
+- Queued users see their position in the queue.
+
+### Campaign links
+
+Give every ad campaign its own start link, e.g. `https://t.me/DuckDownloader_Bot?start=insta_ali`. New users who arrive through it are counted per source, and `/stats` (or 📊 in the admin panel) shows the last 7 days of new users, active users and downloads — the numbers advertisers ask for.
 
 `INSTAGRAM_COOKIE_FILE` defaults to `instagram_cookies.txt` in the bot folder when it exists. If both a browser and a cookie file are configured, both are tried in turn. Cookie files are only ever read — the bot works on a temporary copy, so an Instagram hiccup can no longer wipe the saved session out of the file.
 

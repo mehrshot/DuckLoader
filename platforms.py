@@ -2066,6 +2066,20 @@ def probe_youtube_qualities(url: str) -> dict:
     return result
 
 
+def youtube_option_size(video_id: str, choice: str) -> int | None:
+    """The size the quality picker showed for this button, if the probe
+    result is still cached (used to estimate how long the job will take)."""
+    with _youtube_probe_cache_lock:
+        results = [result for _, result in _youtube_probe_cache.values()]
+    for result in results:
+        if result.get("id") != video_id:
+            continue
+        for option in result.get("options") or []:
+            if (choice == "audio" and option.get("kind") == "audio") or str(option.get("height")) == str(choice):
+                return option.get("size_bytes") or None
+    return None
+
+
 def _youtube_download(url: str, selector: str, extract_audio: bool, progress_hook=None):
     """Public clients first (richest formats, no account risk), then the
     configured cookies. A "confirm you're not a bot" check skips straight to
@@ -2101,15 +2115,29 @@ _SPOTIFY_URL_RE = re.compile(
 )
 
 
-def get_spotify_client():
-    import spotipy
-    from spotipy.oauth2 import SpotifyClientCredentials
+_spotify_client = None
+_spotify_client_lock = threading.Lock()
 
-    auth = SpotifyClientCredentials(
-        client_id=os.environ["SPOTIFY_CLIENT_ID"],
-        client_secret=os.environ["SPOTIFY_CLIENT_SECRET"],
-    )
-    return spotipy.Spotify(client_credentials_manager=auth, requests_timeout=20, retries=3)
+
+def get_spotify_client():
+    """One shared client, so its access token is fetched once and refreshed
+    only when it expires (instead of a token request per link)."""
+    global _spotify_client
+    with _spotify_client_lock:
+        if _spotify_client is None:
+            import spotipy
+            from spotipy.cache_handler import MemoryCacheHandler
+            from spotipy.oauth2 import SpotifyClientCredentials
+
+            # Keep the access token in memory: the default cache handler
+            # writes it to a ".cache" file in the working directory.
+            auth = SpotifyClientCredentials(
+                client_id=os.environ["SPOTIFY_CLIENT_ID"],
+                client_secret=os.environ["SPOTIFY_CLIENT_SECRET"],
+                cache_handler=MemoryCacheHandler(),
+            )
+            _spotify_client = spotipy.Spotify(client_credentials_manager=auth, requests_timeout=20, retries=3)
+        return _spotify_client
 
 
 def _parse_spotify_url(url: str):
@@ -2592,6 +2620,51 @@ def tag_audio_file(
         logger.info("Audio tagging skipped for unsupported file type: %s", filepath)
     except Exception as e:
         logger.exception("Audio tagging failed for %s: %s", filepath, e)
+
+
+# ---------------------------------------------------------------------------
+# Cache keys for re-sending already uploaded files
+# ---------------------------------------------------------------------------
+
+def media_cache_key(url: str, quality: str) -> str | None:
+    """A stable key for "this exact media at this quality", so a link many
+    people send (e.g. the Reel an influencer just posted) is downloaded once
+    and then re-sent by Telegram file_id. Never makes network requests;
+    returns None for anything whose content can change (a user's *current*
+    stories) or that can't be keyed offline (share/short links)."""
+    platform = _platform_of_url(url)
+    parsed = urllib.parse.urlparse(url)
+    try:
+        if platform == "instagram":
+            if parsed.path.lower().startswith("/share/"):
+                return None
+            canonical, wanted_pk = normalize_instagram_url(url)
+            if "/stories/" in canonical and not wanted_pk and "/highlights/" not in canonical:
+                return None
+            if wanted_pk:
+                canonical += f"#{wanted_pk}"
+        elif platform == "youtube":
+            query = urllib.parse.parse_qs(parsed.query)
+            video_id = (query.get("v") or [""])[0]
+            if not video_id:
+                match = re.search(r"(?:youtu\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})", url)
+                video_id = match.group(1) if match else ""
+            if not video_id:
+                return None
+            canonical = f"youtube:{video_id}"
+        elif platform == "soundcloud":
+            if _host(url) in _SOUNDCLOUD_SHORT_HOSTS:
+                return None
+            canonical = _clean_soundcloud_url(url)
+        elif platform == "tiktok":
+            if not re.search(r"/(?:video|photo)/\d+", parsed.path):
+                return None  # vm./vt. short links: resolved later
+            canonical = f"tiktok:{re.search(r'/(?:video|photo)/(\d+)', parsed.path).group(1)}"
+        else:
+            return None
+    except UnsupportedLinkError:
+        return None
+    return f"{canonical}|{quality}"
 
 
 # ---------------------------------------------------------------------------

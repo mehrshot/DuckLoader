@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 import random
@@ -11,6 +12,7 @@ import requests
 from telebot.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
     InputMediaAudio,
@@ -62,15 +64,81 @@ audio_source_cache = _BoundedCache()  # post_id -> original url, for the "get au
 last_link_messages = _BoundedCache()
 caption_cache = _BoundedCache()
 
+# cache_key -> what was sent last time (Telegram file_ids + caption data).
+# When an influencer posts a Reel, hundreds of people send the same link;
+# after the first download everyone else gets the already-uploaded file
+# instantly, with zero extra requests to Instagram.
+MEDIA_CACHE_TTL = int(os.environ.get("MEDIA_CACHE_TTL_HOURS", "72")) * 3600
+media_cache = _BoundedCache(max_items=3000)
+
+# (chat_id, link) pairs currently being downloaded, so a double-tap or an
+# impatient resend doesn't start a second identical download.
+_in_flight = set()
+_in_flight_lock = threading.Lock()
+
+
+def _claim_in_flight(key) -> bool:
+    with _in_flight_lock:
+        if key in _in_flight:
+            return False
+        _in_flight.add(key)
+        return True
+
+
+def _release_in_flight(key) -> None:
+    with _in_flight_lock:
+        _in_flight.discard(key)
+
+
+# One lock per cache_key: when many people send the same fresh link at the
+# same moment, the first one downloads it and the rest wait for that and
+# are then served from media_cache instead of each downloading it again.
+_cache_key_locks = _BoundedCache(max_items=2000)
+_cache_key_locks_guard = threading.Lock()
+
+
+def _cache_key_lock(key):
+    with _cache_key_locks_guard:
+        lock = _cache_key_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _cache_key_locks[key] = lock
+        return lock
+
+
+def _file_ref(message):
+    """(kind, file_id) of the media in a sent Telegram message."""
+    if message is None:
+        return None
+    if getattr(message, "photo", None):
+        return ("photo", message.photo[-1].file_id)
+    for kind in ("video", "audio", "animation", "document"):
+        media = getattr(message, kind, None)
+        if media is not None and getattr(media, "file_id", None):
+            return (kind, media.file_id)
+    return None
+
 user_settings = store.load_user_settings()
 
 # --- rate limiting + concurrency cap ---
 RATE_LIMIT_COUNT = 5          # max downloads...
 RATE_LIMIT_WINDOW = 60        # ...per this many seconds, per user
-MAX_CONCURRENT_DOWNLOADS = 3  # how many downloads run at once, bot-wide
+
+# How many downloads run at once, bot-wide, plus a tighter cap per platform.
+# Instagram gets its own limit because every Instagram request comes from
+# the same server IP and logged-in session: too many in parallel is what
+# gets a session rate-limited (HTTP 429) or challenged.
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "4"))
+PLATFORM_CONCURRENCY = {
+    "instagram": int(os.environ.get("INSTAGRAM_MAX_CONCURRENT", "3")),
+}
 
 _recent_downloads = defaultdict(list)  # user_id -> [timestamps]
 _download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+_platform_semaphores = {
+    platform_key: threading.Semaphore(limit)
+    for platform_key, limit in PLATFORM_CONCURRENCY.items()
+}
 AD_BUTTON_TEXT = "📣 تبلیغات در ربات"
 
 _duck_status_messages = {}
@@ -79,15 +147,31 @@ _duck_complete_messages = {}
 _duck_message_lock = threading.Lock()
 
 # If this many requests are already waiting for a download slot, new ones
-# get turned away immediately instead of growing an unbounded queue — keeps
-# a burst of traffic (organic growth or abuse) from piling up memory and
-# giving everyone a worse wait.
-MAX_QUEUE_WAITING = 15
+# get turned away immediately instead of growing an unbounded queue. Each
+# waiting request occupies one handler thread, so BOT_WORKER_THREADS (bot.py)
+# must stay well above MAX_CONCURRENT_DOWNLOADS + MAX_QUEUE_WAITING.
+MAX_QUEUE_WAITING = int(os.environ.get("MAX_QUEUE_WAITING", "40"))
 _queue_waiting_count = 0
 _queue_lock = threading.Lock()
 
 def _is_private_chat(chat_type) -> bool:
     return chat_type == "private"
+
+
+class _DownloadSlot:
+    """The semaphores one download holds; release() is safe to call twice."""
+
+    def __init__(self, semaphores):
+        self._semaphores = semaphores
+        self._released = False
+
+    def release(self):
+        if self._released:
+            return
+        self._released = True
+        for semaphore in reversed(self._semaphores):
+            semaphore.release()
+
 
 def _acquire_download_slot(
     bot,
@@ -95,48 +179,69 @@ def _acquire_download_slot(
     status_msg,
     t,
     show_ui=True,
-) -> bool:
-    """Returns True once a download slot is acquired.
+    platform=None,
+):
+    """Returns a _DownloadSlot once both the platform slot (if that platform
+    has its own cap) and a bot-wide slot are held, or None if the queue is
+    full. Always acquired platform-first, so there is no lock-order deadlock.
 
-    In private chats the user sees queue/busy status messages.
+    In private chats the user sees their place in the queue.
     In groups/supergroups those messages are suppressed.
     """
     global _queue_waiting_count
 
-    if _download_semaphore.acquire(blocking=False):
-        return True
+    semaphores = []
+    if platform in _platform_semaphores:
+        semaphores.append(_platform_semaphores[platform])
+    semaphores.append(_download_semaphore)
+
+    acquired = []
+    for semaphore in semaphores:
+        if not semaphore.acquire(blocking=False):
+            break
+        acquired.append(semaphore)
+
+    if len(acquired) == len(semaphores):
+        return _DownloadSlot(acquired)
 
     with _queue_lock:
         if _queue_waiting_count >= MAX_QUEUE_WAITING:
+            for semaphore in reversed(acquired):
+                semaphore.release()
+
             if show_ui and status_msg is not None:
                 try:
                     bot.edit_message_text(
-                    t['server_busy'],
-                    chat_id_int,
-                    status_msg.message_id,
+                        t['server_busy'],
+                        chat_id_int,
+                        status_msg.message_id,
                     )
                 except Exception:
                     pass
-            return False
+            return None
 
         _queue_waiting_count += 1
+        position = _queue_waiting_count
 
     if show_ui and status_msg is not None:
         try:
             bot.edit_message_text(
-                t['queued'],
+                t['queued'].format(position=position),
                 chat_id_int,
                 status_msg.message_id,
             )
         except Exception:
             pass
 
-    _download_semaphore.acquire()
+    try:
+        for semaphore in semaphores[len(acquired):]:
+            semaphore.acquire()
+            acquired.append(semaphore)
+    finally:
+        with _queue_lock:
+            _queue_waiting_count -= 1
 
-    with _queue_lock:
-        _queue_waiting_count -= 1
-
-    return True
+    return _DownloadSlot(acquired)
 
 def _is_rate_limited(user_id) -> bool:
     now = time.time()
@@ -156,6 +261,199 @@ def _render_bar(percent_str: str, width: int = 10) -> str:
     return "▓" * filled + "░" * (width - filled)
 
 
+# ---------------------------------------------------------------------------
+# Time-based progress
+# ---------------------------------------------------------------------------
+#
+# On a fast server yt-dlp's byte progress jumps from 0% to done in a second,
+# and it never covered the upload to Telegram at all — so the old bar sat at
+# 0-3% and then the file just appeared. Instead, the bot learns how long each
+# kind of job really takes (download slot acquired -> file delivered) and a
+# ticker moves the bar and the "time left" along that estimate.
+
+PROGRESS_EDIT_INTERVAL = 2.5  # seconds between edits of the status message
+
+# First guesses, used until a kind of job has been measured a few times.
+DEFAULT_EXPECTED_SECONDS = {
+    "instagram": 8,
+    "tiktok": 8,
+    "soundcloud": 12,
+    "youtube": 25,
+    "spotify": 20,
+}
+
+
+class _DurationModel:
+    """Exponential moving average of real job durations per job kind
+    (e.g. "instagram:media", "youtube:video", "spotify:track"), persisted in
+    timings.json. For jobs whose size is known up front (the YouTube quality
+    picker) it also learns seconds-per-megabyte."""
+
+    ALPHA = 0.25  # weight of the newest measurement
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._data = store.load_timings()
+
+    def expected(self, key, size_bytes=None) -> float:
+        with self._lock:
+            if size_bytes:
+                per_mb = self._data.get(f"{key}:per_mb")
+                if per_mb and per_mb.get("n", 0) >= 2:
+                    return max(4.0, per_mb["avg"] * size_bytes / (1024 * 1024))
+            entry = self._data.get(key)
+            if entry and entry.get("n", 0) >= 1:
+                return max(2.0, entry["avg"])
+        return float(DEFAULT_EXPECTED_SECONDS.get(key.split(":")[0], 12))
+
+    def record(self, key, seconds, size_bytes=None) -> None:
+        seconds = min(max(float(seconds), 0.5), 1800.0)
+        with self._lock:
+            self._update(key, seconds)
+            if size_bytes and size_bytes > 512 * 1024:
+                self._update(f"{key}:per_mb", seconds / (size_bytes / (1024 * 1024)))
+            snapshot = {k: dict(v) for k, v in self._data.items()}
+        try:
+            store.save_timings(snapshot)
+        except Exception:
+            logger.exception("Could not save job timings")
+
+    def _update(self, key, value) -> None:
+        entry = self._data.get(key)
+        if entry is None:
+            self._data[key] = {"avg": value, "n": 1}
+        else:
+            entry["avg"] = entry["avg"] * (1 - self.ALPHA) + value * self.ALPHA
+            entry["n"] = entry.get("n", 0) + 1
+
+
+duration_model = _DurationModel()
+
+
+def _format_eta(t: dict, seconds: float) -> str:
+    seconds = int(math.ceil(seconds))
+    if seconds < 60:
+        return t["eta_seconds"].format(n=seconds)
+    return t["eta_minutes"].format(m=seconds // 60, s=seconds % 60)
+
+
+class _ProgressTicker:
+    """Keeps the status message's bar moving on a timer, using the learned
+    expected duration. Real yt-dlp byte progress can only push the bar
+    forward, never back. It stays below 100% until the file is delivered,
+    then the status message is deleted as before."""
+
+    def __init__(self, bot, chat_id, status_msg, t, show_ui, expected_seconds):
+        self._bot = bot
+        self._chat_id = chat_id
+        self._status_msg = status_msg
+        self._t = t
+        self.enabled = bool(show_ui and status_msg is not None)
+        self._expected = max(float(expected_seconds), 2.0)
+        self._started = time.monotonic()
+        self._phase = "downloading"
+        self._note = ""
+        self._real_fraction = 0.0
+        self._shown_percent = 0
+        self._last_text = None
+        self._stop = threading.Event()
+        self._thread = None
+        self._lock = threading.Lock()
+
+    def start(self):
+        self._started = time.monotonic()
+        if not self.enabled:
+            return self
+        self._render()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self._started
+
+    def set_expected(self, seconds):
+        with self._lock:
+            self._expected = max(float(seconds), 2.0)
+
+    def set_phase(self, phase):
+        with self._lock:
+            self._phase = phase
+        self._render()
+
+    def set_note(self, note):
+        with self._lock:
+            self._note = note or ""
+        self._render()
+
+    def hook(self, d):
+        """yt-dlp progress hook: real byte progress, if it's ahead of time."""
+        if d.get("status") != "downloading":
+            return
+        try:
+            fraction = float(str(d.get("_percent_str") or "0").strip().rstrip("%")) / 100
+        except ValueError:
+            return
+        with self._lock:
+            self._real_fraction = max(self._real_fraction, min(fraction, 1.0))
+
+    def stop(self):
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
+
+    def _percent(self) -> int:
+        ratio = self.elapsed() / self._expected
+        if ratio <= 1:
+            by_time = 90 * ratio
+        else:
+            # Running late: keep creeping toward (never reaching) 100%.
+            by_time = 90 + 8 * (1 - math.exp(-(ratio - 1) * 1.5))
+        # Downloading is roughly the first ~70% of a job; uploading the rest.
+        by_bytes = 70 * self._real_fraction if self._phase == "downloading" else 0
+        percent = int(min(max(by_time, by_bytes), 98))
+        self._shown_percent = max(self._shown_percent, percent)  # never go backwards
+        return self._shown_percent
+
+    def _render(self):
+        if not self.enabled or self._stop.is_set():
+            return
+        with self._lock:
+            percent = self._percent()
+            remaining = self._expected - self.elapsed()
+            eta = _format_eta(self._t, remaining) if remaining >= 1 else self._t["progress_almost"]
+            text = self._t["progress_line"].format(
+                label=self._t[f"progress_{self._phase}"],
+                bar=_render_bar(f"{percent}%"),
+                percent=f"{percent}%",
+                eta=eta,
+            )
+            if self._note:
+                text = f"{self._note}\n\n{text}"
+            if text == self._last_text:
+                return
+            self._last_text = text
+        try:
+            self._bot.edit_message_text(text, self._chat_id, self._status_msg.message_id)
+        except Exception:
+            pass  # a failed edit must never affect the download
+
+    def _run(self):
+        while not self._stop.wait(PROGRESS_EDIT_INTERVAL):
+            self._render()
+
+
+def _files_size(paths) -> int:
+    total = 0
+    for path in paths or []:
+        try:
+            total += os.path.getsize(path)
+        except OSError:
+            pass
+    return total
+
+
 TEXTS = {
     'fa': {
         'welcome': (
@@ -168,6 +466,12 @@ TEXTS = {
             "🦆 لینکتو بفرست تا شروع کنیم!"
         ),        'init': "⏳ در حال برقراری ارتباط...",
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
+        'progress_line': "{label} {bar} {percent}\n\n⏱ زمان تقریبی باقی‌مانده: {eta}",
+        'progress_downloading': "🔄 در حال دریافت",
+        'progress_uploading': "📤 در حال ارسال",
+        'progress_almost': "چند لحظه‌ی دیگه",
+        'eta_seconds': "{n} ثانیه",
+        'eta_minutes': "{m} دقیقه و {s} ثانیه",
         'uploading': "✅ دانلود تکمیل شد! در حال آپلود...",
         'failed': "❌ خطا: {error}",
         'download_failed': "❌ دانلود این لینک در حال حاضر انجام نشد. لطفاً مطمئن شو لینک قابل دسترسیه و دوباره امتحان کن.",
@@ -191,6 +495,7 @@ TEXTS = {
         'ig_unsupported': "ℹ️ این نوع لینک اینستاگرام پشتیبانی نمی‌شه. لطفاً لینک یک پست، ریلز، استوری یا هایلایت رو بفرست.",
         'not_found': "❌ این محتوا پیدا نشد؛ ممکنه حذف شده یا خصوصی باشه.",
         'platform_unavailable': "⏳ این سرویس الان جواب نمی‌ده. لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن.",
+        'already_downloading': "⏳ این لینک در حال دانلوده؛ چند لحظه صبر کن تا برسه.",
         'senddl_notice': "✅ مشکل لینک شما برطرف شد، فایلی که می‌خواستید در ادامه براتون ارسال می‌شه. 🦆",
         'tiktok_blocked': "🌍 تیک‌تاک دسترسی به این ویدیو رو از منطقه‌ی سرور ربات بسته و فعلاً قابل دریافت نیست.",
         'tiktok_login': "🔞 تیک‌تاک این ویدیو رو فقط برای کاربران واردشده نمایش می‌ده (محدودیت سنی) و فعلاً قابل دریافت نیست.",
@@ -207,7 +512,7 @@ TEXTS = {
         'too_large': "⚠️ حجم این فایل حدود {size} است و از سقف مجاز بیشتره، پس امکان ارسالش نیست.\n\nمی‌تونی از /settings کیفیت پایین‌تر یا «فقط صدا» رو انتخاب کنی.",
         'quality_reduced': "ℹ️ به‌خاطر محدودیت حجم تلگرام، کیفیت به‌صورت خودکار به «{quality}» کاهش یافت.",
         'rate_limited': "⏳ توی یک دقیقه‌ی اخیر بیش از حد مجاز ({limit} تا) دانلود کردی. کمی صبر کن و دوباره امتحان کن.",
-        'queued': "📋 صف دانلود پره — به‌محض آزاد شدن ظرفیت شروع می‌شه...",
+        'queued': "📋 توی صف دانلودی (نفر {position}) — به‌محض آزاد شدن ظرفیت شروع می‌شه...",
         'server_busy': "🚦 سرور الان خیلی شلوغه. چند دقیقه‌ی دیگه دوباره امتحان کن.",
         'spotify_searching': "🔎 در حال جست‌وجو ({i}/{total}): {name}",
         'view_link': "🔗 مشاهده در پلتفرم اصلی",
@@ -292,6 +597,8 @@ TEXTS = {
         'status_off': "خاموش",
         'stats_users': "کاربران",
         'stats_errors': "خطاها",
+        'stats_daily_title': "📅 ۷ روز اخیر (کاربر جدید | کاربر فعال | دانلود):",
+        'stats_sources_title': "🔗 کاربران جذب‌شده از لینک‌های start:",
         'broadcast_usage': "استفاده: /broadcast <پیام>",
         'broadcast_done': "✅ به {sent} کاربر ارسال شد ({failed} ناموفق).",
         'ban_usage': "استفاده: /{cmd} <user_id>",
@@ -447,6 +754,12 @@ TEXTS = {
             "🦆 You bring the link. I’ll bring the media."
         ),        'init': "⏳ Initializing connection...",
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
+        'progress_line': "{label} {bar} {percent}\n\n⏱ Estimated time left: {eta}",
+        'progress_downloading': "🔄 Fetching",
+        'progress_uploading': "📤 Sending",
+        'progress_almost': "a few more seconds",
+        'eta_seconds': "{n}s",
+        'eta_minutes': "{m}m {s}s",
         'uploading': "✅ Download complete! Preparing upload...",
         'failed': "❌ Failed: {error}",
         'download_failed': "❌ We couldn't download this link right now. Please check the link and try again.",
@@ -470,6 +783,7 @@ TEXTS = {
         'ig_unsupported': "ℹ️ This kind of Instagram link isn't supported. Please send the link of a post, Reel, story or highlight.",
         'not_found': "❌ This content couldn't be found — it may have been deleted or made private.",
         'platform_unavailable': "⏳ The service isn't responding right now. Please try again in a few minutes.",
+        'already_downloading': "⏳ This link is already downloading — it'll arrive in a moment.",
         'senddl_notice': "✅ The problem with your link has been fixed — the file you wanted is on its way. 🦆",
         'tiktok_blocked': "🌍 TikTok blocks this video in the bot server's region, so it can't be downloaded right now.",
         'tiktok_login': "🔞 TikTok only shows this video to logged-in users (age restriction), so it can't be downloaded right now.",
@@ -486,7 +800,7 @@ TEXTS = {
         'too_large': "⚠️ This file is about {size}, over the allowed limit, so it can't be sent.\n\nYou can pick a lower quality or \"audio only\" in /settings.",
         'quality_reduced': "ℹ️ Quality was automatically reduced to \"{quality}\" to stay under Telegram's size limit.",
         'rate_limited': "⏳ You've hit the download limit ({limit}) for the last minute. Please wait a bit and try again.",
-        'queued': "📋 The download queue is full — this will start as soon as a slot frees up...",
+        'queued': "📋 You're in the download queue (position {position}) — it will start as soon as a slot frees up...",
         'server_busy': "🚦 The server is very busy right now. Please try again in a few minutes.",
         'spotify_searching': "🔎 Searching ({i}/{total}): {name}",
         'view_link': "🔗 View Original",
@@ -569,6 +883,8 @@ TEXTS = {
         'status_off': "off",
         'stats_users': "Users",
         'stats_errors': "Errors",
+        'stats_daily_title': "📅 Last 7 days (new users | active users | downloads):",
+        'stats_sources_title': "🔗 Users who joined via start links:",
         'broadcast_usage': "Usage: /broadcast <message>",
         'broadcast_done': "✅ Sent to {sent} users ({failed} failed).",
         'ban_usage': "Usage: /{cmd} <user_id>",
@@ -1724,6 +2040,30 @@ def register_features(bot):
 
     platforms.set_auth_alert_handler(_alert_owner_auth_problem)
 
+    def _alert_owner_sponsor_check_failed(channel_username, error):
+        owner_id = int(os.environ.get("OWNER_ID", "0") or "0")
+
+        if not owner_id:
+            return
+
+        try:
+            bot.send_message(
+                owner_id,
+                (
+                    f"⚠️ عضویت کاربران در کانال اسپانسر {channel_username} قابل بررسی نیست "
+                    "و فعلاً کاربران بدون عضویت رد می‌شن. ربات رو ادمین کانال کن "
+                    f"و با /checksponsor {channel_username} تستش کن.\n\n"
+                    f"⚠️ Membership in sponsor channel {channel_username} can't be checked, "
+                    "so users currently pass without joining. Make the bot an admin there "
+                    f"and test with /checksponsor {channel_username}.\n\n"
+                    f"{str(error)[:300]}"
+                ),
+            )
+        except Exception:
+            logger.exception("Could not send the sponsor-check alert to the owner")
+
+    ads.set_check_failure_handler(_alert_owner_sponsor_check_failed)
+
     # Registered before handle_media_link: the command text contains links,
     # and handlers are matched in registration order.
     @bot.message_handler(commands=["senddl"])
@@ -2180,98 +2520,6 @@ def register_features(bot):
 
         return False
 
-    def _make_progress_hook(
-        chat_id_int,
-        status_msg,
-        t,
-        show_ui=True,
-    ):
-        """
-        Shared yt-dlp progress hook.
-
-        The previous implementation edited the Telegram status message
-        every ~2 seconds from inside yt-dlp's download callback. Telegram
-        API requests are synchronous, so a slow API response could stall the
-        actual media download.
-
-        This version:
-          - updates at most once every 8 seconds
-          - ignores repeated progress values
-          - never lets a Telegram edit failure affect the download
-          - keeps the progress UI for private chats
-        """
-
-        state = {
-            "last_edit": 0.0,
-            "last_percent": None,
-        }
-
-        def progress_hook(d):
-            if not show_ui or status_msg is None:
-                return
-
-            if d.get("status") != "downloading":
-                return
-
-            now = time.monotonic()
-
-            percent = (
-                d.get("_percent_str")
-                or "N/A"
-            ).strip()
-
-            if percent == state["last_percent"]:
-                if (
-                    now - state["last_edit"]
-                    < 8.0
-                ):
-                    return
-
-            if (
-                now - state["last_edit"]
-                < 8.0
-            ):
-                return
-
-            eta = (
-                d.get("_eta_str")
-                or "N/A"
-            ).strip()
-
-            size = (
-                d.get("_total_bytes_str")
-                or d.get(
-                    "_estimated_total_bytes_str",
-                    "N/A",
-                )
-            )
-
-            if isinstance(size, str):
-                size = size.strip()
-
-            log_text = t["downloading"].format(
-                bar=_render_bar(percent),
-                percent=percent,
-                size=size,
-                eta=eta,
-            )
-
-            try:
-                bot.edit_message_text(
-                    log_text,
-                    chat_id_int,
-                    status_msg.message_id,
-                    parse_mode="Markdown",
-                )
-
-                state["last_edit"] = now
-                state["last_percent"] = percent
-
-            except Exception:
-                state["last_edit"] = now
-                state["last_percent"] = percent
-
-        return progress_hook
 
     def _send_download_result(
         chat_id_int,
@@ -2285,6 +2533,7 @@ def register_features(bot):
         files,
         t,
         show_ui=True,
+        cache_key=None,
     ):
         """Builds the caption/buttons and sends the downloaded file(s) —
         one file directly, or a chunked media group for multi-item posts
@@ -2305,9 +2554,136 @@ def register_features(bot):
                 files,
                 t,
                 show_ui=show_ui,
+                cache_key=cache_key,
             )
         finally:
             platforms.remove_download_files(files)
+
+    def _result_markup(t, url, post_id, has_thumb, offer_audio_button, show_ui, single_video):
+        if show_ui:
+            markup = InlineKeyboardMarkup()
+
+            markup.add(
+                InlineKeyboardButton(
+                    text=t['view_link'],
+                    url=url,
+                )
+            )
+
+            if has_thumb:
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t['dl_cover'],
+                        callback_data=f"thumb_{post_id}",
+                    )
+                )
+
+            if offer_audio_button:
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t['get_audio_btn'],
+                        callback_data=f"audio_{post_id}",
+                    )
+                )
+
+            return markup
+
+        if single_video:
+            markup = InlineKeyboardMarkup()
+
+            markup.add(
+                InlineKeyboardButton(
+                    text=t["get_caption"],
+                    callback_data=f"caption_{post_id}",
+                )
+            )
+
+            return markup
+
+        return None
+
+    def _send_cached_result(
+        chat_id_int,
+        reply_to_id,
+        url,
+        platform,
+        cached,
+        t,
+        show_ui=True,
+    ):
+        """Re-sends a previous result by Telegram file_id — no download.
+        Raises if Telegram refuses a file_id, so the caller can fall back
+        to a fresh download."""
+        post_id = cached["post_id"]
+
+        if cached.get("thumb_url"):
+            thumb_cache[post_id] = cached["thumb_url"]
+
+        if cached.get("offer_audio"):
+            audio_source_cache[post_id] = url
+
+        items = cached["items"]
+        caption = cached["caption"] if show_ui else BOT_SIGNATURE
+        markup = _result_markup(
+            t,
+            url,
+            post_id,
+            bool(cached.get("thumb_url")),
+            cached.get("offer_audio"),
+            show_ui,
+            len(items) == 1 and items[0][0] == "video",
+        )
+
+        if len(items) == 1:
+            kind, file_id = items[0]
+            common = {
+                "caption": caption,
+                "reply_markup": markup,
+                "reply_to_message_id": reply_to_id,
+            }
+
+            if kind == "video":
+                sent_message = bot.send_video(chat_id_int, file_id, supports_streaming=True, **common)
+
+                if not show_ui:
+                    caption_cache[post_id] = {
+                        "chat_id": chat_id_int,
+                        "message_id": sent_message.message_id,
+                        "caption": cached["caption"],
+                        "visible": False,
+                    }
+            elif kind == "audio":
+                bot.send_audio(chat_id_int, file_id, **common)
+            elif kind == "photo":
+                bot.send_photo(chat_id_int, file_id, **common)
+            elif kind == "animation":
+                bot.send_animation(chat_id_int, file_id, **common)
+            else:
+                bot.send_document(chat_id_int, file_id, **common)
+        else:
+            input_types = {
+                "video": InputMediaVideo,
+                "photo": InputMediaPhoto,
+                "audio": InputMediaAudio,
+                "document": InputMediaDocument,
+            }
+
+            for chunk_idx in range(0, len(items), 10):
+                media_group = [
+                    input_types[kind](
+                        file_id,
+                        caption=caption if chunk_idx == 0 and item_idx == 0 else "",
+                    )
+                    for item_idx, (kind, file_id) in enumerate(items[chunk_idx:chunk_idx + 10])
+                ]
+
+                bot.send_media_group(
+                    chat_id_int,
+                    media_group,
+                    reply_to_message_id=reply_to_id if chunk_idx == 0 else None,
+                )
+
+        store.record_download(platform, chat_id_int)
 
     def _deliver_download_result(
         chat_id_int,
@@ -2321,6 +2697,7 @@ def register_features(bot):
         files,
         t,
         show_ui=True,
+        cache_key=None,
     ):
         # Only a real step down the quality ladder (auto_quality_fallback)
         # is worth a notice. This used to look up t['quality_best'], a key
@@ -2397,48 +2774,17 @@ def register_features(bot):
         if offer_audio_button:
             audio_source_cache[post_id] = url
 
-        markup = None
+        markup = _result_markup(
+            t,
+            url,
+            post_id,
+            bool(thumb_url),
+            offer_audio_button,
+            show_ui,
+            len(valid_files) == 1 and platforms.media_kind(valid_files[0]) == "video",
+        )
 
-        if show_ui:
-            markup = InlineKeyboardMarkup()
-
-            markup.add(
-                InlineKeyboardButton(
-                    text=t['view_link'],
-                    url=url,
-                )
-            )
-
-            if thumb_url:
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t['dl_cover'],
-                        callback_data=f"thumb_{post_id}",
-                    )
-                )
-
-            if offer_audio_button:
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t['get_audio_btn'],
-                        callback_data=f"audio_{post_id}",
-                    )
-                )
-
-        elif len(valid_files) == 1:
-            group_kind = platforms.media_kind(
-                valid_files[0]
-            )
-
-            if group_kind == "video":
-                markup = InlineKeyboardMarkup()
-
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t["get_caption"],
-                        callback_data=f"caption_{post_id}",
-                    )
-                )
+        sent_refs = []
 
         if len(valid_files) == 1:
             filepath = valid_files[0]
@@ -2539,6 +2885,8 @@ def register_features(bot):
 
                         timeout=600,
                     )
+                    sent_refs.append(_file_ref(sent_message))
+
                     if not show_ui:
                         caption_cache[post_id] = {
                             "chat_id": chat_id_int,
@@ -2579,7 +2927,7 @@ def register_features(bot):
                         )
 
                         try:
-                            bot.send_audio(
+                            sent_message = bot.send_audio(
                                 chat_id_int,
                                 media_file,
 
@@ -2594,6 +2942,7 @@ def register_features(bot):
                                 reply_to_message_id=reply_to_id,
                                 timeout=600,
                             )
+                            sent_refs.append(_file_ref(sent_message))
                         finally:
                             if thumb_file:
                                 thumb_file.close()
@@ -2601,13 +2950,15 @@ def register_features(bot):
                         platforms.remove_download_files([thumb_path])
                 else:
                     try:
-                        bot.send_photo(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id)
+                        sent_message = bot.send_photo(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id)
                     except Exception:
                         # Very large or unusually shaped images are
                         # refused as photos but still work as files.
                         logger.warning("send_photo failed; sending as document | %s", filepath, exc_info=True)
                         media_file.seek(0)
-                        bot.send_document(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
+                        sent_message = bot.send_document(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
+
+                    sent_refs.append(_file_ref(sent_message))
 
         elif len(valid_files) > 1:
             chunks = [valid_files[idx:idx + 10] for idx in range(0, len(valid_files), 10)]
@@ -2642,12 +2993,29 @@ def register_features(bot):
                             media_group.append(InputMediaPhoto(f, caption=item_caption))
 
                     bot.send_chat_action(chat_id_int, 'upload_document')
-                    bot.send_media_group(chat_id_int, media_group, reply_to_message_id=reply_to_id if chunk_idx == 0 else None, timeout=600)
+                    sent_group = bot.send_media_group(chat_id_int, media_group, reply_to_message_id=reply_to_id if chunk_idx == 0 else None, timeout=600)
+                    sent_refs.extend(_file_ref(sent) for sent in (sent_group or []))
                 finally:
                     for f in open_files:
                         f.close()
 
-        store.record_download(platform)
+        if (
+            cache_key
+            and valid_files
+            and len(sent_refs) == len(valid_files)
+            and all(sent_refs)
+            and not (len(sent_refs) > 1 and any(kind == "animation" for kind, _ in sent_refs))
+        ):
+            media_cache[cache_key] = {
+                "time": time.time(),
+                "items": sent_refs,
+                "caption": full_caption,
+                "post_id": post_id,
+                "thumb_url": thumb_url,
+                "offer_audio": offer_audio_button,
+            }
+
+        store.record_download(platform, chat_id_int)
 
     def _run_direct_download(
         chat_id_int,
@@ -2667,32 +3035,102 @@ def register_features(bot):
         Returns (True, None) on success or (False, error).
         """
 
-        progress_hook = _make_progress_hook(
-            chat_id_int,
-            status_msg,
-            t,
-            show_ui=show_ui,
+        platform = (
+            platforms.detect_platform(url)
+            or "unknown"
         )
+        cache_key = platforms.media_cache_key(url, quality)
 
-        if not _acquire_download_slot(
+        # The same chat is already downloading this link (double tap, resend).
+        in_flight_key = (chat_id_int, cache_key or url)
+
+        if not _claim_in_flight(in_flight_key):
+            if show_ui and status_msg is not None:
+                try:
+                    bot.edit_message_text(t["already_downloading"], chat_id_int, status_msg.message_id)
+                except Exception:
+                    pass
+            return False, Exception("This link is already being downloaded for this chat.")
+
+        try:
+            if not cache_key:
+                return _download_and_send(
+                    chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, None,
+                )
+
+            with _cache_key_lock(cache_key):
+                # Already sent this exact media before? Re-send it by file_id.
+                cached = media_cache.get(cache_key)
+
+                if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+                    try:
+                        _send_cached_result(
+                            chat_id_int,
+                            reply_to_id,
+                            url,
+                            platform,
+                            cached,
+                            t,
+                            show_ui=show_ui,
+                        )
+
+                        if show_ui and status_msg is not None:
+                            try:
+                                bot.delete_message(chat_id_int, status_msg.message_id)
+                            except Exception:
+                                pass
+
+                        if show_ui:
+                            _maybe_send_ad(chat_id_int)
+
+                        logger.info("Served from media cache | %s", cache_key)
+                        return True, None
+                    except Exception:
+                        logger.warning("Cached re-send failed; downloading again | %s", cache_key, exc_info=True)
+                        media_cache.pop(cache_key, None)
+
+                return _download_and_send(
+                    chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, cache_key,
+                )
+        finally:
+            _release_in_flight(in_flight_key)
+
+    def _download_and_send(
+        chat_id_int,
+        reply_to_id,
+        url,
+        quality,
+        t,
+        status_msg,
+        show_ui,
+        platform,
+        cache_key,
+    ):
+        timing_key = f"{platform}:{'audio' if quality == 'audio' else 'media'}"
+
+        slot = _acquire_download_slot(
             bot,
             chat_id_int,
             status_msg,
             t,
             show_ui=show_ui,
-        ):
+            platform=platform,
+        )
+
+        if slot is None:
             return False, Exception("The download queue is full.")
+
+        # The clock starts once the job really starts (queue time excluded).
+        ticker = _ProgressTicker(
+            bot, chat_id_int, status_msg, t, show_ui,
+            duration_model.expected(timing_key),
+        ).start()
 
         _send_duck_reaction(
             chat_id_int,
             "downloading",
             track_status=True,
             show_ui=show_ui,
-        )
-
-        platform = (
-            platforms.detect_platform(url)
-            or "unknown"
         )
 
         files = []
@@ -2713,17 +3151,10 @@ def register_features(bot):
                 url,
                 quality=quality,
                 allow_fallback=allow_fallback,
-                progress_hook=progress_hook,
+                progress_hook=ticker.hook,
             )
-            if show_ui and status_msg is not None:
-                try:
-                    bot.edit_message_text(
-                        t["uploading"],
-                        chat_id_int,
-                        status_msg.message_id,
-                    )
-                except Exception:
-                    pass
+            ticker.set_phase("uploading")
+            delivered_bytes = _files_size(files)
 
             _send_download_result(
                 chat_id_int,
@@ -2737,7 +3168,11 @@ def register_features(bot):
                 files,
                 t,
                 show_ui=show_ui,
+                cache_key=cache_key,
             )
+
+            ticker.stop()
+            duration_model.record(timing_key, ticker.elapsed(), delivered_bytes)
 
             _send_duck_download_complete(
                 chat_id_int,
@@ -2758,6 +3193,8 @@ def register_features(bot):
             return True, None
 
         except platforms.FileTooLargeError as e:
+            ticker.stop()
+
             if show_ui and status_msg is not None:
                 _send_duck_download_failed(
                     chat_id_int,
@@ -2785,6 +3222,8 @@ def register_features(bot):
             return False, e
 
         except Exception as e:
+            ticker.stop()
+
             if show_ui and status_msg is not None:
                 _send_duck_download_failed(
                     chat_id_int,
@@ -2829,9 +3268,10 @@ def register_features(bot):
             return False, e
 
         finally:
+            ticker.stop()
             platforms.remove_download_files(files)
 
-            _download_semaphore.release()
+            slot.release()
 
     def _send_youtube_quality_picker(
         message,
@@ -3059,6 +3499,18 @@ def register_features(bot):
             language = "en"
 
         user["lang"] = language
+
+        if is_new_user:
+            user["joined"] = time.strftime("%Y-%m-%d")
+
+            # t.me/<bot>?start=<source> arrives as "/start <source>" —
+            # one link per ad campaign shows exactly where users came from.
+            parts = (message.text or "").split(maxsplit=1)
+            source = re.sub(r"[^A-Za-z0-9_-]", "", parts[1])[:32] if len(parts) > 1 else ""
+
+            if source and not user.get("source"):
+                user["source"] = source
+                store.record_source(source)
 
         user_settings[chat_id] = user
 
@@ -3539,6 +3991,12 @@ def register_features(bot):
                 "quality": store.DEFAULT_QUALITY,
                 "instagram_quality": store.DEFAULT_INSTAGRAM_QUALITY,
                 "low_data_mode": store.DEFAULT_LOW_DATA_MODE,
+                # Where the user came from isn't a preference; keep it.
+                **{
+                    key: user[key]
+                    for key in ("source", "joined")
+                    if key in user
+                },
             }
 
             user_settings[chat_id] = user
@@ -4356,16 +4814,22 @@ def register_features(bot):
             )
 
         if platform == "spotify":
-            progress_hook = _make_progress_hook(chat_id_int, status_msg, t, show_ui=show_ui,)
-
-            if not _acquire_download_slot(
+            slot = _acquire_download_slot(
                 bot,
                 chat_id_int,
                 status_msg,
                 t,
                 show_ui=show_ui,
-            ):
+                platform="spotify",
+            )
+
+            if slot is None:
                 return
+
+            ticker = _ProgressTicker(
+                bot, chat_id_int, status_msg, t, show_ui,
+                duration_model.expected("spotify:track"),
+            ).start()
 
             _send_duck_reaction(
                 chat_id_int,
@@ -4379,6 +4843,12 @@ def register_features(bot):
                 if not tracks:
                     raise Exception("Spotify returned no playable tracks for this link.")
 
+                # An album takes about N tracks' worth of time.
+                ticker.set_expected(
+                    ticker.elapsed()
+                    + duration_model.expected("spotify:track") * len(tracks)
+                )
+
                 failed_tracks = []
                 last_track_error = None
                 sent_count = 0
@@ -4387,25 +4857,22 @@ def register_features(bot):
                 try:
                     for i, track in enumerate(tracks):
                         track_label = f"{track['artists']} - {track['name']}"
+                        track_started = time.monotonic()
 
-                        if show_ui and status_msg is not None and len(tracks) > 1:
-                            try:
-                                bot.edit_message_text(
-                                    t['spotify_searching'].format(
-                                        i=i + 1,
-                                        total=len(tracks),
-                                        name=track_label,
-                                    ),
-                                    chat_id_int,
-                                    status_msg.message_id,
+                        ticker.set_phase("downloading")
+                        if len(tracks) > 1:
+                            ticker.set_note(
+                                t['spotify_searching'].format(
+                                    i=i + 1,
+                                    total=len(tracks),
+                                    name=track_label,
                                 )
-                            except Exception:
-                                pass
+                            )
 
                         # One track that can't be found must not abort the
                         # rest of an album or playlist.
                         try:
-                            filepath = platforms.download_spotify_track(track, progress_hook)
+                            filepath = platforms.download_spotify_track(track, None)
                         except platforms.FileTooLargeError:
                             raise
                         except Exception as track_error:
@@ -4419,6 +4886,8 @@ def register_features(bot):
                             continue
 
                         try:
+                            ticker.set_phase("uploading")
+
                             if show_ui:
                                 bot.send_chat_action(chat_id_int, 'upload_audio')
 
@@ -4449,7 +4918,8 @@ def register_features(bot):
                             platforms.remove_download_files([filepath])
 
                         sent_count += 1
-                        store.record_download("spotify")
+                        store.record_download("spotify", chat_id_int)
+                        duration_model.record("spotify:track", time.monotonic() - track_started)
                 finally:
                     if cover_thumb:
                         platforms.remove_download_files([cover_thumb])
@@ -4482,6 +4952,8 @@ def register_features(bot):
                         except Exception:
                             pass
 
+                ticker.stop()
+
                 if show_ui and status_msg is not None:
                     try:
                         bot.delete_message(
@@ -4501,6 +4973,7 @@ def register_features(bot):
                         chat_id_int
                     )
             except Exception as e:
+                ticker.stop()
 
                 _send_duck_download_failed(
                     chat_id_int,
@@ -4534,7 +5007,8 @@ def register_features(bot):
                 except Exception:
                     pass
             finally:
-                _download_semaphore.release()
+                ticker.stop()
+                slot.release()
             return
 
         download_quality = (
@@ -5108,21 +5582,28 @@ def register_features(bot):
                 t["init"],
             )
 
-        progress_hook = _make_progress_hook(
-            chat_id_int,
-            status_msg,
-            t,
-            show_ui=show_ui,
-        )
-
-        if not _acquire_download_slot(
+        slot = _acquire_download_slot(
             bot,
             chat_id_int,
             status_msg,
             t,
             show_ui=show_ui,
-        ):
+            platform="youtube",
+        )
+
+        if slot is None:
             return
+
+        # The picker already knows this option's size: a far better guess
+        # than an average over every YouTube video.
+        timing_key = f"youtube:{'audio' if choice == 'audio' else 'video'}"
+        ticker = _ProgressTicker(
+            bot, chat_id_int, status_msg, t, show_ui,
+            duration_model.expected(
+                timing_key,
+                platforms.youtube_option_size(video_id, choice),
+            ),
+        ).start()
 
         _send_duck_reaction(
             chat_id_int,
@@ -5139,7 +5620,7 @@ def register_features(bot):
                 platforms.download_youtube_quality(
                     video_id,
                     choice,
-                    progress_hook,
+                    ticker.hook,
                 )
             )
 
@@ -5148,12 +5629,8 @@ def register_features(bot):
                     chat_id_int
                 )
 
-            if show_ui and status_msg is not None:
-                bot.edit_message_text(
-                    t["uploading"],
-                    chat_id_int,
-                    status_msg.message_id,
-                )
+            ticker.set_phase("uploading")
+            delivered_bytes = _files_size(files)
 
             source_url = (
                 f"https://www.youtube.com/watch?v={video_id}"
@@ -5172,6 +5649,9 @@ def register_features(bot):
                 t,
                 show_ui=show_ui,
             )
+
+            ticker.stop()
+            duration_model.record(timing_key, ticker.elapsed(), delivered_bytes)
 
             _send_duck_download_complete(
                 chat_id_int,
@@ -5196,6 +5676,7 @@ def register_features(bot):
                 )
 
         except platforms.FileTooLargeError as e:
+            ticker.stop()
 
             store.record_error(
                 platform="youtube",
@@ -5219,6 +5700,7 @@ def register_features(bot):
                     pass
 
         except Exception as e:
+            ticker.stop()
 
             source_url = (
                 f"https://www.youtube.com/watch?v={video_id}"
@@ -5248,6 +5730,7 @@ def register_features(bot):
                     pass
 
         finally:
+            ticker.stop()
             platforms.remove_download_files(files)
 
-            _download_semaphore.release()
+            slot.release()

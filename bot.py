@@ -90,8 +90,10 @@ platforms.check_dependencies()
 # pyTelegramBotAPI's default of 2 worker threads, two downloads in progress
 # left nobody to answer /start, buttons, or even the "queue is full"
 # message. Keep this comfortably above MAX_CONCURRENT_DOWNLOADS +
-# MAX_QUEUE_WAITING (see bot_features.py).
-WORKER_THREADS = int(os.environ.get("BOT_WORKER_THREADS", "24"))
+# MAX_QUEUE_WAITING (see bot_features.py), because every queued download —
+# and everyone waiting for the same link to finish downloading once — also
+# waits inside one of these threads. Idle threads cost almost nothing.
+WORKER_THREADS = int(os.environ.get("BOT_WORKER_THREADS", "96"))
 
 bot = telebot.TeleBot(BOT_TOKEN, num_threads=WORKER_THREADS)
 bot_features.register_features(bot)

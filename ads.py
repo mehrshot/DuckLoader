@@ -11,12 +11,43 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 import uuid
 
 CHANNELS_FILE = "sponsor_channels.json"
 AD_FILE = "ad_message.json"
 
 logger = logging.getLogger(__name__)
+
+# A channel whose membership can't be checked is skipped (users may pass),
+# so the owner must hear about it: otherwise a sold sponsor slot silently
+# stops bringing its advertiser any members.
+CHECK_FAILURE_ALERT_COOLDOWN = 6 * 3600
+_check_failure_handler = None
+_check_failure_last = {}
+_check_failure_lock = threading.Lock()
+
+
+def set_check_failure_handler(handler) -> None:
+    """`handler(channel_username, error)` — called at most once per channel
+    every CHECK_FAILURE_ALERT_COOLDOWN seconds."""
+    global _check_failure_handler
+    _check_failure_handler = handler
+
+
+def _report_check_failure(username: str, error) -> None:
+    with _check_failure_lock:
+        now = time.monotonic()
+        last = _check_failure_last.get(username.lower())
+        if last is not None and now - last < CHECK_FAILURE_ALERT_COOLDOWN:
+            return
+        _check_failure_last[username.lower()] = now
+    if _check_failure_handler:
+        try:
+            _check_failure_handler(username, error)
+        except Exception:
+            logger.exception("Sponsor check-failure handler failed")
 
 
 def _load(path, default):
@@ -343,6 +374,7 @@ def get_unjoined_channels(
                 user_id,
                 exc,
             )
+            _report_check_failure(username, exc)
             continue
 
     return unjoined

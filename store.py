@@ -456,6 +456,11 @@ def track_user(chat_id) -> None:
             _known_users_cache,
         )
 
+    with _io_lock:
+        stats = load_stats()
+        _daily_bucket(stats)["new_users"] += 1
+        _save(STATS_FILE, stats)
+
 # --- bans ---
 
 _banned_users_cache = None
@@ -550,10 +555,54 @@ def load_stats() -> dict:
     return stats
 
 
-def record_download(platform: str) -> None:
+# --- learned job durations (for the time-based progress bar) ---
+
+TIMINGS_FILE = "timings.json"
+
+
+def load_timings() -> dict:
+    data = _load(TIMINGS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_timings(timings: dict) -> None:
+    _save(TIMINGS_FILE, timings)
+
+
+# Daily numbers (new users, active users, downloads) are what an advertiser
+# asks for; keep about two months of them.
+DAILY_STATS_KEEP_DAYS = 60
+
+
+def _daily_bucket(stats: dict) -> dict:
+    daily = stats.setdefault("daily", {})
+    day = daily.setdefault(
+        time.strftime("%Y-%m-%d"),
+        {"new_users": 0, "downloads": 0, "active_users": []},
+    )
+    for old_day in sorted(daily)[:-DAILY_STATS_KEEP_DAYS]:
+        del daily[old_day]
+    return day
+
+
+def record_download(platform: str, user_id=None) -> None:
     with _io_lock:
         stats = load_stats()
         stats["downloads"][platform] = stats["downloads"].get(platform, 0) + 1
+        day = _daily_bucket(stats)
+        day["downloads"] += 1
+        if user_id is not None and user_id not in day["active_users"]:
+            day["active_users"].append(user_id)
+        _save(STATS_FILE, stats)
+
+
+def record_source(source: str) -> None:
+    """Counts a new user who arrived through a t.me/<bot>?start=<source>
+    link (e.g. one link per influencer campaign)."""
+    with _io_lock:
+        stats = load_stats()
+        sources = stats.setdefault("sources", {})
+        sources[source] = sources.get(source, 0) + 1
         _save(STATS_FILE, stats)
 
 

@@ -311,6 +311,67 @@ def _back_markup(target, t) -> InlineKeyboardMarkup:
     return m
 
 
+def _stats_text(t) -> str:
+    """Totals, the last 7 days, and where users came from — the numbers an
+    advertiser asks for."""
+    stats = store.load_stats()
+    users = store.load_known_users()
+
+    lines = [f"👥 {t['stats_users']}: {len(users)}"]
+    for platform_name, count in sorted(stats.get("downloads", {}).items(), key=lambda kv: -kv[1]):
+        lines.append(f"  • {platform_name}: {count}")
+    lines.append(f"❌ {t['stats_errors']}: {stats.get('errors', 0)}")
+
+    daily = stats.get("daily") or {}
+    if daily:
+        lines.append("")
+        lines.append(t["stats_daily_title"])
+        for day in sorted(daily)[-7:][::-1]:
+            bucket = daily[day]
+            lines.append(
+                f"{day}: +{bucket.get('new_users', 0)} | "
+                f"{len(bucket.get('active_users') or [])} | "
+                f"{bucket.get('downloads', 0)}"
+            )
+
+    sources = stats.get("sources") or {}
+    if sources:
+        lines.append("")
+        lines.append(t["stats_sources_title"])
+        for source, count in sorted(sources.items(), key=lambda kv: -kv[1])[:15]:
+            lines.append(f"  • {source}: {count}")
+
+    return "\n".join(lines)
+
+
+def _broadcast(bot, text) -> tuple:
+    """Sends `text` to every known chat. Paced under Telegram's ~30 msg/s
+    limit, and a 429 "Too Many Requests" waits the time Telegram asks for
+    and retries instead of silently dropping that user."""
+    sent, failed = 0, 0
+
+    for chat_id in list(store.load_known_users()):
+        for _attempt in range(3):
+            try:
+                bot.send_message(chat_id, text)
+                sent += 1
+                break
+            except Exception as e:
+                retry_after = getattr(e, "result_json", {}) or {}
+                retry_after = (retry_after.get("parameters") or {}).get("retry_after")
+                if getattr(e, "error_code", None) == 429 and retry_after:
+                    time.sleep(int(retry_after) + 1)
+                    continue
+                failed += 1  # blocked the bot, deleted account, left group...
+                break
+        else:
+            failed += 1
+
+        time.sleep(0.05)
+
+    return sent, failed
+
+
 def build_panel(t):
     """Returns (text, markup) for the admin panel's home screen."""
     return t['adm_title'], _panel_markup(t)
@@ -544,16 +605,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             bot.reply_to(message, t['not_owner'])
             return
 
-        stats = store.load_stats()
-        users = store.load_known_users()
-
-        lines = [f"👥 {t['stats_users']}: {len(users)}"]
-        downloads = stats.get("downloads", {})
-        if downloads:
-            for platform, count in sorted(downloads.items(), key=lambda kv: -kv[1]):
-                lines.append(f"  • {platform}: {count}")
-        lines.append(f"❌ {t['stats_errors']}: {stats.get('errors', 0)}")
-        bot.reply_to(message, "\n".join(lines))
+        bot.reply_to(message, _stats_text(t))
 
     @bot.message_handler(commands=["broadcast"])
     def broadcast(message):
@@ -567,15 +619,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             bot.reply_to(message, t['broadcast_usage'])
             return
 
-        sent, failed = 0, 0
-        for chat_id in store.load_known_users():
-            try:
-                bot.send_message(chat_id, text)
-                sent += 1
-            except Exception:
-                failed += 1
-            time.sleep(0.05)  # stay well under Telegram's rate limits on a large broadcast
-
+        sent, failed = _broadcast(bot, text)
         bot.reply_to(message, t['broadcast_done'].format(sent=sent, failed=failed))
 
     @bot.message_handler(commands=["ban", "unban"])
@@ -1117,13 +1161,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 markup,
             )
         elif data == 'adm_menu_stats':
-            stats = store.load_stats()
-            users = store.load_known_users()
-            lines = [f"👥 {t['stats_users']}: {len(users)}"]
-            for p, c in sorted(stats.get('downloads', {}).items(), key=lambda kv: -kv[1]):
-                lines.append(f"  • {p}: {c}")
-            lines.append(f"❌ {t['stats_errors']}: {stats.get('errors', 0)}")
-            edit("\n".join(lines), _back_markup('adm_menu_main', t))
+            edit_plain(_stats_text(t), _back_markup('adm_menu_main', t))
         elif data == "adm_menu_duck":
             reactions = (
                 store.load_duck_reactions()
@@ -1607,24 +1645,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 bot.reply_to(message, f"✅ معافیت {text} برداشته شد.")
 
         elif action == "broadcast":
-            sent = 0
-            failed = 0
-
-            for chat_id in (
-                store.load_known_users()
-            ):
-                try:
-                    bot.send_message(
-                        chat_id,
-                        text,
-                    )
-                    sent += 1
-                except Exception:
-                    failed += 1
-
-                time.sleep(
-                    0.05
-                )
+            sent, failed = _broadcast(bot, text)
 
             bot.reply_to(
                 message,
