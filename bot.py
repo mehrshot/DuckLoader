@@ -6,7 +6,7 @@ from supported platforms and brings them back to the user.
 
 Setup
 -----
-    pip install pyTelegramBotAPI yt-dlp yt-dlp-ejs spotipy python-dotenv mutagen
+    pip install -r requirements.txt
 
 ffmpeg must also be installed and on your PATH (needed to convert the
 YouTube audio matched for Spotify tracks, and for "audio only" quality, into
@@ -86,8 +86,15 @@ logger = logging.getLogger(__name__)
 platforms.cleanup_stray_downloads()
 platforms.check_dependencies()
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Downloads run inside the handler threads and can take minutes. With
+# pyTelegramBotAPI's default of 2 worker threads, two downloads in progress
+# left nobody to answer /start, buttons, or even the "queue is full"
+# message. Keep this comfortably above MAX_CONCURRENT_DOWNLOADS +
+# MAX_QUEUE_WAITING (see bot_features.py).
+WORKER_THREADS = int(os.environ.get("BOT_WORKER_THREADS", "24"))
+
+bot = telebot.TeleBot(BOT_TOKEN, num_threads=WORKER_THREADS)
 bot_features.register_features(bot)
 
 if __name__ == "__main__":
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=30, long_polling_timeout=25)

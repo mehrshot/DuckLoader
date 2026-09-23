@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import uuid
 
 CHANNELS_FILE = "sponsor_channels.json"
 AD_FILE = "ad_message.json"
@@ -19,20 +20,35 @@ logger = logging.getLogger(__name__)
 
 
 def _load(path, default):
-    if os.path.exists(path):
+    if not os.path.exists(path):
+        return default
+    try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    return default
+    except (OSError, ValueError):
+        logger.exception("Could not read %s; using defaults", path)
+        return default
 
 
 def _save(path, data) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=4,
-        )
+    # Write to a temp file and swap it in, so a crash mid-write can't leave
+    # a truncated sponsor list behind.
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=4,
+            )
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -307,10 +323,14 @@ def get_unjoined_channels(
                 status,
             )
 
+            # "restricted" users may or may not still be members.
             if status in {
                 "left",
                 "kicked",
-            }:
+            } or (
+                status == "restricted"
+                and not getattr(member, "is_member", True)
+            ):
                 unjoined.append(
                     channel
                 )

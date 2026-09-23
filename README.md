@@ -14,7 +14,9 @@ DuckLoader turns supported links into downloadable media inside Telegram. It com
 - SoundCloud
 - Spotify
 
-Instagram, TikTok, YouTube, and SoundCloud use `yt-dlp` for extraction. Spotify is handled through its Web API for track metadata, with matching audio located through SoundCloud first and YouTube as a fallback rather than downloading Spotify's protected streams.
+Instagram, TikTok, YouTube, and SoundCloud use `yt-dlp` for extraction. Instagram photo posts, photo carousels, photo/video stories and highlight share links (`instagram.com/s/...`) are also supported.
+
+Spotify is handled through its Web API for track metadata. The matching audio is searched on YouTube Music first (it carries the official label-supplied recordings), then YouTube, then SoundCloud. Every candidate is scored on title, artists and duration; covers, remixes, live/sped-up/instrumental versions and same-titled songs by other artists are rejected, and the downloaded file's real length is verified before it is sent. Spotify's protected streams are never touched. Protected (DRM / Go+ preview-only) SoundCloud tracks use the same matcher to find the song elsewhere.
 
 ### 🎬 Download quality
 
@@ -215,6 +217,8 @@ Install Deno:
 curl -fsSL https://deno.land/install.sh | sh
 ```
 
+`ytmusicapi` (in `requirements.txt`) is what makes Spotify matching accurate; the startup log warns if it is missing.
+
 ## 🔐 Configuration
 
 Create `.env` in the project root:
@@ -248,7 +252,16 @@ ROTATING_PROXIES=socks5://127.0.0.1:9050,socks5://127.0.0.1:9051
 | `INSTAGRAM_COOKIE_FILE` | No | Instagram cookie-file path |
 | `YTDLP_COOKIES_BROWSER` | No | Browser source for YouTube cookies |
 | `INSTAGRAM_COOKIES_BROWSER` | No | Browser source for Instagram cookies |
+| `INSTAGRAM_COOKIES_PROFILE` | No | Browser profile (name or path) for `INSTAGRAM_COOKIES_BROWSER` |
+| `TIKTOK_COOKIE_FILE` / `TIKTOK_COOKIES_BROWSER` | No | Logged-in TikTok cookies (age-restricted videos) |
 | `YTDLP_PLAYER_CLIENT` | No | Override YouTube player clients |
+| `BOT_WORKER_THREADS` | No | Telegram handler threads (default 24) |
+| `SPOTIFY_MAX_TRACKS` | No | Max tracks fetched from one album/playlist link (default 50) |
+| `MAX_PLAYLIST_ENTRIES` | No | Max items from one link, e.g. a highlight or SoundCloud set (default 30) |
+
+`INSTAGRAM_COOKIE_FILE` defaults to `instagram_cookies.txt` in the bot folder when it exists. If both a browser and a cookie file are configured, both are tried in turn. Cookie files are only ever read — the bot works on a temporary copy, so an Instagram hiccup can no longer wipe the saved session out of the file.
+
+When Instagram cookies stop working (expired session, logged-out responses), the owner receives a Telegram alert (at most once every 6 hours).
 
 ## 🍪 Cookies
 

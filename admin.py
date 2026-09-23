@@ -186,9 +186,9 @@ def _users_markup(t) -> InlineKeyboardMarkup:
     m.add(InlineKeyboardButton(t['adm_ban_btn'], callback_data='adm_ask_ban'))
     m.add(InlineKeyboardButton(t['adm_unban_btn'], callback_data='adm_ask_unban'))
     m.add(InlineKeyboardButton(t['adm_broadcast_btn'], callback_data='adm_ask_broadcast'))
-    m.add(InlineKeyboardButton(t['back'], callback_data='adm_menu_main'))
     m.add(InlineKeyboardButton(t['adm_exempt_btn'], callback_data='adm_ask_exempt'))
     m.add(InlineKeyboardButton(t['adm_unexempt_btn'], callback_data='adm_ask_unexempt'))
+    m.add(InlineKeyboardButton(t['back'], callback_data='adm_menu_main'))
     return m
 
 def _duck_markup(t) -> InlineKeyboardMarkup:
@@ -802,15 +802,25 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
         data = call.data
 
         def edit(text, markup):
-            bot.edit_message_text(text, chat_id_int, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+            try:
+                bot.edit_message_text(text, chat_id_int, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+            except Exception as e:
+                if "message is not modified" in str(e):
+                    return
+                # Fall back to plain text if Markdown can't be parsed.
+                edit_plain(text, markup)
 
         def edit_plain(text, markup):
-            bot.edit_message_text(
-                text,
-                chat_id_int,
-                call.message.message_id,
-                reply_markup=markup,
-            )
+            try:
+                bot.edit_message_text(
+                    text,
+                    chat_id_int,
+                    call.message.message_id,
+                    reply_markup=markup,
+                )
+            except Exception as e:
+                if "message is not modified" not in str(e):
+                    raise
 
         if data == 'adm_menu_main':
             edit(t['adm_title'], _panel_markup(t))
@@ -1120,9 +1130,11 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             )
 
             def reaction_status(event):
+                # load_duck_reactions() always has every key, so check
+                # whether the list is non-empty rather than key presence.
                 return (
                     "✅"
-                    if event in reactions
+                    if reactions.get(event)
                     else "❌"
                 )
 
@@ -1147,147 +1159,15 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 _duck_markup(t),
             )
 
-        elif data == "adm_menu_duck":
-            reactions = (
-                store.load_duck_reactions()
-            )
-
-            text = (
-                t["adm_duck_title"]
-                + "\n\n"
-                + f"{t['adm_duck_start']}: "
-                + str(
-                    len(
-                        reactions.get(
-                            "start",
-                            [],
-                        )
-                    )
-                )
-                + "\n"
-                + f"{t['adm_duck_downloading']}: "
-                + str(
-                    len(
-                        reactions.get(
-                            "downloading",
-                            [],
-                        )
-                    )
-                )
-                + "\n"
-                + f"{t['adm_duck_failed']}: "
-                + str(
-                    len(
-                        reactions.get(
-                            "failed",
-                            [],
-                        )
-                    )
-                )
-                + "\n"
-                + f"{t['adm_duck_complete']}: "
-                + str(
-                    len(
-                        reactions.get(
-                            "complete",
-                            [],
-                        )
-                    )
-                )
-            )
+        elif data == "adm_duck_clear_all":
+            # Must be checked before the startswith("adm_duck_clear_")
+            # branch below, which used to swallow it as an invalid "all"
+            # category — the Clear All button never worked.
+            store.clear_all_duck_reactions()
 
             edit_plain(
-                text,
+                t["adm_duck_all_cleared"],
                 _duck_markup(t),
-            )
-
-        elif data.startswith(
-            "adm_duck_category_"
-        ):
-            event = data.split(
-                "adm_duck_category_",
-                1,
-            )[1]
-
-            if event not in {
-                "start",
-                "downloading",
-                "failed",
-                "complete",
-            }:
-                bot.answer_callback_query(
-                    call.id,
-                    "Invalid category.",
-                    show_alert=True,
-                )
-                return
-
-            reactions = (
-                store.load_duck_reactions()
-            )
-
-            count = len(
-                reactions.get(
-                    event,
-                    [],
-                )
-            )
-
-            event_name = {
-                "start": t["adm_duck_start"],
-                "downloading": t["adm_duck_downloading"],
-                "failed": t["adm_duck_failed"],
-                "complete": t["adm_duck_complete"],
-            }[event]
-
-            text = (
-                f"🦆 {event_name}\n\n"
-                f"Configured reactions: {count}\n\n"
-                "Send one or more reactions by using "
-                "Add. You can repeat Add as many times as you want."
-            )
-
-            edit_plain(
-                text,
-                _duck_category_markup(
-                    event,
-                    t,
-                ),
-            )
-
-        elif data.startswith(
-            "adm_duck_add_"
-        ):
-            event = data.split(
-                "adm_duck_add_",
-                1,
-            )[1]
-
-            if event not in {
-                "start",
-                "downloading",
-                "failed",
-                "complete",
-            }:
-                bot.answer_callback_query(
-                    call.id,
-                    "Invalid category.",
-                    show_alert=True,
-                )
-                return
-
-            _pending_action[user_id] = (
-                f"duck_{event}"
-            )
-
-            bot.send_message(
-                chat_id_int,
-                t[
-                    f"adm_ask_duck_{event}"
-                ],
-                reply_markup=ForceReply(
-                    selective=True
-                ),
             )
 
         elif data.startswith(
@@ -1368,14 +1248,6 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 _duck_markup(t),
             )
 
-        elif data == "adm_duck_clear_all":
-            store.clear_all_duck_reactions()
-
-            edit_plain(
-                t["adm_duck_all_cleared"],
-                _duck_markup(t),
-            )
-            
         elif data == "adm_menu_errors":
 
             errors = (
@@ -1451,7 +1323,8 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
         elif data == 'adm_sponsors_list':
             channels = ads.load_sponsor_channels()
             text = "\n".join(f"• {c['username']} — {c['name']}" for c in channels) if channels else t['sponsors_empty']
-            edit(text, _back_markup('adm_menu_ads', t))
+            # Channel usernames often contain "_", which breaks Markdown.
+            edit_plain(text, _back_markup('adm_menu_ads', t))
         elif data.startswith("adm_duck_set_"):
             event = data.split(
                 "adm_duck_set_",
@@ -1485,29 +1358,6 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 ),
             )
 
-        elif data == "adm_duck_clear_all":
-            store.clear_all_duck_reactions()
-
-            reactions_text = (
-                t["adm_duck_title"]
-                + "\n\n"
-                + "❌ "
-                + t["adm_duck_start"]
-                + "\n"
-                + "❌ "
-                + t["adm_duck_downloading"]
-                + "\n"
-                + "❌ "
-                + t["adm_duck_failed"]
-                + "\n"
-                + "❌ "
-                + t["adm_duck_complete"]
-            )
-
-            edit_plain(
-                reactions_text,
-                _duck_markup(t),
-            )
         elif data.startswith('adm_lock_'):
             key = data.split('adm_lock_', 1)[1]
             flags[key] = not flags.get(key, True)

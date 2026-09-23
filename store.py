@@ -7,6 +7,7 @@ needed.
 """
 
 import json
+import logging
 import os
 import threading
 import time
@@ -55,39 +56,64 @@ DEFAULT_FLAGS = {
 }
 
 
+# Handlers run on several threads at once. Every read-modify-write of a
+# JSON file happens under this lock, and every write goes to a unique temp
+# file first — two threads used to share "<file>.tmp" and could replace
+# each other's half-written data.
+_io_lock = threading.RLock()
+
+
 def _load(path, default):
-    if os.path.exists(path):
+    if not os.path.exists(path):
+        return default
+    try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    return default
+    except (OSError, ValueError):
+        # A corrupted file must not take the whole bot down; keep a copy
+        # for inspection and start from the default.
+        logging.getLogger(__name__).exception("Could not read %s; using defaults", path)
+        try:
+            os.replace(path, f"{path}.corrupt-{int(time.time())}")
+        except OSError:
+            pass
+        return default
 
 
 def _save(path, data) -> None:
-    temp_path = f"{path}.tmp"
+    with _io_lock:
+        temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
 
-    with open(
-        temp_path,
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            separators=(
-                ",",
-                ":",
-            ),
-        )
-        f.flush()
-        os.fsync(
-            f.fileno()
-        )
+        try:
+            with open(
+                temp_path,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    data,
+                    f,
+                    ensure_ascii=False,
+                    separators=(
+                        ",",
+                        ":",
+                    ),
+                )
+                f.flush()
+                os.fsync(
+                    f.fileno()
+                )
 
-    os.replace(
-        temp_path,
-        path,
-    )
+            os.replace(
+                temp_path,
+                path,
+            )
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
 
 # --- feature flags (platform locks + bot-wide toggles) ---
@@ -139,12 +165,7 @@ def create_ad_request(
         request_id = None
 
         while request_id is None or request_id in requests:
-            request_id = (
-                __import__("uuid")
-                .uuid4()
-                .hex[:8]
-                .upper()
-            )
+            request_id = uuid.uuid4().hex[:8].upper()
 
         created_at = time.strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -373,7 +394,9 @@ def load_user_settings() -> dict:
 
 
 def save_user_settings(settings: dict) -> None:
-    _save(SETTINGS_FILE, settings)
+    # dict() is an atomic snapshot, so another thread adding a user while
+    # this one serializes can't raise "dictionary changed size".
+    _save(SETTINGS_FILE, dict(settings))
 
 
 def get_user(
@@ -432,11 +455,6 @@ def track_user(chat_id) -> None:
             USERS_FILE,
             _known_users_cache,
         )
-
-# --- bans ---
-
-def load_banned() -> list:
-    return _load(BANNED_FILE, [])
 
 # --- bans ---
 
@@ -524,13 +542,19 @@ def unban_user(user_id) -> bool:
 # --- usage stats ---
 
 def load_stats() -> dict:
-    return _load(STATS_FILE, {"downloads": {}, "errors": 0})
+    stats = _load(STATS_FILE, {})
+    if not isinstance(stats, dict):
+        stats = {}
+    stats.setdefault("downloads", {})
+    stats.setdefault("errors", 0)
+    return stats
 
 
 def record_download(platform: str) -> None:
-    stats = load_stats()
-    stats["downloads"][platform] = stats["downloads"].get(platform, 0) + 1
-    _save(STATS_FILE, stats)
+    with _io_lock:
+        stats = load_stats()
+        stats["downloads"][platform] = stats["downloads"].get(platform, 0) + 1
+        _save(STATS_FILE, stats)
 
 
 def record_error(
@@ -548,11 +572,12 @@ def record_error(
     """
 
     # Keep the existing global error counter.
-    stats = load_stats()
-    stats["errors"] = (
-        stats.get("errors", 0) + 1
-    )
-    _save(STATS_FILE, stats)
+    with _io_lock:
+        stats = load_stats()
+        stats["errors"] = (
+            stats.get("errors", 0) + 1
+        )
+        _save(STATS_FILE, stats)
 
     event = {
         "time": time.strftime(
@@ -710,24 +735,25 @@ def save_duck_reaction(
             f"Invalid duck reaction type: {media_type}"
         )
 
-    reactions = load_duck_reactions()
+    with _io_lock:
+        reactions = load_duck_reactions()
 
-    reactions.setdefault(
-        event,
-        [],
-    )
+        reactions.setdefault(
+            event,
+            [],
+        )
 
-    reactions[event].append(
-        {
-            "type": media_type,
-            "file_id": file_id,
-        }
-    )
+        reactions[event].append(
+            {
+                "type": media_type,
+                "file_id": file_id,
+            }
+        )
 
-    _save(
-        DUCK_REACTIONS_FILE,
-        reactions,
-    )
+        _save(
+            DUCK_REACTIONS_FILE,
+            reactions,
+        )
 
 
 def clear_duck_reaction(
@@ -740,14 +766,15 @@ def clear_duck_reaction(
     if event not in DUCK_REACTION_KEYS:
         return
 
-    reactions = load_duck_reactions()
+    with _io_lock:
+        reactions = load_duck_reactions()
 
-    reactions[event] = []
+        reactions[event] = []
 
-    _save(
-        DUCK_REACTIONS_FILE,
-        reactions,
-    )
+        _save(
+            DUCK_REACTIONS_FILE,
+            reactions,
+        )
 
 
 def clear_all_duck_reactions() -> None:
@@ -775,15 +802,17 @@ def is_exempt(user_id) -> bool:
     return int(user_id) in load_exempt_users()
 
 def add_exempt_user(user_id) -> None:
-    users = load_exempt_users()
-    if int(user_id) not in users:
-        users.append(int(user_id))
-        _save(EXEMPT_FILE, users)
+    with _io_lock:
+        users = load_exempt_users()
+        if int(user_id) not in users:
+            users.append(int(user_id))
+            _save(EXEMPT_FILE, users)
 
 def remove_exempt_user(user_id) -> bool:
-    users = load_exempt_users()
-    if int(user_id) in users:
-        users.remove(int(user_id))
-        _save(EXEMPT_FILE, users)
-        return True
-    return False
+    with _io_lock:
+        users = load_exempt_users()
+        if int(user_id) in users:
+            users.remove(int(user_id))
+            _save(EXEMPT_FILE, users)
+            return True
+        return False

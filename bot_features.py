@@ -4,9 +4,10 @@ import re
 import random
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 
+import requests
 from telebot.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -32,10 +33,34 @@ import store
 
 logger = logging.getLogger(__name__)
 
-thumb_cache = {}
-audio_source_cache = {}  # post_id -> original url, for the "get audio" button under video posts
-last_link_messages = {}
-caption_cache = {}
+BOT_SIGNATURE = "🦆 Downloaded with @DuckDownloader_Bot"
+
+# Telegram captions are limited to 1024 characters.
+MAX_CAPTION_LENGTH = 1000
+
+
+class _BoundedCache(OrderedDict):
+    """A dict that forgets its oldest entries past `max_items`, so the
+    per-post button caches can't grow for as long as the bot stays up."""
+
+    def __init__(self, max_items=5000):
+        super().__init__()
+        self._max_items = max_items
+        self._lock = threading.Lock()
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            if key in self:
+                self.move_to_end(key)
+            super().__setitem__(key, value)
+            while len(self) > self._max_items:
+                self.popitem(last=False)
+
+
+thumb_cache = _BoundedCache()
+audio_source_cache = _BoundedCache()  # post_id -> original url, for the "get audio" button under video posts
+last_link_messages = _BoundedCache()
+caption_cache = _BoundedCache()
 
 user_settings = store.load_user_settings()
 
@@ -155,6 +180,27 @@ TEXTS = {
         ),
         'soundcloud_failed': "❌ دریافت این ترک ساندکلاد در حال حاضر انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
         'spotify_failed': "❌ دریافت این ترک اسپاتیفای در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
+        'ig_private': "🔒 این پست متعلق به یک پیج خصوصیه و ربات به اون دسترسی نداره.",
+        'ig_restricted': "🔞 اینستاگرام این محتوا رو برای همه نمایش نمی‌ده (محدودیت سنی یا منطقه‌ای) و فعلاً قابل دریافت نیست.",
+        'ig_expired': "⌛️ این استوری یا هایلایت دیگه در دسترس نیست؛ ممکنه منقضی یا حذف شده باشه، یا پیجش خصوصی باشه.",
+        'ig_story_login': "❌ این استوری در حال حاضر برای ربات قابل دسترسی نیست. ممکنه پیج خصوصی باشه یا استوری منقضی شده باشه.",
+        'ig_login': "⚠️ اینستاگرام موقتاً اجازه‌ی دسترسی به این محتوا رو نمی‌ده. لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن.",
+        'ig_rate_limited': "🚦 اینستاگرام موقتاً تعداد درخواست‌ها رو محدود کرده. لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن.",
+        'ig_profile': "ℹ️ این لینک یه پروفایل اینستاگرامه. لطفاً لینک یک پست، ریلز، استوری یا هایلایت رو بفرست.",
+        'ig_audio': "ℹ️ صفحه‌ی «Audio» اینستاگرام قابل دانلود نیست. لینک خود ریلز رو بفرست و بعد از دانلود، دکمه‌ی «🎵 دریافت صدا» رو بزن.",
+        'ig_unsupported': "ℹ️ این نوع لینک اینستاگرام پشتیبانی نمی‌شه. لطفاً لینک یک پست، ریلز، استوری یا هایلایت رو بفرست.",
+        'not_found': "❌ این محتوا پیدا نشد؛ ممکنه حذف شده یا خصوصی باشه.",
+        'tiktok_blocked': "🌍 تیک‌تاک دسترسی به این ویدیو رو از منطقه‌ی سرور ربات بسته و فعلاً قابل دریافت نیست.",
+        'tiktok_login': "🔞 تیک‌تاک این ویدیو رو فقط برای کاربران واردشده نمایش می‌ده (محدودیت سنی) و فعلاً قابل دریافت نیست.",
+        'tiktok_photo_audio': "ℹ️ این پست تیک‌تاک عکسیه و صدای جداگانه‌ای برای دانلود نداره.",
+        'drm': "🔒 این ترک توسط ناشرش محافظت شده و نسخه‌ی جایگزینی هم ازش پیدا نشد.",
+        'yt_private': "🔒 این ویدیوی یوتیوب خصوصی یا مخصوص اعضای کاناله.",
+        'yt_age': "🔞 این ویدیوی یوتیوب محدودیت سنی داره و فعلاً قابل دریافت نیست.",
+        'spotify_unsupported': "ℹ️ فقط لینک ترک، آلبوم یا پلی‌لیست اسپاتیفای پشتیبانی می‌شه.",
+        'spotify_direct': "ℹ️ فقط لینک ترک، آلبوم یا پلی‌لیست اسپاتیفای پشتیبانی می‌شه.",
+        'spotify_not_found': "❌ این لینک اسپاتیفای پیدا نشد یا خصوصیه (پلی‌لیست‌های شخصی‌سازی‌شده‌ی خود اسپاتیفای قابل دسترسی نیستن).",
+        'spotify_partial': "⚠️ {failed} ترک از {total} ترک پیدا نشد:\n{names}",
+        'quality_audio': "🎵 فقط صدا",
         'not_launched': "🚧 دانلود از {platform} هنوز لانچ نشده. به‌زودی فعال می‌شود!",
         'too_large': "⚠️ حجم این فایل حدود {size} است و از سقف مجاز بیشتره، پس امکان ارسالش نیست.\n\nمی‌تونی از /settings کیفیت پایین‌تر یا «فقط صدا» رو انتخاب کنی.",
         'quality_reduced': "ℹ️ به‌خاطر محدودیت حجم تلگرام، کیفیت به‌صورت خودکار به «{quality}» کاهش یافت.",
@@ -277,10 +323,6 @@ TEXTS = {
         'ad_channel_prompt': "📣 لطفاً آیدی، یوزرنیم یا لینک کانالی که می‌خواهید تبلیغ کنید رو ارسال کنید:",
         'ad_display_name_prompt': "🏷 نام نمایشی موردنظرتان برای تبلیغ رو وارد کنید:",
         'ad_type_prompt': "📌 نوع تبلیغ رو انتخاب کنید:",
-        'ad_type_sponsor_channel':
-            "📢 کانال اسپانسر — کاربر برای استفاده از ربات باید عضو کانال شما باشد",
-        'ad_type_post_download':
-            "📣 تبلیغ بعد از هر دانلود — تبلیغ شما بعد از محتوای دانلودشده نمایش داده می‌شود",
         'ad_summary_title': "📋 خلاصه درخواست تبلیغات",
         'ad_summary_channel': "📣 کانال",
         'ad_summary_display_name': "🏷 نام نمایشی",
@@ -414,6 +456,27 @@ TEXTS = {
         ),
         'soundcloud_failed': "❌ We couldn't download this SoundCloud track right now. Please check the link and try again.",
         'spotify_failed': "❌ We couldn't download this Spotify track right now. Please try again in a moment.",
+        'ig_private': "🔒 This post belongs to a private account, so the bot can't access it.",
+        'ig_restricted': "🔞 Instagram doesn't show this content to everyone (age or region restriction), so it can't be downloaded right now.",
+        'ig_expired': "⌛️ This story or highlight is no longer available. It may have expired or been deleted, or the account may be private.",
+        'ig_story_login': "❌ This Instagram story isn't currently accessible to the bot. The account may be private or the story may have expired.",
+        'ig_login': "⚠️ Instagram is temporarily not allowing access to this content. Please try again in a few minutes.",
+        'ig_rate_limited': "🚦 Instagram is temporarily limiting requests. Please try again in a few minutes.",
+        'ig_profile': "ℹ️ That's an Instagram profile link. Please send the link of a post, Reel, story or highlight.",
+        'ig_audio': "ℹ️ Instagram \"Audio\" pages can't be downloaded. Send the Reel's link instead, then tap \"🎵 Get Audio\" under the video.",
+        'ig_unsupported': "ℹ️ This kind of Instagram link isn't supported. Please send the link of a post, Reel, story or highlight.",
+        'not_found': "❌ This content couldn't be found — it may have been deleted or made private.",
+        'tiktok_blocked': "🌍 TikTok blocks this video in the bot server's region, so it can't be downloaded right now.",
+        'tiktok_login': "🔞 TikTok only shows this video to logged-in users (age restriction), so it can't be downloaded right now.",
+        'tiktok_photo_audio': "ℹ️ This TikTok post is a photo slideshow and has no separate audio to download.",
+        'drm': "🔒 This track is protected by its publisher and no alternative copy could be found.",
+        'yt_private': "🔒 This YouTube video is private or members-only.",
+        'yt_age': "🔞 This YouTube video is age-restricted and can't be downloaded right now.",
+        'spotify_unsupported': "ℹ️ Only Spotify track, album and playlist links are supported.",
+        'spotify_direct': "ℹ️ Only Spotify track, album and playlist links are supported.",
+        'spotify_not_found': "❌ This Spotify link wasn't found or is private (Spotify's own personalised playlists can't be accessed).",
+        'spotify_partial': "⚠️ {failed} of {total} tracks couldn't be found:\n{names}",
+        'quality_audio': "🎵 Audio only",
         'not_launched': "🚧 Downloading from {platform} hasn't launched yet. Stay tuned!",
         'too_large': "⚠️ This file is about {size}, over the allowed limit, so it can't be sent.\n\nYou can pick a lower quality or \"audio only\" in /settings.",
         'quality_reduced': "ℹ️ Quality was automatically reduced to \"{quality}\" to stay under Telegram's size limit.",
@@ -535,10 +598,6 @@ TEXTS = {
         'ad_channel_prompt': "📣 Send the channel ID, username, or link you want to advertise:",
         'ad_display_name_prompt': "🏷 Enter the display name you want for the advertisement:",
         'ad_type_prompt': "📌 Choose the advertisement type:",
-        'ad_type_sponsor_channel':
-            "📢 Sponsor Channel — users must join your channel before downloading",
-        'ad_type_post_download':
-            "📣 Post-Download Ad — your advertisement is shown after every download",
         'ad_summary_title': "📋 Advertisement Request Summary",
         'ad_summary_channel': "📣 Channel",
         'ad_summary_display_name': "🏷 Display Name",
@@ -651,40 +710,21 @@ TEXTS = {
     }
 }
 
-def _ad_lang_button(request):
-    lang = request.get("form_lang", "fa")
-
-    if lang == "fa":
-        return InlineKeyboardButton(
-            "🇺🇸 English",
-            callback_data="ad_lang_en",
-        )
-
-    return InlineKeyboardButton(
-        "🇮🇷 فارسی",
-        callback_data="ad_lang_fa",
-    )
-
-def _ad_texts(request):
-    return TEXTS.get(
-        request.get("form_lang", "fa"),
-        TEXTS["fa"],
-    )
-
 def _texts_for(chat_id) -> dict:
     user = store.get_user(user_settings, chat_id)
-    return TEXTS[user['lang']]
+    return TEXTS.get(user.get('lang'), TEXTS[store.DEFAULT_LANGUAGE])
 
-def _ad_texts(request) -> dict:
-    lang = request.get(
-        "form_lang",
-        "fa",
-    )
 
-    return TEXTS.get(
-        lang,
-        TEXTS["fa"],
-    )
+def _quality_label(t: dict, quality: str) -> str:
+    labels = {
+        "best": t["instagram_quality_best"],
+        "1080p": t["instagram_quality_1080"],
+        "720p": t["instagram_quality_720"],
+        "480p": t["instagram_quality_480"],
+        "360p": t["instagram_quality_360"],
+        "audio": t["quality_audio"],
+    }
+    return labels.get(quality, quality)
 
 def _build_caption(
     entry: dict,
@@ -1000,15 +1040,7 @@ def _build_caption(
     description = (
         entry.get("description")
         or ""
-    )
-
-    max_length = 750
-
-    if len(description) > max_length:
-        description = (
-            description[:max_length]
-            + "..."
-        )
+    ).strip()
 
     # ---------------------------------------------------------------
     # Final caption
@@ -1029,17 +1061,24 @@ def _build_caption(
             stats_line
         )
 
+    header = "\n".join(lines)
+    footer = f"\n\n{BOT_SIGNATURE}"
+
     if description:
-        lines.append(
-            f"\n📝 {description}"
-        )
+        # Telegram counts caption length in UTF-16 units (emoji count
+        # twice), so leave the description whatever room is actually left.
+        def _utf16_len(text):
+            return len(text.encode("utf-16-le")) // 2
 
-    # KEEP YOUR CHOSEN BOT USERNAME.
-    lines.append(
-        "\n🦆 Downloaded with @DuckDownloader_Bot"
-    )
+        room = MAX_CAPTION_LENGTH - _utf16_len(header) - _utf16_len(footer) - 8
+        if room > 20:
+            if _utf16_len(description) > room:
+                while description and _utf16_len(description) > room - 3:
+                    description = description[:-10]
+                description = description.rstrip() + "..."
+            header += f"\n\n📝 {description}"
 
-    return "\n".join(lines)
+    return header + footer
 
 def _friendly_download_error(
     platform: str,
@@ -1053,51 +1092,16 @@ def _friendly_download_error(
     Never expose yt-dlp's raw exception text to the user.
     """
 
-    error_text = str(error).lower()
+    key = platforms.classify_error(
+        platform,
+        error,
+    )
 
-    if platform == "instagram":
-
-        if (
-            "login" in error_text
-            or "cookies" in error_text
-            or "authentication" in error_text
-            or "unreachable" in error_text
-        ):
-            return t[
-                "instagram_unavailable"
-            ]
-
-        return t[
-            "instagram_failed"
-        ]
-
-    if platform == "youtube":
-
-        return t[
-            "youtube_failed"
-        ]
-
-    if platform == "tiktok":
-
-        return t[
-            "tiktok_failed"
-        ]
-
-    if platform == "soundcloud":
-
-        return t[
-            "soundcloud_failed"
-        ]
-
-    if platform == "spotify":
-
-        return t[
-            "spotify_failed"
-        ]
-
-    return t[
-        "download_failed"
-    ]
+    return (
+        t.get(key)
+        or t.get(f"{platform}_failed")
+        or t["download_failed"]
+    )
 
 def _start_language_markup() -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(
@@ -1690,6 +1694,30 @@ def register_features(bot):
 
     admin.register_admin(bot, flags, _texts_for, _my_settings_view)
 
+    def _alert_owner_auth_problem(platform_name, detail):
+        owner_id = int(os.environ.get("OWNER_ID", "0") or "0")
+
+        if not owner_id:
+            return
+
+        name = platforms.PLATFORM_NAMES.get(platform_name, platform_name)
+
+        try:
+            bot.send_message(
+                owner_id,
+                (
+                    f"⚠️ کوکی‌های ورود {name} ربات منقضی یا نامعتبر به نظر می‌رسن. "
+                    "تا وقتی تازه نشن، استوری‌ها و محتوای خصوصی/محدود دانلود نمی‌شن.\n\n"
+                    f"⚠️ The bot's {name} login cookies look expired or invalid. "
+                    "Stories and private/restricted content will keep failing until they are refreshed.\n\n"
+                    f"{str(detail)[:500]}"
+                ),
+            )
+        except Exception:
+            logger.exception("Could not send the auth alert to the owner")
+
+    platforms.set_auth_alert_handler(_alert_owner_auth_problem)
+
     def _delete_duck_message(
         message_map,
         chat_id_int,
@@ -2177,14 +2205,52 @@ def register_features(bot):
         includes a video and the user didn't already request audio-only.
         Shared by the direct-download flow and the 'get audio' button."""
 
+        try:
+            _deliver_download_result(
+                chat_id_int,
+                reply_to_id,
+                url,
+                platform,
+                quality_requested,
+                quality_used,
+                info,
+                entries,
+                files,
+                t,
+                show_ui=show_ui,
+            )
+        finally:
+            platforms.remove_download_files(files)
+
+    def _deliver_download_result(
+        chat_id_int,
+        reply_to_id,
+        url,
+        platform,
+        quality_requested,
+        quality_used,
+        info,
+        entries,
+        files,
+        t,
+        show_ui=True,
+    ):
+        # Only a real step down the quality ladder (auto_quality_fallback)
+        # is worth a notice. This used to look up t['quality_best'], a key
+        # that never existed — it crashed every Instagram "Get Audio" tap
+        # after the file had already been downloaded.
         if (
-            quality_used != quality_requested
-            and platform != "soundcloud"
+            show_ui
+            and quality_used != quality_requested
+            and quality_requested in platforms.QUALITY_LADDER
+            and quality_used in platforms.QUALITY_LADDER
+            and platforms.QUALITY_LADDER.index(quality_used)
+            > platforms.QUALITY_LADDER.index(quality_requested)
         ):
             bot.send_message(
                 chat_id_int,
                 t['quality_reduced'].format(
-                    quality=t[f'quality_{quality_used}']
+                    quality=_quality_label(t, quality_used)
                 )
             )
 
@@ -2216,17 +2282,23 @@ def register_features(bot):
         if show_ui:
             caption = full_caption
         else:
-            caption = (
-                "🦆 Downloaded with @DuckDownloader_Bot"
-            )
+            caption = BOT_SIGNATURE
 
         thumb_url = (
             metadata_source.get("thumbnail")
         )
-        post_id = metadata_source.get('id', str(time.time()))
+        post_id = str(
+            metadata_source.get('id')
+            or int(time.time() * 1000)
+        )[:48]  # callback_data is limited to 64 bytes
         if thumb_url:
             thumb_cache[post_id] = thumb_url
 
+        # entries[i] describes files[i] (e.g. each track of a SoundCloud set).
+        file_metadata = {
+            filepath: (entries[index] if index < len(entries or []) else None)
+            for index, filepath in enumerate(files)
+        }
         valid_files = [f for f in files if os.path.exists(f)]
         any_video = any(platforms.media_kind(f) == 'video' for f in valid_files)
         offer_audio_button = any_video and quality_requested != 'audio'
@@ -2331,101 +2403,119 @@ def register_features(bot):
                     else 'upload_photo',
                 )
 
-            try:
-                with open(filepath, "rb") as media_file:
-                    if kind == "video":
-                        video_info = metadata_source or {}
+            with open(filepath, "rb") as media_file:
+                if kind == "video":
+                    video_info = metadata_source or {}
 
-                        video_width = video_info.get("width")
-                        video_height = video_info.get("height")
-                        video_duration = video_info.get("duration")
+                    video_width = video_info.get("width")
+                    video_height = video_info.get("height")
+                    video_duration = video_info.get("duration")
 
-                        # yt-dlp can sometimes return floats for duration.
-                        if video_duration is not None:
-                            try:
-                                video_duration = int(round(float(video_duration)))
-                            except (TypeError, ValueError):
-                                video_duration = None
+                    # yt-dlp can sometimes return floats for duration.
+                    if video_duration is not None:
+                        try:
+                            video_duration = int(round(float(video_duration)))
+                        except (TypeError, ValueError):
+                            video_duration = None
 
-                        if video_width is not None:
-                            try:
-                                video_width = int(video_width)
-                            except (TypeError, ValueError):
-                                video_width = None
+                    if video_width is not None:
+                        try:
+                            video_width = int(video_width)
+                        except (TypeError, ValueError):
+                            video_width = None
 
-                        if video_height is not None:
-                            try:
-                                video_height = int(video_height)
-                            except (TypeError, ValueError):
-                                video_height = None
+                    if video_height is not None:
+                        try:
+                            video_height = int(video_height)
+                        except (TypeError, ValueError):
+                            video_height = None
 
-                        sent_message = bot.send_video(
-                            chat_id_int,
-                            media_file,
-                            caption=caption,
-                            reply_markup=markup,
-                            reply_to_message_id=reply_to_id,
+                    sent_message = bot.send_video(
+                        chat_id_int,
+                        media_file,
+                        caption=caption,
+                        reply_markup=markup,
+                        reply_to_message_id=reply_to_id,
 
-                            # Tell Telegram that this is a normal streamable MPEG-4 video.
-                            supports_streaming=True,
+                        # Tell Telegram that this is a normal streamable MPEG-4 video.
+                        supports_streaming=True,
 
-                            # Explicit video metadata.
-                            width=video_width,
-                            height=video_height,
-                            duration=video_duration,
+                        # Explicit video metadata.
+                        width=video_width,
+                        height=video_height,
+                        duration=video_duration,
 
-                            timeout=600,
+                        timeout=600,
+                    )
+                    if not show_ui:
+                        caption_cache[post_id] = {
+                            "chat_id": chat_id_int,
+                            "message_id": sent_message.message_id,
+                            "caption": full_caption,
+                            "visible": False,
+                        }
+                elif kind == "audio":
+                    audio_duration = metadata_source.get("duration") or 0
+
+                    try:
+                        audio_duration = int(float(audio_duration))
+                    except (TypeError, ValueError):
+                        audio_duration = 0
+
+                    audio_title = (
+                        metadata_source.get("track")
+                        or metadata_source.get("title")
+                        or ""
+                    )
+
+                    audio_performer = (
+                        metadata_source.get("artist")
+                        or metadata_source.get("uploader")
+                        or metadata_source.get("channel")
+                        or ""
+                    )
+
+                    # Telegram ignores a thumbnail given as a URL; it
+                    # has to be uploaded as a small JPEG file.
+                    thumb_path = platforms.make_thumbnail(thumb_url)
+
+                    try:
+                        thumb_file = (
+                            open(thumb_path, "rb")
+                            if thumb_path
+                            else None
                         )
-                        if not show_ui:
-                            caption_cache[post_id] = {
-                                "chat_id": chat_id_int,
-                                "message_id": sent_message.message_id,
-                                "caption": full_caption,
-                                "visible": False,
-                            }
-                    elif kind == "audio":
-                        audio_duration = metadata_source.get("duration") or 0
 
                         try:
-                            audio_duration = int(float(audio_duration))
-                        except (TypeError, ValueError):
-                            audio_duration = 0
+                            bot.send_audio(
+                                chat_id_int,
+                                media_file,
 
-                        audio_title = (
-                            metadata_source.get("track")
-                            or metadata_source.get("title")
-                            or ""
-                        )
+                                # Telegram audio metadata
+                                duration=audio_duration,
+                                title=audio_title,
+                                performer=audio_performer,
+                                thumbnail=thumb_file,
 
-                        audio_performer = (
-                            metadata_source.get("artist")
-                            or metadata_source.get("uploader")
-                            or metadata_source.get("channel")
-                            or ""
-                        )
-
-                        bot.send_audio(
-                            chat_id_int,
-                            media_file,
-
-                            # Telegram audio metadata
-                            duration=audio_duration,
-                            title=audio_title,
-                            performer=audio_performer,
-
-                            # YouTube thumbnail as Telegram's audio cover.
-                            thumbnail=thumb_url if thumb_url else None,
-
-                            caption=caption,
-                            reply_markup=markup,
-                            reply_to_message_id=reply_to_id,
-                            timeout=600,
-                        )
-                    else:
+                                caption=caption,
+                                reply_markup=markup,
+                                reply_to_message_id=reply_to_id,
+                                timeout=600,
+                            )
+                        finally:
+                            if thumb_file:
+                                thumb_file.close()
+                    finally:
+                        platforms.remove_download_files([thumb_path])
+                else:
+                    try:
                         bot.send_photo(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id)
-            finally:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
+                    except Exception:
+                        # Very large or unusually shaped images are
+                        # refused as photos but still work as files.
+                        logger.warning("send_photo failed; sending as document | %s", filepath, exc_info=True)
+                        media_file.seek(0)
+                        bot.send_document(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
 
         elif len(valid_files) > 1:
             chunks = [valid_files[idx:idx + 10] for idx in range(0, len(valid_files), 10)]
@@ -2437,15 +2527,24 @@ def register_features(bot):
                 try:
                     for item_idx, filepath in enumerate(chunk):
                         kind = platforms.media_kind(filepath)
+                        entry_meta = file_metadata.get(filepath) or metadata_source
+
+                        if kind == "audio":
+                            platforms.tag_audio_file(
+                                filepath,
+                                title=entry_meta.get('track') or entry_meta.get('title') or '',
+                                artist=entry_meta.get('artist') or entry_meta.get('uploader') or entry_meta.get('channel') or '',
+                                cover_url=entry_meta.get('thumbnail'),
+                            )
+
                         f = open(filepath, "rb")
                         open_files.append(f)
 
                         item_caption = caption if chunk_idx == 0 and item_idx == 0 else ""
 
                         if kind == "video":
-                            media_group.append(InputMediaVideo(f, caption=item_caption))
+                            media_group.append(InputMediaVideo(f, caption=item_caption, supports_streaming=True))
                         elif kind == "audio":
-                            platforms.tag_audio_file(filepath, title=metadata_source.get('title', ''), artist=metadata_source.get('uploader') or metadata_source.get('channel', ''), cover_url=thumb_url)
                             media_group.append(InputMediaAudio(f, caption=item_caption))
                         else:
                             media_group.append(InputMediaPhoto(f, caption=item_caption))
@@ -2455,10 +2554,6 @@ def register_features(bot):
                 finally:
                     for f in open_files:
                         f.close()
-
-            for filepath in valid_files:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
 
         store.record_download(platform)
 
@@ -2506,6 +2601,8 @@ def register_features(bot):
             or "unknown"
         )
 
+        files = []
+
         try:
 
             allow_fallback = flags.get(
@@ -2525,11 +2622,14 @@ def register_features(bot):
                 progress_hook=progress_hook,
             )
             if show_ui and status_msg is not None:
-                bot.edit_message_text(
-                    t["uploading"],
-                    chat_id_int,
-                    status_msg.message_id,
-                )
+                try:
+                    bot.edit_message_text(
+                        t["uploading"],
+                        chat_id_int,
+                        status_msg.message_id,
+                    )
+                except Exception:
+                    pass
 
             _send_download_result(
                 chat_id_int,
@@ -2593,18 +2693,27 @@ def register_features(bot):
                     show_ui=show_ui,
                 )
 
-            store.record_error(
-                platform=platform,
-                url=url,
-                user_id=chat_id_int,
-                error=str(e),
-            )
+            if isinstance(e, platforms.UnsupportedLinkError):
+                # The user sent a profile/audio page etc. — not a bot error.
+                logger.info(
+                    "Unsupported link | platform=%s | kind=%s | url=%s",
+                    platform,
+                    e.kind,
+                    url,
+                )
+            else:
+                store.record_error(
+                    platform=platform,
+                    url=url,
+                    user_id=chat_id_int,
+                    error=str(e),
+                )
 
-            logger.exception(
-                "Download failed | platform=%s | url=%s",
-                platform,
-                url,
-            )
+                logger.exception(
+                    "Download failed | platform=%s | url=%s",
+                    platform,
+                    url,
+                )
 
             try:
                 bot.edit_message_text(
@@ -2620,6 +2729,7 @@ def register_features(bot):
                 pass
 
         finally:
+            platforms.remove_download_files(files)
 
             _download_semaphore.release()
 
@@ -2670,11 +2780,14 @@ def register_features(bot):
             )
 
             if show_ui and status_msg is not None:
-                bot.edit_message_text(
-                    t["youtube_failed"],
-                    chat_id_int,
-                    status_msg.message_id,
-                )
+                try:
+                    bot.edit_message_text(
+                        _friendly_download_error("youtube", e, t),
+                        chat_id_int,
+                        status_msg.message_id,
+                    )
+                except Exception:
+                    pass
 
             return
 
@@ -2782,19 +2895,27 @@ def register_features(bot):
             )
         )
 
+        sent_with_thumbnail = False
+
         if probe.get("thumbnail"):
+            try:
+                bot.send_photo(
+                    chat_id_int,
+                    probe["thumbnail"],
+                    caption=caption,
+                    reply_markup=markup,
+                    reply_to_message_id=(
+                        message.message_id
+                    ),
+                )
+                sent_with_thumbnail = True
+            except Exception:
+                logger.warning(
+                    "Could not send YouTube thumbnail; sending the picker as text | %s",
+                    probe.get("thumbnail"),
+                )
 
-            bot.send_photo(
-                chat_id_int,
-                probe["thumbnail"],
-                caption=caption,
-                reply_markup=markup,
-                reply_to_message_id=(
-                    message.message_id
-                ),
-            )
-
-        else:
+        if not sent_with_thumbnail:
 
             bot.send_message(
                 chat_id_int,
@@ -2943,71 +3064,6 @@ def register_features(bot):
             parse_mode="Markdown",
         )
 
-    @bot.callback_query_handler(
-        func=lambda call:
-            call.data in {
-                "ad_lang_en",
-                "ad_lang_fa",
-            }
-    )
-    def handle_ad_language_callback(
-        call
-    ):
-        chat_id_int = (
-            call.message.chat.id
-        )
-
-        user_id = (
-            call.from_user.id
-        )
-
-        request = (
-            store.get_user_ad_request(
-                user_id,
-                "draft",
-            )
-        )
-
-        if not request:
-            bot.answer_callback_query(
-                call.id,
-                "درخواست پیدا نشد.",
-                show_alert=True,
-            )
-            return
-
-        new_lang = (
-            "en"
-            if call.data == "ad_lang_en"
-            else "fa"
-        )
-
-        updated = (
-            store.update_ad_request(
-                request["request_id"],
-                form_lang=new_lang,
-            )
-        )
-
-        bot.answer_callback_query(
-            call.id
-        )
-
-        if updated:
-            try:
-                bot.edit_message_reply_markup(
-                    chat_id_int,
-                    call.message.message_id,
-                    reply_markup=None,
-                )
-            except Exception:
-                pass
-
-            _send_ad_prompt(
-                chat_id_int,
-                updated,
-                _ad_texts(updated),
-            )
 
     @bot.callback_query_handler(
         func=lambda call:
@@ -4116,7 +4172,7 @@ def register_features(bot):
 
         bot.send_message(
             chat_id_int,
-            t["ad_submitted"],
+            ad_t["submitted"],
             reply_markup=_main_reply_markup(),
         )
 
@@ -4155,15 +4211,13 @@ def register_features(bot):
             message.text
         )
 
-        if (
-            "tiktok.com" in url.lower()
-        ):
+        if not url:
+            return
+
+        if "tiktok.com" in url.lower():
             url = platforms.resolve_tiktok_url(
                 url
             )
-
-        if not url:
-            return
 
         if show_ui:
             _delete_previous_download_ducks(
@@ -4222,36 +4276,111 @@ def register_features(bot):
 
             try:
                 tracks = platforms.resolve_spotify_tracks(url)
-                for i, track in enumerate(tracks):
-                    if show_ui and len(tracks) > 1:
-                        bot.edit_message_text(
-                            t['spotify_searching'].format(
-                                i=i + 1,
-                                total=len(tracks),
-                                name=f"{track['artists']} - {track['name']}",
-                            ),
-                            chat_id_int,
-                            status_msg.message_id,
-                        )
-                    filepath = platforms.download_spotify_track(track, progress_hook)
-                    try:
-                        bot.send_chat_action(chat_id_int, 'upload_audio')
-                        caption = (
-                            f"💿 {track['album']}\n\n"
-                            f"🦆 @DuckLoaderBot"
-                            if i == 0
-                            else ""
-                        )
-                        with open(filepath, "rb") as audio_file:
-                            bot.send_audio(
-                                chat_id_int, audio_file,
-                                title=track['name'], performer=track['artists'],
-                                caption=caption, reply_to_message_id=message.message_id, timeout=600,
+                if not tracks:
+                    raise Exception("Spotify returned no playable tracks for this link.")
+
+                failed_tracks = []
+                last_track_error = None
+                sent_count = 0
+                cover_thumb = None
+
+                try:
+                    for i, track in enumerate(tracks):
+                        track_label = f"{track['artists']} - {track['name']}"
+
+                        if show_ui and status_msg is not None and len(tracks) > 1:
+                            try:
+                                bot.edit_message_text(
+                                    t['spotify_searching'].format(
+                                        i=i + 1,
+                                        total=len(tracks),
+                                        name=track_label,
+                                    ),
+                                    chat_id_int,
+                                    status_msg.message_id,
+                                )
+                            except Exception:
+                                pass
+
+                        # One track that can't be found must not abort the
+                        # rest of an album or playlist.
+                        try:
+                            filepath = platforms.download_spotify_track(track, progress_hook)
+                        except platforms.FileTooLargeError:
+                            raise
+                        except Exception as track_error:
+                            last_track_error = track_error
+                            failed_tracks.append(track_label)
+                            logger.warning(
+                                "Spotify track failed | %s | %s",
+                                track_label,
+                                str(track_error)[:300],
                             )
-                    finally:
-                        if os.path.exists(filepath):
-                            os.remove(filepath)
-                    store.record_download("spotify")
+                            continue
+
+                        try:
+                            if show_ui:
+                                bot.send_chat_action(chat_id_int, 'upload_audio')
+
+                            if cover_thumb is None:
+                                cover_thumb = platforms.make_thumbnail(track.get('cover_url')) or ""
+
+                            caption = (
+                                f"💿 {track['album']}\n\n{BOT_SIGNATURE}"
+                                if sent_count == 0 and track.get('album')
+                                else ""
+                            )
+                            audio_duration = int((track.get('duration_ms') or 0) / 1000) or None
+
+                            with open(filepath, "rb") as audio_file:
+                                thumb_file = open(cover_thumb, "rb") if cover_thumb else None
+                                try:
+                                    bot.send_audio(
+                                        chat_id_int, audio_file,
+                                        title=track['name'], performer=track['artists'],
+                                        duration=audio_duration,
+                                        thumbnail=thumb_file,
+                                        caption=caption, reply_to_message_id=message.message_id, timeout=600,
+                                    )
+                                finally:
+                                    if thumb_file:
+                                        thumb_file.close()
+                        finally:
+                            platforms.remove_download_files([filepath])
+
+                        sent_count += 1
+                        store.record_download("spotify")
+                finally:
+                    if cover_thumb:
+                        platforms.remove_download_files([cover_thumb])
+
+                if sent_count == 0:
+                    raise last_track_error or Exception("No Spotify track could be matched.")
+
+                if failed_tracks:
+                    store.record_error(
+                        platform="spotify",
+                        url=url,
+                        user_id=message.from_user.id,
+                        error=(
+                            f"{len(failed_tracks)}/{len(tracks)} tracks not found: "
+                            + "; ".join(failed_tracks)[:1500]
+                            + f" | last error: {last_track_error}"
+                        ),
+                    )
+                    if show_ui:
+                        names = "\n".join(f"• {name}" for name in failed_tracks[:20])
+                        try:
+                            bot.send_message(
+                                chat_id_int,
+                                t['spotify_partial'].format(
+                                    failed=len(failed_tracks),
+                                    total=len(tracks),
+                                    names=names,
+                                ),
+                            )
+                        except Exception:
+                            pass
 
                 if show_ui and status_msg is not None:
                     try:
@@ -4278,21 +4407,27 @@ def register_features(bot):
                     show_ui=show_ui,
                 )
 
-                store.record_error(
-                    platform="spotify",
-                    url=url,
-                    user_id=message.from_user.id,
-                    error=str(e),
-                )
+                if not isinstance(e, platforms.UnsupportedLinkError):
+                    store.record_error(
+                        platform="spotify",
+                        url=url,
+                        user_id=message.from_user.id,
+                        error=str(e),
+                    )
 
-                logger.exception(
-                    "Spotify download failed | url=%s",
-                    url,
-                )
+                    logger.exception(
+                        "Spotify download failed | url=%s",
+                        url,
+                    )
 
                 try:
+                    if isinstance(e, platforms.FileTooLargeError):
+                        error_text = t["too_large"].format(size=str(e))
+                    else:
+                        error_text = _friendly_download_error("spotify", e, t)
+
                     bot.edit_message_text(
-                        t["spotify_failed"],
+                        error_text,
                         chat_id_int,
                         status_msg.message_id,
                     )
@@ -4629,9 +4764,7 @@ def register_features(bot):
             caption = data["caption"]
             button_text = t["hide_caption"]
         else:
-            caption = (
-                "🦆 Downloaded with @DuckDownloader_Bot"
-            )
+            caption = BOT_SIGNATURE
             button_text = t["get_caption"]
 
         markup = InlineKeyboardMarkup()
@@ -4670,11 +4803,27 @@ def register_features(bot):
         post_id = call.data.split('thumb_')[1]
         thumb_url = thumb_cache.get(post_id)
 
-        if thumb_url:
-            bot.answer_callback_query(call.id, t['cover_loading'])
-            bot.send_photo(int(chat_id), thumb_url, reply_to_message_id=call.message.message_id)
-        else:
+        if not thumb_url:
             bot.answer_callback_query(call.id, t['cover_error'], show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id, t['cover_loading'])
+
+        try:
+            bot.send_photo(int(chat_id), thumb_url, reply_to_message_id=call.message.message_id)
+        except Exception:
+            # Telegram can't always fetch CDN URLs itself (signed/expiring
+            # Instagram links, WebP YouTube covers) — upload the bytes instead.
+            try:
+                response = requests.get(thumb_url, timeout=20, headers={"User-Agent": platforms.USER_AGENT})
+                response.raise_for_status()
+                bot.send_photo(int(chat_id), response.content, reply_to_message_id=call.message.message_id)
+            except Exception:
+                logger.warning("Cover download failed | %s", thumb_url, exc_info=True)
+                try:
+                    bot.send_message(int(chat_id), t['cover_error'], reply_to_message_id=call.message.message_id)
+                except Exception:
+                    pass
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('audio_'))
     def handle_get_audio_callback(call):
@@ -4708,8 +4857,21 @@ def register_features(bot):
             return
 
         bot.answer_callback_query(call.id)
-        status_msg = bot.send_message(chat_id_int, t['init'])
-        _run_direct_download(chat_id_int, None, url, 'audio', t, status_msg)
+
+        show_ui = _is_private_chat(call.message.chat.type)
+        status_msg = None
+        if show_ui:
+            status_msg = bot.send_message(chat_id_int, t['init'])
+
+        _run_direct_download(
+            chat_id_int,
+            call.message.message_id,
+            url,
+            'audio',
+            t,
+            status_msg,
+            show_ui=show_ui,
+        )
 
     @bot.callback_query_handler(
         func=lambda call: call.data.startswith(
@@ -4869,6 +5031,8 @@ def register_features(bot):
             show_ui=show_ui,
         )
 
+        files = []
+
         try:
 
             info, entries, files = (
@@ -4976,7 +5140,7 @@ def register_features(bot):
             if show_ui and status_msg is not None:
                 try:
                     bot.edit_message_text(
-                        t["youtube_failed"],
+                        _friendly_download_error("youtube", e, t),
                         chat_id_int,
                         status_msg.message_id,
                     )
@@ -4984,5 +5148,6 @@ def register_features(bot):
                     pass
 
         finally:
+            platforms.remove_download_files(files)
 
             _download_semaphore.release()
