@@ -125,12 +125,19 @@ VIDEO_TIER_HEIGHTS = {
     "360p": 360,
 }
 
-# "bv*+ba/b" is yt-dlp's own default: best video (merged with the best
-# audio when they're separate DASH streams) or the best single file. The
-# old "best/all" fallback downloaded *every* format into the same filename
-# when no progressive format existed, which is what produced the
-# "Unable to rename file" / "downloaded file does not exist" errors.
-VIDEO_SELECTOR = "bv*+ba/b"
+# Prefer a ready-made single file (Instagram/TikTok serve these as H.264 +
+# AAC, exactly what Telegram wants), and only merge separate DASH streams
+# when no single file exists. Picking the highest-resolution DASH stream
+# instead meant VP9 for most Reels, and re-encoding VP9 to H.264 made a
+# 19MB Reel take ~2 minutes on the server. (The old "best/all" fallback
+# downloaded *every* format into one filename when no single file existed,
+# which caused the "Unable to rename file" errors.)
+VIDEO_SELECTOR = "b/bv*+ba"
+
+# H.264 first, resolution second: a format that needs no re-encoding beats
+# a slightly sharper one that does.
+def _video_format_sort(height=None) -> list:
+    return ["vcodec:h264", f"res:{height}" if height else "res", "acodec:aac"]
 AUDIO_SELECTOR = "ba/b"
 
 # Standard resolution tiers offered by the per-video YouTube quality picker.
@@ -856,7 +863,7 @@ def _ensure_h264_mp4(filepath: str) -> str:
         logger.info("H.264 transcode required for %s (source codec: %s)", filepath, video_codec)
         command += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-            "-threads", "2", "-c:a", "aac", "-b:a", "160k",
+            "-threads", "0", "-c:a", "aac", "-b:a", "160k",
         ]
     command += ["-movflags", "+faststart", temp_path]
 
@@ -1027,7 +1034,7 @@ def _download_with_selector(
         # 1440p/2160p stay available when only VP9/AV1 exist there.
         ydl_opts["format_sort"] = ["res", "fps", "codec:avc:m4a", "size"]
     elif not extract_audio:
-        ydl_opts["format_sort"] = ["res", "vcodec:h264", "acodec:aac"]
+        ydl_opts["format_sort"] = _video_format_sort()
     if extract_audio:
         ydl_opts["postprocessors"] = [
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"},
@@ -1431,7 +1438,7 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
         tier = quality if quality in VIDEO_TIER_HEIGHTS else "best"
         height = VIDEO_TIER_HEIGHTS[tier]
         selector, extract_audio = VIDEO_SELECTOR, False
-        format_sort = ([f"res:{height}"] if height else ["res"]) + ["vcodec:h264", "acodec:aac"]
+        format_sort = _video_format_sort(height)
 
     api_error = None
     if is_story and not extract_audio:
@@ -1528,8 +1535,9 @@ def _instagram_clip_play_count(ydl, entry: dict) -> int | None:
         return None
     try:
         cursor = None
-        # Pinned Reels come first, so the wanted one is often on page 2-3.
-        for _ in range(3):
+        # One page only: every extra page is another ~1.5s and another
+        # Instagram request per Reel, which matters far more than the count.
+        for _ in range(1):
             variables = {"data": {"include_feed_video": True, "page_size": 12, "target_user_id": str(user_id)}}
             if cursor:
                 variables["after"] = cursor
@@ -1853,7 +1861,7 @@ def _generic_selector(tier: str):
     if tier == "audio":
         return AUDIO_SELECTOR, True, None
     height = VIDEO_TIER_HEIGHTS.get(tier)
-    return VIDEO_SELECTOR, False, ([f"res:{height}"] if height else ["res"]) + ["vcodec:h264", "acodec:aac"]
+    return VIDEO_SELECTOR, False, _video_format_sort(height)
 
 
 def download_direct(url: str, quality: str = "best", allow_fallback: bool = False, progress_hook=None):
