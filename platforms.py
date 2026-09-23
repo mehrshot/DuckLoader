@@ -1715,6 +1715,61 @@ def download_tiktok_photo(url: str, progress_hook=None):
 # SoundCloud
 # ---------------------------------------------------------------------------
 
+_SOUNDCLOUD_SHORT_HOSTS = ("on.soundcloud.com", "snd.sc")
+
+
+def _clean_soundcloud_url(url: str) -> str:
+    """https://soundcloud.com/<artist>/<track>[/s-<secret>] without the
+    share-sheet tracking parameters (ref, si, utm_*, ...)."""
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host in ("m.soundcloud.com", "www.soundcloud.com"):
+        host = "soundcloud.com"
+    return urllib.parse.urlunparse(("https", host, parsed.path.rstrip("/"), "", "", ""))
+
+
+def resolve_soundcloud_url(url: str) -> str:
+    """Turns an on.soundcloud.com / snd.sc short link into the real track URL.
+
+    yt-dlp has no extractor for short links, so it hands them to its
+    *generic* extractor, which downloads the short-link page itself — and
+    SoundCloud's short-link service regularly answers server IPs with
+    "HTTP Error 503: Service Unavailable". Only the redirect's Location
+    header is needed, so it's read directly, retried, and (if configured)
+    retried once more through ROTATING_PROXIES."""
+    host = _host(url)
+    if host not in _SOUNDCLOUD_SHORT_HOSTS:
+        return _clean_soundcloud_url(url) if host.endswith("soundcloud.com") else url
+
+    proxy = _get_random_proxy()
+    routes = [None] + ([proxy] if proxy else [])
+    last_error = None
+    for attempt in range(3):
+        for route in routes:
+            try:
+                response = requests.get(
+                    url,
+                    allow_redirects=False,
+                    timeout=15,
+                    headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                    proxies={"http": route, "https": route} if route else None,
+                )
+                location = response.headers.get("Location")
+                if response.is_redirect and location:
+                    target = urllib.parse.urljoin(url, location)
+                    if _host(target) in _SOUNDCLOUD_SHORT_HOSTS:
+                        url = target  # chained short link
+                        continue
+                    return _clean_soundcloud_url(target)
+                last_error = Exception(f"HTTP Error {response.status_code} while resolving SoundCloud short link")
+            except requests.RequestException as e:
+                last_error = e
+        if attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+    logger.warning("SoundCloud short link could not be resolved: %s | %s", url, last_error)
+    raise Exception(f"Could not resolve SoundCloud short link: {last_error}")
+
+
 def _soundcloud_metadata(url: str) -> dict:
     """Title/artist/duration of a SoundCloud track even when its audio is
     DRM-protected (ignore_no_formats_error lets the metadata through)."""
@@ -1734,6 +1789,7 @@ def _soundcloud_metadata(url: str) -> dict:
 
 
 def _download_soundcloud(url: str, progress_hook=None):
+    url = resolve_soundcloud_url(url)
     try:
         info, entries, files = _download_with_selector(url, "bestaudio/best", True, progress_hook)
         return info, entries, files, "audio"
@@ -2588,6 +2644,8 @@ def classify_error(platform: str, error: Exception) -> str:
     if platform == "soundcloud":
         if "404" in text or "not found" in text:
             return "not_found"
+        if "503" in text or "service unavailable" in text or "could not resolve soundcloud" in text:
+            return "platform_unavailable"
         return "soundcloud_failed"
     if platform == "spotify":
         if "404" in text or "resource not found" in text or "invalid id" in text:

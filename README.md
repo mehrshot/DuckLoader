@@ -131,6 +131,7 @@ These commands work only for the user configured as `OWNER_ID`.
 | `/addsponsor <channel> <name>` | Add a sponsor channel |
 | `/removesponsor <channel>` | Remove a sponsor channel |
 | `/sponsors` | List sponsor channels |
+| `/senddl <user_id> <link> [<link> ...]` | Download link(s) and deliver them to a user in the normal format (e.g. to make up for failed requests) |
 
 The owner can also access these functions through the button-based admin panel from `/settings`.
 

@@ -190,6 +190,7 @@ TEXTS = {
         'ig_audio': "ℹ️ صفحه‌ی «Audio» اینستاگرام قابل دانلود نیست. لینک خود ریلز رو بفرست و بعد از دانلود، دکمه‌ی «🎵 دریافت صدا» رو بزن.",
         'ig_unsupported': "ℹ️ این نوع لینک اینستاگرام پشتیبانی نمی‌شه. لطفاً لینک یک پست، ریلز، استوری یا هایلایت رو بفرست.",
         'not_found': "❌ این محتوا پیدا نشد؛ ممکنه حذف شده یا خصوصی باشه.",
+        'platform_unavailable': "⏳ این سرویس الان جواب نمی‌ده. لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن.",
         'tiktok_blocked': "🌍 تیک‌تاک دسترسی به این ویدیو رو از منطقه‌ی سرور ربات بسته و فعلاً قابل دریافت نیست.",
         'tiktok_login': "🔞 تیک‌تاک این ویدیو رو فقط برای کاربران واردشده نمایش می‌ده (محدودیت سنی) و فعلاً قابل دریافت نیست.",
         'tiktok_photo_audio': "ℹ️ این پست تیک‌تاک عکسیه و صدای جداگانه‌ای برای دانلود نداره.",
@@ -384,7 +385,8 @@ TEXTS = {
             "/checksponsor <channel> — بررسی دسترسی بات به کانال اسپانسر\n"
             "/addsponsor <channel> <name> — افزودن کانال اسپانسر\n"
             "/removesponsor <channel> — حذف کانال اسپانسر\n"
-            "/sponsors — نمایش کانال‌های اسپانسر"
+            "/sponsors — نمایش کانال‌های اسپانسر\n"
+            "/senddl <user_id> <link> — ارسال دانلود یک لینک برای کاربر"
         ),
         'back': "⬅️ بازگشت",
         'adm_platforms_title': "کدوم پلتفرم رو می‌خوای قفل/باز کنی؟",
@@ -466,6 +468,7 @@ TEXTS = {
         'ig_audio': "ℹ️ Instagram \"Audio\" pages can't be downloaded. Send the Reel's link instead, then tap \"🎵 Get Audio\" under the video.",
         'ig_unsupported': "ℹ️ This kind of Instagram link isn't supported. Please send the link of a post, Reel, story or highlight.",
         'not_found': "❌ This content couldn't be found — it may have been deleted or made private.",
+        'platform_unavailable': "⏳ The service isn't responding right now. Please try again in a few minutes.",
         'tiktok_blocked': "🌍 TikTok blocks this video in the bot server's region, so it can't be downloaded right now.",
         'tiktok_login': "🔞 TikTok only shows this video to logged-in users (age restriction), so it can't be downloaded right now.",
         'tiktok_photo_audio': "ℹ️ This TikTok post is a photo slideshow and has no separate audio to download.",
@@ -659,7 +662,8 @@ TEXTS = {
             "/checksponsor <channel> — Check bot access to a sponsor channel\n"
             "/addsponsor <channel> <name> — Add a sponsor channel\n"
             "/removesponsor <channel> — Remove a sponsor channel\n"
-            "/sponsors — List sponsor channels"
+            "/sponsors — List sponsor channels\n"
+            "/senddl <user_id> <link> — Send a link's download to a user"
         ),
         'back': "⬅️ Back",
         'adm_platforms_title': "Which platform do you want to lock/unlock?",
@@ -1718,6 +1722,80 @@ def register_features(bot):
 
     platforms.set_auth_alert_handler(_alert_owner_auth_problem)
 
+    # Registered before handle_media_link: the command text contains links,
+    # and handlers are matched in registration order.
+    @bot.message_handler(commands=["senddl"])
+    def owner_send_download(message):
+        """/senddl <user_id> <link> [<link> ...] — owner only.
+
+        Downloads each link and delivers it to that user exactly as a normal
+        download (caption, buttons, duck reactions, post-download ad), e.g.
+        to make up for requests that failed because of a bot bug."""
+        if not admin.is_owner(message.from_user.id):
+            return
+
+        parts = (message.text or "").split()
+
+        if len(parts) < 3 or not parts[1].lstrip("-").isdigit():
+            bot.reply_to(
+                message,
+                "Usage: /senddl <user_id> <link> [<link> ...]",
+            )
+            return
+
+        target_id = int(parts[1])
+        urls = [
+            url
+            for url in (platforms.extract_url(part) for part in parts[2:])
+            if url
+        ]
+
+        if not urls:
+            bot.reply_to(message, "❌ No supported link found.")
+            return
+
+        target_user = store.get_user(user_settings, target_id)
+        target_t = TEXTS.get(target_user.get("lang"), TEXTS[store.DEFAULT_LANGUAGE])
+        results = []
+
+        for url in urls:
+            platform = platforms.detect_platform(url)
+
+            if platform == "spotify":
+                results.append(f"⚠️ {url}\nSpotify links aren't supported by /senddl.")
+                continue
+
+            if platform == "instagram":
+                quality = (
+                    "480p"
+                    if target_user.get("low_data_mode", False)
+                    else target_user.get("instagram_quality", "best")
+                )
+            else:
+                quality = target_user.get("quality", "best")
+
+            ok, error = _run_direct_download(
+                target_id,
+                None,
+                url,
+                quality,
+                target_t,
+                None,
+                show_ui=True,
+            )
+
+            results.append(
+                f"✅ {url}"
+                if ok
+                else f"❌ {url}\n{str(error)[:300]}"
+            )
+
+        bot.reply_to(
+            message,
+            f"/senddl → {target_id}\n\n" + "\n\n".join(results),
+            disable_web_page_preview=True,
+        )
+
     def _delete_duck_message(
         message_map,
         chat_id_int,
@@ -2571,6 +2649,8 @@ def register_features(bot):
 
         Technical errors are stored for the administrator and
         are never shown directly to the user.
+
+        Returns (True, None) on success or (False, error).
         """
 
         progress_hook = _make_progress_hook(
@@ -2587,7 +2667,7 @@ def register_features(bot):
             t,
             show_ui=show_ui,
         ):
-            return
+            return False, Exception("The download queue is full.")
 
         _send_duck_reaction(
             chat_id_int,
@@ -2661,6 +2741,8 @@ def register_features(bot):
             if show_ui:
                 _maybe_send_ad(chat_id_int)
 
+            return True, None
+
         except platforms.FileTooLargeError as e:
             if show_ui and status_msg is not None:
                 _send_duck_download_failed(
@@ -2685,6 +2767,8 @@ def register_features(bot):
                 )
             except Exception:
                 pass
+
+            return False, e
 
         except Exception as e:
             if show_ui and status_msg is not None:
@@ -2727,6 +2811,8 @@ def register_features(bot):
                 )
             except Exception:
                 pass
+
+            return False, e
 
         finally:
             platforms.remove_download_files(files)
