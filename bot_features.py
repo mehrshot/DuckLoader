@@ -191,6 +191,7 @@ TEXTS = {
         'ig_unsupported': "ℹ️ این نوع لینک اینستاگرام پشتیبانی نمی‌شه. لطفاً لینک یک پست، ریلز، استوری یا هایلایت رو بفرست.",
         'not_found': "❌ این محتوا پیدا نشد؛ ممکنه حذف شده یا خصوصی باشه.",
         'platform_unavailable': "⏳ این سرویس الان جواب نمی‌ده. لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن.",
+        'senddl_notice': "✅ مشکل لینک شما برطرف شد، فایلی که می‌خواستید در ادامه براتون ارسال می‌شه. 🦆",
         'tiktok_blocked': "🌍 تیک‌تاک دسترسی به این ویدیو رو از منطقه‌ی سرور ربات بسته و فعلاً قابل دریافت نیست.",
         'tiktok_login': "🔞 تیک‌تاک این ویدیو رو فقط برای کاربران واردشده نمایش می‌ده (محدودیت سنی) و فعلاً قابل دریافت نیست.",
         'tiktok_photo_audio': "ℹ️ این پست تیک‌تاک عکسیه و صدای جداگانه‌ای برای دانلود نداره.",
@@ -469,6 +470,7 @@ TEXTS = {
         'ig_unsupported': "ℹ️ This kind of Instagram link isn't supported. Please send the link of a post, Reel, story or highlight.",
         'not_found': "❌ This content couldn't be found — it may have been deleted or made private.",
         'platform_unavailable': "⏳ The service isn't responding right now. Please try again in a few minutes.",
+        'senddl_notice': "✅ The problem with your link has been fixed — the file you wanted is on its way. 🦆",
         'tiktok_blocked': "🌍 TikTok blocks this video in the bot server's region, so it can't be downloaded right now.",
         'tiktok_login': "🔞 TikTok only shows this video to logged-in users (age restriction), so it can't be downloaded right now.",
         'tiktok_photo_audio': "ℹ️ This TikTok post is a photo slideshow and has no separate audio to download.",
@@ -1758,6 +1760,13 @@ def register_features(bot):
         target_t = TEXTS.get(target_user.get("lang"), TEXTS[store.DEFAULT_LANGUAGE])
         results = []
 
+        try:
+            bot.send_message(target_id, target_t["senddl_notice"])
+        except Exception as e:
+            # Usually "bot was blocked by the user" — nothing will reach them.
+            bot.reply_to(message, f"❌ Could not message {target_id}: {str(e)[:300]}")
+            return
+
         for url in urls:
             platform = platforms.detect_platform(url)
 
@@ -2317,8 +2326,13 @@ def register_features(bot):
         # is worth a notice. This used to look up t['quality_best'], a key
         # that never existed — it crashed every Instagram "Get Audio" tap
         # after the file had already been downloaded.
+        # SoundCloud is audio-only by nature (quality_used is always "audio"),
+        # so it must never trigger the notice — and without the fallback
+        # toggle there is no automatic reduction at all.
         if (
             show_ui
+            and platform != "soundcloud"
+            and flags.get("auto_quality_fallback", False)
             and quality_used != quality_requested
             and quality_requested in platforms.QUALITY_LADDER
             and quality_used in platforms.QUALITY_LADDER
