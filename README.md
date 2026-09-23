@@ -110,6 +110,9 @@ The admin panel includes:
 | `/settings` | Choose language and download quality |
 | `/whoami` | Show your Telegram user ID |
 | `/adrequest` | Submit an advertising request |
+| `/feedback` | Suggest a feature or report a problem (also the 💬 button under the chat) |
+
+Feedback goes straight to the owner with the user's name, ID, language, start-link source and — for problem reports — that user's latest errors from the error log. Screenshots, videos and voice notes are forwarded as sent. The owner's copy has a **💬 Reply to user** button; the reply is delivered to the user by the bot. Everything is also kept in `feedback.json`. Users can send at most 5 messages per hour.
 
 For normal downloading, users simply send a supported URL.
 

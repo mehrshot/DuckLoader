@@ -1029,10 +1029,18 @@ def _download_with_selector(
     )
     if format_sort:
         ydl_opts["format_sort"] = format_sort
-    elif platform == "youtube" and not extract_audio:
-        # Prefer H.264/M4A at equal resolution, but don't require it, so
-        # 1440p/2160p stay available when only VP9/AV1 exist there.
-        ydl_opts["format_sort"] = ["res", "fps", "codec:avc:m4a", "size"]
+    elif platform == "youtube":
+        # "lang" must come first. YouTube's auto-dubbed videos carry extra
+        # audio tracks in other languages; yt-dlp marks the original track
+        # (language_preference 10), the default one (5) and dubs (-1), but
+        # our own sort fields are applied before its defaults — with "size"
+        # ahead of "lang", whichever dub happened to be the largest file won
+        # and users got the video in a random language.
+        # Then: prefer H.264/M4A at equal resolution, but don't require it,
+        # so 1440p/2160p stay available when only VP9/AV1 exist there.
+        ydl_opts["format_sort"] = (
+            ["lang"] if extract_audio else ["lang", "res", "fps", "codec:avc:m4a", "size"]
+        )
     elif not extract_audio:
         ydl_opts["format_sort"] = _video_format_sort()
     if extract_audio:
@@ -2022,9 +2030,17 @@ def probe_youtube_qualities(url: str) -> dict:
     best_audio = None
     if audio_formats:
         m4a = [f for f in audio_formats if (f.get("ext") or "").lower() == "m4a"]
+        # Original-language track first (see the "lang" note in
+        # _download_with_selector), so the size shown matches what's sent.
         best_audio = max(
             m4a or audio_formats,
-            key=lambda f: (f.get("abr") or 0, _audio_codec_rank(f), f.get("asr") or 0, _format_size_estimate(f, duration)),
+            key=lambda f: (
+                f.get("language_preference") if f.get("language_preference") is not None else -1,
+                f.get("abr") or 0,
+                _audio_codec_rank(f),
+                f.get("asr") or 0,
+                _format_size_estimate(f, duration),
+            ),
         )
     audio_size = _format_size_estimate(best_audio, duration)
 

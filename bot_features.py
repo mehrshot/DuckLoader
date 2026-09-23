@@ -18,7 +18,7 @@ from telebot.types import (
     InputMediaAudio,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    ReplyKeyboardRemove,
+    ForceReply,
 )
 import admin
 import ads
@@ -140,6 +140,17 @@ _platform_semaphores = {
     for platform_key, limit in PLATFORM_CONCURRENCY.items()
 }
 AD_BUTTON_TEXT = "📣 تبلیغات در ربات"
+FEEDBACK_BUTTON_TEXT = "💬 پیشنهاد و گزارش مشکل"
+FEEDBACK_BUTTON_TEXTS = {FEEDBACK_BUTTON_TEXT, "💬 Feedback"}
+
+# Feedback: user_id -> {"kind": "idea"|"bug", "since": monotonic}
+FEEDBACK_WAIT_SECONDS = 15 * 60
+FEEDBACK_LIMIT_PER_HOUR = 5
+_feedback_waiting = {}
+_feedback_recent = defaultdict(list)  # user_id -> [timestamps]
+_feedback_lock = threading.Lock()
+# owner_id -> (user_id, feedback_id) while the owner is typing a reply
+_owner_reply_target = {}
 
 _duck_status_messages = {}
 _duck_complete_messages = {}
@@ -463,10 +474,32 @@ TEXTS = {
             "فعلا هم از اینستاگرام، یوتیوب، تیک تاک، اسپاتیفای و ساندکلاد "
             "پشتیبانی می‌کنم.\n\n"
             "زبان و کیفیت دلخواهت رو میتونی از /settings انتخاب کنی.\n\n"
+            "💬 پیشنهاد یا مشکلی داشتی؟ از دکمه‌ی پایین صفحه یا /feedback برامون بفرست.\n\n"
             "🦆 لینکتو بفرست تا شروع کنیم!"
         ),        'init': "⏳ در حال برقراری ارتباط...",
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
         'progress_line': "{label} {bar} {percent}\n\n⏱ زمان تقریبی باقی‌مانده: {eta}",
+        'feedback_choose': "💬 چه چیزی می‌خوای برامون بفرستی؟",
+        'feedback_idea_btn': "💡 پیشنهاد قابلیت جدید",
+        'feedback_bug_btn': "🐞 گزارش مشکل",
+        'feedback_cancel_btn': "❌ انصراف",
+        'feedback_prompt_idea': "💡 پیشنهادت رو بنویس. هر ایده‌ای که ربات رو بهتر می‌کنه مستقیم به دست مدیر می‌رسه. 🦆\n\n(برای لغو: /cancel)",
+        'feedback_prompt_bug': "🐞 مشکل رو توضیح بده: چه لینکی فرستادی و چه اتفاقی افتاد؟ اگه اسکرین‌شات داری اونم می‌تونی بفرستی.\n\n(برای لغو: /cancel)",
+        'feedback_thanks': "✅ پیامت به دست مدیر رسید. ممنون که کمک می‌کنی داکلودر بهتر بشه! 🦆",
+        'feedback_cancelled': "❌ لغو شد.",
+        'feedback_too_many': "⏳ توی یک ساعت اخیر چند پیام فرستادی؛ لطفاً کمی بعد دوباره امتحان کن.",
+        'feedback_private_only': "💬 برای ارسال پیشنهاد یا گزارش مشکل، در چت خصوصی با ربات /feedback رو بزن.",
+        'feedback_unsupported': "لطفاً متن، عکس، ویدیو، ویس یا فایل بفرست (برای لغو: /cancel).",
+        'feedback_failed': "❌ ارسال پیام انجام نشد. لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن.",
+        'feedback_hint': "💬 هر پیشنهاد یا مشکلی داشتی، از دکمه‌ی پایین صفحه برامون بفرست.",
+        'feedback_reply_prefix': "📩 پاسخ مدیر داکلودر به پیامت:",
+        'fb_admin_idea': "💡 پیشنهاد جدید",
+        'fb_admin_bug': "🐞 گزارش مشکل",
+        'fb_admin_reply_btn': "💬 پاسخ به کاربر",
+        'fb_admin_reply_prompt': "✍️ پاسخت به کاربر {id} رو بفرست (متن، عکس یا ویس). برای لغو: /cancel",
+        'fb_admin_reply_sent': "✅ پاسخ برای کاربر ارسال شد.",
+        'fb_admin_reply_failed': "❌ ارسال پاسخ ممکن نشد: {error}",
+        'fb_admin_recent_errors': "🧾 آخرین خطاهای این کاربر:",
         'progress_downloading': "🔄 در حال دریافت",
         'progress_uploading': "📤 در حال ارسال",
         'progress_almost': "چند لحظه‌ی دیگه",
@@ -751,10 +784,32 @@ TEXTS = {
             "I support Instagram, TikTok, SoundCloud, Spotify, "
             "and YouTube.\n\n"
             "Choose your preferred quality in /settings.\n\n"
+            "💬 Got an idea or a problem? Use the button below or /feedback.\n\n"
             "🦆 You bring the link. I’ll bring the media."
         ),        'init': "⏳ Initializing connection...",
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
         'progress_line': "{label} {bar} {percent}\n\n⏱ Estimated time left: {eta}",
+        'feedback_choose': "💬 What would you like to send us?",
+        'feedback_idea_btn': "💡 Suggest a feature",
+        'feedback_bug_btn': "🐞 Report a problem",
+        'feedback_cancel_btn': "❌ Cancel",
+        'feedback_prompt_idea': "💡 Write your suggestion — every idea goes straight to the bot's admin. 🦆\n\n(To cancel: /cancel)",
+        'feedback_prompt_bug': "🐞 Describe the problem: which link did you send and what happened? You can send a screenshot too.\n\n(To cancel: /cancel)",
+        'feedback_thanks': "✅ Your message reached the admin. Thanks for helping make DuckLoader better! 🦆",
+        'feedback_cancelled': "❌ Cancelled.",
+        'feedback_too_many': "⏳ You've sent several messages in the last hour; please try again a bit later.",
+        'feedback_private_only': "💬 To send a suggestion or report a problem, use /feedback in a private chat with the bot.",
+        'feedback_unsupported': "Please send text, a photo, a video, a voice message or a file (to cancel: /cancel).",
+        'feedback_failed': "❌ Your message couldn't be delivered. Please try again in a few minutes.",
+        'feedback_hint': "💬 Got an idea or a problem? Send it to us with the button below.",
+        'feedback_reply_prefix': "📩 The DuckLoader admin replied to your message:",
+        'fb_admin_idea': "💡 New suggestion",
+        'fb_admin_bug': "🐞 Problem report",
+        'fb_admin_reply_btn': "💬 Reply to user",
+        'fb_admin_reply_prompt': "✍️ Send your reply to user {id} (text, photo or voice). To cancel: /cancel",
+        'fb_admin_reply_sent': "✅ Reply sent to the user.",
+        'fb_admin_reply_failed': "❌ Couldn't send the reply: {error}",
+        'fb_admin_recent_errors': "🧾 This user's latest errors:",
         'progress_downloading': "🔄 Fetching",
         'progress_uploading': "📤 Sending",
         'progress_almost': "a few more seconds",
@@ -1716,22 +1771,27 @@ def register_features(bot):
     def _main_reply_markup():
         current_flags = store.load_flags()
 
-        if not current_flags.get(
-            "ad_requests_button",
-            False,
-        ):
-            return ReplyKeyboardRemove()
-
         markup = ReplyKeyboardMarkup(
             row_width=1,
             resize_keyboard=True,
         )
 
+        # Always visible: the easiest way for users to reach the admin.
         markup.add(
             KeyboardButton(
-                AD_BUTTON_TEXT
+                FEEDBACK_BUTTON_TEXT
             )
         )
+
+        if current_flags.get(
+            "ad_requests_button",
+            False,
+        ):
+            markup.add(
+                KeyboardButton(
+                    AD_BUTTON_TEXT
+                )
+            )
 
         return markup
 
@@ -2063,6 +2123,274 @@ def register_features(bot):
             logger.exception("Could not send the sponsor-check alert to the owner")
 
     ads.set_check_failure_handler(_alert_owner_sponsor_check_failed)
+
+    # ------------------------------------------------------------------
+    # Feedback: suggestions and problem reports, forwarded to the owner
+    # ------------------------------------------------------------------
+    # Registered before handle_media_link and the ad-request form, so a
+    # user who is writing feedback can paste the link that failed.
+
+    def _owner_id():
+        return int(os.environ.get("OWNER_ID", "0") or "0")
+
+    def _feedback_kind_markup(t):
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton(t["feedback_idea_btn"], callback_data="fb_kind_idea"),
+            InlineKeyboardButton(t["feedback_bug_btn"], callback_data="fb_kind_bug"),
+            InlineKeyboardButton(t["feedback_cancel_btn"], callback_data="fb_cancel"),
+        )
+        return markup
+
+    def _feedback_waiting_kind(user_id):
+        with _feedback_lock:
+            state = _feedback_waiting.get(user_id)
+            if state and time.monotonic() - state["since"] > FEEDBACK_WAIT_SECONDS:
+                _feedback_waiting.pop(user_id, None)
+                return None
+            return state["kind"] if state else None
+
+    def _feedback_rate_limited(user_id) -> bool:
+        now = time.time()
+        with _feedback_lock:
+            recent = [ts for ts in _feedback_recent[user_id] if now - ts < 3600]
+            _feedback_recent[user_id] = recent
+            return len(recent) >= FEEDBACK_LIMIT_PER_HOUR
+
+    @bot.message_handler(commands=["feedback"])
+    @bot.message_handler(
+        func=lambda msg:
+            bool(msg.text)
+            and msg.text.strip() in FEEDBACK_BUTTON_TEXTS
+    )
+    def start_feedback(message):
+        t = _texts_for(message.chat.id)
+
+        if store.is_banned(message.from_user.id):
+            return
+
+        if not _is_private_chat(message.chat.type):
+            bot.reply_to(message, t["feedback_private_only"])
+            return
+
+        with _feedback_lock:
+            _feedback_waiting.pop(message.from_user.id, None)
+
+        bot.reply_to(
+            message,
+            t["feedback_choose"],
+            reply_markup=_feedback_kind_markup(t),
+        )
+
+    @bot.callback_query_handler(
+        func=lambda call: call.data in {"fb_kind_idea", "fb_kind_bug", "fb_cancel"}
+    )
+    def handle_feedback_kind(call):
+        t = _texts_for(call.message.chat.id)
+        user_id = call.from_user.id
+
+        bot.answer_callback_query(call.id)
+
+        try:
+            bot.edit_message_reply_markup(
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        if call.data == "fb_cancel":
+            with _feedback_lock:
+                _feedback_waiting.pop(user_id, None)
+            bot.send_message(call.message.chat.id, t["feedback_cancelled"])
+            return
+
+        if _feedback_rate_limited(user_id):
+            bot.send_message(call.message.chat.id, t["feedback_too_many"])
+            return
+
+        kind = "idea" if call.data == "fb_kind_idea" else "bug"
+
+        with _feedback_lock:
+            _feedback_waiting[user_id] = {
+                "kind": kind,
+                "since": time.monotonic(),
+            }
+
+        bot.send_message(
+            call.message.chat.id,
+            t["feedback_prompt_idea" if kind == "idea" else "feedback_prompt_bug"],
+        )
+
+    def _is_feedback_message(msg):
+        if msg.from_user is None or not _is_private_chat(msg.chat.type):
+            return False
+
+        if not _feedback_waiting_kind(msg.from_user.id):
+            return False
+
+        if (msg.text or "").startswith("/"):
+            # Any command ends feedback mode; /cancel is answered below,
+            # everything else is handled by its own handler as usual.
+            if (msg.text or "").split()[0].split("@")[0] != "/cancel":
+                with _feedback_lock:
+                    _feedback_waiting.pop(msg.from_user.id, None)
+                return False
+
+        return True
+
+    @bot.message_handler(
+        func=_is_feedback_message,
+        content_types=[
+            "text", "photo", "video", "voice", "audio",
+            "document", "animation", "video_note", "sticker",
+        ],
+    )
+    def receive_feedback(message):
+        user = message.from_user
+        t = _texts_for(message.chat.id)
+
+        with _feedback_lock:
+            state = _feedback_waiting.pop(user.id, None)
+
+        if (message.text or "").startswith("/cancel"):
+            bot.reply_to(message, t["feedback_cancelled"], reply_markup=_main_reply_markup())
+            return
+
+        if message.content_type == "sticker":
+            with _feedback_lock:
+                _feedback_waiting[user.id] = state
+            bot.reply_to(message, t["feedback_unsupported"])
+            return
+
+        kind = (state or {}).get("kind", "idea")
+        owner_id = _owner_id()
+
+        if not owner_id:
+            bot.reply_to(message, t["feedback_failed"])
+            return
+
+        user_record = store.get_user(user_settings, message.chat.id)
+        content = (message.text or message.caption or "").strip()
+
+        feedback_id = store.add_feedback(
+            user_id=user.id,
+            username=user.username or "",
+            name=" ".join(p for p in (user.first_name, user.last_name) if p),
+            kind=kind,
+            text=content,
+            content_type=message.content_type,
+        )
+
+        owner_t = _texts_for(owner_id)
+        header_lines = [
+            f"{owner_t['fb_admin_idea'] if kind == 'idea' else owner_t['fb_admin_bug']}  #FB{feedback_id}",
+            "",
+            f"👤 {' '.join(p for p in (user.first_name, user.last_name) if p) or '—'}"
+            + (f" (@{user.username})" if user.username else ""),
+            f"🆔 {user.id}",
+            f"🌐 {user_record.get('lang', '—')}"
+            + (f" | 🔗 {user_record['source']}" if user_record.get("source") else ""),
+            f"🕐 {time.strftime('%Y-%m-%d %H:%M')}",
+        ]
+
+        if kind == "bug":
+            # The most useful context for a bug report: what actually
+            # failed for this user recently, straight from the error log.
+            recent_errors = [
+                event
+                for event in store.load_error_log()
+                if event.get("user_id") in (user.id, message.chat.id)
+            ][-3:]
+
+            if recent_errors:
+                header_lines += ["", owner_t["fb_admin_recent_errors"]]
+
+                for event in reversed(recent_errors):
+                    header_lines.append(
+                        f"• {event.get('time', '')} | {event.get('platform', '')}\n"
+                        f"  {event.get('url', '')}\n"
+                        f"  {str(event.get('error', ''))[:200]}"
+                    )
+
+        if content and message.content_type == "text":
+            header_lines += ["", f"💬 {content}"]
+
+        reply_markup = InlineKeyboardMarkup()
+        reply_markup.add(
+            InlineKeyboardButton(
+                owner_t["fb_admin_reply_btn"],
+                callback_data=f"fbreply_{user.id}_{feedback_id}",
+            )
+        )
+
+        try:
+            bot.send_message(
+                owner_id,
+                "\n".join(header_lines)[:4000],
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+
+            if message.content_type != "text":
+                # Photos, screenshots, voice notes... arrive as they were sent.
+                bot.copy_message(owner_id, message.chat.id, message.message_id)
+        except Exception:
+            logger.exception("Could not forward feedback #%s to the owner", feedback_id)
+            bot.reply_to(message, t["feedback_failed"])
+            return
+
+        with _feedback_lock:
+            _feedback_recent[user.id].append(time.time())
+
+        bot.reply_to(message, t["feedback_thanks"], reply_markup=_main_reply_markup())
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("fbreply_"))
+    def handle_feedback_reply_button(call):
+        if not admin.is_owner(call.from_user.id):
+            bot.answer_callback_query(call.id)
+            return
+
+        try:
+            _, target_id, feedback_id = call.data.split("_", 2)
+            target_id = int(target_id)
+        except ValueError:
+            bot.answer_callback_query(call.id, "Invalid.", show_alert=True)
+            return
+
+        _owner_reply_target[call.from_user.id] = (target_id, feedback_id)
+        bot.answer_callback_query(call.id)
+
+        bot.send_message(
+            call.message.chat.id,
+            _texts_for(call.message.chat.id)["fb_admin_reply_prompt"].format(id=target_id),
+            reply_markup=ForceReply(selective=True),
+        )
+
+    @bot.message_handler(
+        func=lambda msg:
+            msg.from_user is not None
+            and msg.from_user.id in _owner_reply_target,
+        content_types=["text", "photo", "video", "voice", "audio", "document", "animation"],
+    )
+    def send_owner_feedback_reply(message):
+        target_id, feedback_id = _owner_reply_target.pop(message.from_user.id)
+        owner_t = _texts_for(message.chat.id)
+
+        if (message.text or "").startswith("/"):
+            bot.reply_to(message, owner_t["adm_cancelled"])
+            return
+
+        target_t = _texts_for(target_id)
+
+        try:
+            bot.send_message(target_id, target_t["feedback_reply_prefix"])
+            bot.copy_message(target_id, message.chat.id, message.message_id)
+            store.mark_feedback_replied(feedback_id)
+            bot.reply_to(message, owner_t["fb_admin_reply_sent"])
+        except Exception as e:
+            bot.reply_to(message, owner_t["fb_admin_reply_failed"].format(error=str(e)[:300]))
 
     # Registered before handle_media_link: the command text contains links,
     # and handlers are matched in registration order.
@@ -5505,6 +5833,17 @@ def register_features(bot):
         bot.answer_callback_query(
             call.id
         )
+
+        # An edited message can't carry a reply keyboard, so new users
+        # would never see the bottom buttons (feedback, ads) otherwise.
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                t["feedback_hint"],
+                reply_markup=_main_reply_markup(),
+            )
+        except Exception:
+            pass
 
     @bot.callback_query_handler(
         func=lambda call: call.data.startswith("ytq_")

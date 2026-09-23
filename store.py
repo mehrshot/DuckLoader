@@ -555,6 +555,55 @@ def load_stats() -> dict:
     return stats
 
 
+# --- user feedback (suggestions / problem reports) ---
+
+FEEDBACK_FILE = "feedback.json"
+FEEDBACK_MAX = 1000
+
+
+def add_feedback(
+    *,
+    user_id,
+    username: str,
+    name: str,
+    kind: str,
+    text: str,
+    content_type: str,
+) -> int:
+    """Stores one suggestion/problem report and returns its number."""
+    with _io_lock:
+        data = _load(FEEDBACK_FILE, {})
+        if not isinstance(data, dict):
+            data = {}
+        items = data.setdefault("items", [])
+        feedback_id = int(data.get("last_id", 0)) + 1
+        data["last_id"] = feedback_id
+        items.append({
+            "id": feedback_id,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "user_id": user_id,
+            "username": username,
+            "name": name,
+            "kind": kind,
+            "text": text[:4000],
+            "content_type": content_type,
+            "replied": False,
+        })
+        data["items"] = items[-FEEDBACK_MAX:]
+        _save(FEEDBACK_FILE, data)
+        return feedback_id
+
+
+def mark_feedback_replied(feedback_id) -> None:
+    with _io_lock:
+        data = _load(FEEDBACK_FILE, {})
+        for item in (data.get("items") or []) if isinstance(data, dict) else []:
+            if str(item.get("id")) == str(feedback_id):
+                item["replied"] = True
+                _save(FEEDBACK_FILE, data)
+                return
+
+
 # --- learned job durations (for the time-based progress bar) ---
 
 TIMINGS_FILE = "timings.json"
