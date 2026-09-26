@@ -675,6 +675,9 @@ _INSTAGRAM_RETRY_HINTS = (
     "log in", "login", "cookies", "empty media response", "unreachable",
     "rate-limit", "not available to everyone", "certain audiences", "401", "429",
     "media info not found",
+    # "Media not found or unavailable": another configured account (e.g.
+    # the browser session) may still be allowed to see the post.
+    "http error 400",
 )
 _TIKTOK_RETRY_HINTS = (
     "ip address is blocked", "log in", "login", "unable to extract", "403",
@@ -1491,6 +1494,15 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
             ) from e
         if is_story and "story" not in failure_text:
             raise Exception(f"[instagram:story] {failure}") from e
+        if "video info extraction failed" in failure_text and "http error 400" in failure_text:
+            # yt-dlp hides the reason; Instagram's body for this 400 is
+            # {"message": "Media not found or unavailable"} — a deleted or
+            # archived post, or one the bot's account isn't allowed to see.
+            # Not something retrying or the bot can fix.
+            raise Exception(
+                "Instagram media not found or unavailable (deleted/archived post, "
+                f"or its account isn't public): {failure}"
+            ) from e
         if failure is not e:
             raise failure from e
         raise
@@ -2707,6 +2719,8 @@ def classify_error(platform: str, error: Exception) -> str:
     if "drm" in text or isinstance(error, PreviewOnlyError):
         return "drm"
     if platform == "instagram":
+        if "instagram media not found or unavailable" in text:
+            return "ig_not_found"
         if "registered users who follow" in text or "private" in text:
             return "ig_private"
         if "429" in text or "too many requests" in text or "rate-limit" in text or "please wait a few minutes" in text:
