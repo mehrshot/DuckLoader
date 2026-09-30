@@ -586,7 +586,14 @@ def _get_random_proxy():
 # ---------------------------------------------------------------------------
 
 def _cookie_file_from_env(var: str, default: str = "") -> str | None:
-    path = (os.environ.get(var) or default or "").strip()
+    # "VAR=" in .env means "no cookie file" — only fall back to the default
+    # filename when the variable isn't set at all. Otherwise a stale
+    # cookies.txt left in the bot folder silently overrode the browser
+    # profile the owner actually configured.
+    if var in os.environ:
+        path = (os.environ.get(var) or "").strip()
+    else:
+        path = (default or "").strip()
     if not path:
         return None
     path = os.path.abspath(os.path.expanduser(path))
