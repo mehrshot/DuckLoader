@@ -288,8 +288,9 @@ In any chat, type `@DuckDownloader_Bot <link>`:
 
 - Media that was already downloaded is offered instantly from the cache.
 - Otherwise a "⏳" placeholder is sent; the bot downloads the file, uploads it to the private cache channel (an inline message can only be turned into media that's already on Telegram) and replaces the placeholder with the file.
-- YouTube offers one result per quality.
+- YouTube: the sent message becomes a quality picker right in that chat — only the sender's taps count — and then turns into the video.
 - Users who haven't joined the sponsor channels get a button that takes them to the bot first.
+- Nobody has to remember the username: files downloaded in the private chat have a **📤 Send to your friends** button (opens the chat picker with `@DuckDownloader_Bot <link>` already typed), and every inline file has a **🦆 Download another link** button that types `@DuckDownloader_Bot ` into the current chat. Telegram also lists recently used inline bots as soon as you type `@`.
 
 Setup: in @BotFather enable `/setinline` and set `/setinlinefeedback` to 100%; create a private channel, make the bot an admin, then send `/setcache` to the bot and forward any message from that channel (or set `CACHE_CHAT_ID` in `.env`).
 

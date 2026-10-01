@@ -1,4 +1,3 @@
-import concurrent.futures
 import contextlib
 import copy
 import json
@@ -32,6 +31,7 @@ from telebot.types import (
     InlineQueryResultsButton,
     InputTextMessageContent,
     ReactionTypeEmoji,
+    SwitchInlineQueryChosenChat,
 )
 from telebot import apihelper
 import admin
@@ -144,7 +144,6 @@ _yt_pick_context = _BoundedCache(max_items=2000)
 INLINE_GATE_CACHE_SECONDS = 600
 _inline_tokens = _BoundedCache(max_items=5000)   # token -> what to download
 _inline_gate_cache = {}                          # user_id -> (monotonic, passed)
-_inline_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 _bot_admin_cache = {}                            # chat_id -> (monotonic, is_admin)
 _bot_identity = {}
 
@@ -604,6 +603,13 @@ TEXTS = {
         'inline_spotify_bot': "🎵 آلبوم و پلی‌لیست رو داخل ربات بفرست",
         'inline_yt_in_bot': "🎬 انتخاب کیفیت داخل ربات",
         'inline_more_btn': "➕ بقیه‌ی پست داخل ربات",
+        'inline_next_btn': "🦆 دانلود یه لینک دیگه",
+        'share_btn': "📤 فرستادن برای دوستات",
+        'inline_try_btn': "📤 امتحانش کن",
+        'inline_yt_title': "🎬 دانلود از یوتیوب",
+        'inline_yt_desc': "کیفیت رو همین‌جا توی چت انتخاب کن",
+        'inline_yt_loading': "🎬 {title}\n\n⏳ دارم کیفیت‌ها رو پیدا می‌کنم…",
+        'inline_expired': "⌛️ این دکمه منقضی شده؛ لینک رو دوباره بفرست.",
         'cache_ask_forward': "📦 یه پیام از کانال انبار (DuckLoader Cache) رو همین‌جا برام فوروارد کن.",
         'cache_set_done': "✅ کانال انبار وصل شد: {title}",
         'cache_set_failed': "❌ نتونستم توی اون کانال پیام بفرستم. مطمئن شو ربات ادمین کانال باشه و اجازه‌ی ارسال پیام داشته باشه.\n\n{error}",
@@ -938,6 +944,13 @@ TEXTS = {
         'inline_spotify_bot': "🎵 Send albums and playlists in the bot",
         'inline_yt_in_bot': "🎬 Choose the quality in the bot",
         'inline_more_btn': "➕ Rest of the post in the bot",
+        'inline_next_btn': "🦆 Download another link",
+        'share_btn': "📤 Send to your friends",
+        'inline_try_btn': "📤 Try it",
+        'inline_yt_title': "🎬 Download from YouTube",
+        'inline_yt_desc': "Choose the quality right here in the chat",
+        'inline_yt_loading': "🎬 {title}\n\n⏳ Looking up the available qualities…",
+        'inline_expired': "⌛️ This button has expired; please send the link again.",
         'cache_ask_forward': "📦 Forward me any message from the cache channel (DuckLoader Cache).",
         'cache_set_done': "✅ Cache channel connected: {title}",
         'cache_set_failed': "❌ I couldn't post in that channel. Make sure the bot is an admin there and allowed to post.\n\n{error}",
@@ -2284,6 +2297,11 @@ def register_features(bot):
         _bot_admin_cache[chat_id] = (time.monotonic(), is_admin)
         return is_admin
 
+    def _inline_try_markup(t):
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(t["inline_try_btn"], switch_inline_query=""))
+        return markup
+
     def _open_bot_markup(t, payload="inline", text_key="open_bot_btn"):
         markup = InlineKeyboardMarkup()
         markup.add(
@@ -3130,6 +3148,23 @@ def register_features(bot):
                     InlineKeyboardButton(
                         text=t['get_audio_btn'],
                         callback_data=f"audio_{post_id}",
+                    )
+                )
+
+            # Opens the chat picker with "@DuckDownloader_Bot <link>" already
+            # typed: the file goes to a friend without leaving Telegram, and
+            # nobody has to remember the bot's username.
+            if url and len(url) <= 240:
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t['share_btn'],
+                        switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                            query=url,
+                            allow_user_chats=True,
+                            allow_bot_chats=False,
+                            allow_group_chats=True,
+                            allow_channel_chats=False,
+                        ),
                     )
                 )
 
@@ -4017,11 +4052,11 @@ def register_features(bot):
 
         if payload == "gate":
             if _check_sponsor_channel_gate(message.chat.id, user_id, t):
-                bot.reply_to(message, t["inline_ready"].format(bot=_bot_username()))
+                bot.reply_to(message, t["inline_ready"].format(bot=_bot_username()), reply_markup=_inline_try_markup(t))
             return True
 
         if payload == "inline":
-            bot.reply_to(message, t["inline_ready"].format(bot=_bot_username()))
+            bot.reply_to(message, t["inline_ready"].format(bot=_bot_username()), reply_markup=_inline_try_markup(t))
             return True
 
         if payload.startswith("yt_") and platforms.youtube_video_id(f"https://youtu.be/{payload[3:]}"):
@@ -5872,7 +5907,7 @@ def register_features(bot):
         if not last_message:
             # Came from the inline-mode gate: nothing to resume, just confirm.
             try:
-                bot.send_message(chat_id_int, t["inline_ready"].format(bot=_bot_username()))
+                bot.send_message(chat_id_int, t["inline_ready"].format(bot=_bot_username()), reply_markup=_inline_try_markup(t))
             except Exception:
                 pass
             return
@@ -6422,10 +6457,12 @@ def register_features(bot):
                 )
             )
 
+        # Types "@DuckDownloader_Bot " into the input field of whoever taps
+        # it — in this same chat — so the next link is one tap away.
         markup.add(
             InlineKeyboardButton(
-                t["inline_bot_btn"],
-                url=f"https://t.me/{_bot_username()}?start=inline",
+                t["inline_next_btn"],
+                switch_inline_query_current_chat="",
             )
         )
         return markup
@@ -6496,7 +6533,6 @@ def register_features(bot):
     def handle_inline_query(query):
         user_id = query.from_user.id
         t = _texts_for(user_id)
-        lang = store.get_user(user_settings, user_id).get("lang", store.DEFAULT_LANGUAGE)
 
         if store.is_banned(user_id):
             _answer_inline(query, [])
@@ -6520,7 +6556,9 @@ def register_features(bot):
 
         has_cache_channel = _cache_chat_id() is not None
 
-        # ---------------- YouTube: one result per quality --------------
+        # ---------------- YouTube: quality picked inside the chat -------
+        # One result; once sent, the message itself shows the quality
+        # buttons (only the sender's taps count) and then becomes the video.
         if platform == "youtube":
             video_id = platforms.youtube_video_id(url)
 
@@ -6529,37 +6567,27 @@ def register_features(bot):
                 return
 
             watch_url = f"https://www.youtube.com/watch?v={video_id}"
-            in_bot = InlineQueryResultsButton(t["inline_yt_in_bot"], start_parameter=f"yt_{video_id}")
 
-            try:
-                # Inline answers must be quick; a slow probe keeps running
-                # in the background and fills the cache for the next try.
-                probe = _inline_executor.submit(platforms.probe_youtube_qualities, watch_url).result(timeout=8)
-            except Exception:
-                _answer_inline(query, [], in_bot)
+            if not has_cache_channel:
+                _answer_inline(query, [], InlineQueryResultsButton(t["inline_in_bot_btn"], start_parameter=f"yt_{video_id}"))
                 return
 
-            thumb = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-            title = (probe.get("title") or "")[:100]
-            results = []
+            known_title = ((platforms.cached_youtube_probe(watch_url) or {}).get("title") or "")[:100]
+            title = known_title or t["inline_yt_title"]
+            token = _new_inline_token({
+                "mode": "youtube", "url": watch_url, "video_id": video_id, "user_id": user_id,
+            })
 
-            for opt in probe.get("options") or []:
-                choice = "audio" if opt["kind"] == "audio" else str(opt.get("height"))
-                label = _quality_option_label(opt, lang)
-                cached = _fresh_cache(platforms.media_cache_key(watch_url, choice))
-
-                if cached:
-                    for result in _cached_inline_results(cached, t, label)[:1]:
-                        result.id = f"c{choice}"
-                        results.append(result)
-                elif has_cache_channel:
-                    token = _new_inline_token({
-                        "mode": "youtube", "url": watch_url, "video_id": video_id,
-                        "choice": choice, "user_id": user_id,
-                    })
-                    results.append(_placeholder_result(t, token, label, title, thumb))
-
-            _answer_inline(query, results, in_bot)
+            _answer_inline(query, [
+                InlineQueryResultArticle(
+                    f"y:{token}",
+                    title,
+                    InputTextMessageContent(t["inline_yt_loading"].format(title=known_title or "YouTube")),
+                    reply_markup=_inline_markup(t),
+                    description=t["inline_yt_desc"],
+                    thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                )
+            ])
             return
 
         # ---------------- Spotify: single tracks only ------------------
@@ -6673,9 +6701,19 @@ def register_features(bot):
             return InputMediaAudio(file_id, caption=BOT_SIGNATURE)
         return InputMediaDocument(file_id, caption=BOT_SIGNATURE)
 
+    def _inline_fail(inline_message_id, t, text):
+        try:
+            bot.edit_message_text(
+                text,
+                inline_message_id=inline_message_id,
+                reply_markup=_open_bot_markup(t, "inline"),
+            )
+        except Exception:
+            pass
+
     @bot.chosen_inline_handler(func=lambda result: True)
     def handle_chosen_inline(result):
-        if not result.result_id.startswith("d:"):
+        if not result.result_id.startswith(("d:", "y:")):
             # A cached file was sent: nothing to download.
             store.record_inline_send()
             return
@@ -6688,24 +6726,104 @@ def register_features(bot):
         if not data or not inline_message_id:
             return
 
-        def fail(text):
-            try:
-                bot.edit_message_text(
-                    text,
-                    inline_message_id=inline_message_id,
-                    reply_markup=_open_bot_markup(t, "inline"),
-                )
-            except Exception:
-                pass
+        if result.result_id.startswith("y:"):
+            _show_inline_youtube_picker(result.result_id[2:], data, inline_message_id, result.from_user, t)
+            return
 
+        _deliver_inline(data, inline_message_id, user_id, t)
+
+    def _show_inline_youtube_picker(token, data, inline_message_id, user, t):
+        """Turns the sent "⏳" message into the quality picker, in the chat
+        where it was sent. Only the sender's taps are accepted."""
+        lang = store.get_user(user_settings, user.id).get("lang", store.DEFAULT_LANGUAGE)
+
+        try:
+            probe = platforms.probe_youtube_qualities(data["url"])
+        except Exception as e:
+            store.record_error(platform="youtube", url=data["url"], user_id=user.id, error=f"[inline] {e}")
+            _inline_fail(inline_message_id, t, _friendly_download_error("youtube", e, t))
+            return
+
+        if not probe.get("options"):
+            _inline_fail(inline_message_id, t, t["yt_no_quality"])
+            return
+
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(*[
+            InlineKeyboardButton(
+                _quality_option_label(opt, lang),
+                callback_data=f"iq_{token}_{'audio' if opt['kind'] == 'audio' else opt.get('height')}",
+            )
+            for opt in probe["options"]
+        ])
+
+        name = getattr(user, "first_name", None) or (
+            f"@{user.username}" if getattr(user, "username", None) else str(user.id)
+        )
+        text = (
+            t["yt_choose_quality"].format(title=(probe.get("title") or "")[:200])
+            + "\n\n"
+            + t["yt_pick_for"].format(name=name)
+        )
+
+        data["inline_message_id"] = inline_message_id
+
+        try:
+            bot.edit_message_text(text, inline_message_id=inline_message_id, reply_markup=markup)
+        except Exception:
+            logger.warning("Could not show the inline YouTube picker", exc_info=True)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("iq_"))
+    def handle_inline_quality_pick(call):
+        token, _, choice = call.data[3:].rpartition("_")
+        data = _inline_tokens.get(token)
+        clicker_t = _texts_for(call.from_user.id)
+
+        if not data or not call.inline_message_id:
+            bot.answer_callback_query(call.id, clicker_t["inline_expired"], show_alert=True)
+            return
+
+        if call.from_user.id != data["user_id"]:
+            # Everyone in the chat sees the buttons; only the sender counts.
+            bot.answer_callback_query(call.id, clicker_t["yt_not_yours"], show_alert=True)
+            return
+
+        if data.get("picked"):
+            bot.answer_callback_query(call.id)
+            return
+
+        data["picked"] = True
+        bot.answer_callback_query(call.id)
+
+        t = _texts_for(data["user_id"])
+
+        try:
+            bot.edit_message_text(
+                t["inline_placeholder"],
+                inline_message_id=call.inline_message_id,
+                reply_markup=_inline_markup(t),
+            )
+        except Exception:
+            pass
+
+        _deliver_inline(
+            dict(data, choice=choice),
+            call.inline_message_id,
+            data["user_id"],
+            t,
+        )
+
+    def _deliver_inline(data, inline_message_id, user_id, t):
+        """Downloads the media for an inline message, uploads it to the cache
+        channel and turns the inline message into the file."""
         cache_chat = _cache_chat_id()
 
         if cache_chat is None:
-            fail(t["download_failed"])
+            _inline_fail(inline_message_id, t, t["download_failed"])
             return
 
         if _is_rate_limited(user_id):
-            fail(t["rate_limited"].format(limit=RATE_LIMIT_COUNT))
+            _inline_fail(inline_message_id, t, t["rate_limited"].format(limit=RATE_LIMIT_COUNT))
             return
 
         mode = data["mode"]
@@ -6717,7 +6835,7 @@ def register_features(bot):
         slot = _acquire_download_slot(bot, user_id, None, t, show_ui=False, platform=platform)
 
         if slot is None:
-            fail(t["server_busy"])
+            _inline_fail(inline_message_id, t, t["server_busy"])
             return
 
         files = []
@@ -6789,9 +6907,9 @@ def register_features(bot):
                 logger.exception("Inline download failed | url=%s", url)
 
             if isinstance(e, platforms.FileTooLargeError):
-                fail(t["too_large"].format(size=str(e)))
+                _inline_fail(inline_message_id, t, t["too_large"].format(size=str(e)))
             else:
-                fail(_friendly_download_error(platform, e, t))
+                _inline_fail(inline_message_id, t, _friendly_download_error(platform, e, t))
 
         finally:
             platforms.remove_download_files(files)

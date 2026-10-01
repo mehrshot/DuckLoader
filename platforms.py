@@ -2109,6 +2109,17 @@ def probe_youtube_qualities(url: str) -> dict:
     return result
 
 
+def cached_youtube_probe(url: str) -> dict | None:
+    """The quality-picker probe for `url` if it's still cached — never
+    triggers a new (slow) extraction."""
+    cache_key = url.strip().split("&")[0]
+    with _youtube_probe_cache_lock:
+        cached = _youtube_probe_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < YOUTUBE_PROBE_CACHE_TTL:
+        return cached[1]
+    return None
+
+
 def youtube_option_size(video_id: str, choice: str) -> int | None:
     """The size the quality picker showed for this button, if the probe
     result is still cached (used to estimate how long the job will take)."""
