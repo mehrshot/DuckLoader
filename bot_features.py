@@ -1,6 +1,11 @@
+import concurrent.futures
+import contextlib
+import copy
+import json
 import logging
 import math
 import os
+import secrets
 import re
 import random
 import threading
@@ -19,7 +24,16 @@ from telebot.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     ForceReply,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedAudio,
+    InlineQueryResultCachedDocument,
+    InlineQueryResultCachedPhoto,
+    InlineQueryResultCachedVideo,
+    InlineQueryResultsButton,
+    InputTextMessageContent,
+    ReactionTypeEmoji,
 )
+from telebot import apihelper
 import admin
 import ads
 import platforms
@@ -104,6 +118,48 @@ def _cache_key_lock(key):
             lock = threading.Lock()
             _cache_key_locks[key] = lock
         return lock
+
+
+# One download at a time per group: someone pasting 20 links shouldn't fill
+# the queue for everyone else.
+_group_locks = _BoundedCache(max_items=2000)
+_group_locks_guard = threading.Lock()
+
+
+def _group_lock(chat_id):
+    with _group_locks_guard:
+        lock = _group_locks.get(chat_id)
+        if lock is None:
+            lock = threading.Lock()
+            _group_locks[chat_id] = lock
+        return lock
+
+
+# YouTube picker callbacks: "yq_<requester id>_<video id>_<choice>".
+YT_PICK_PREFIX = "yq_"
+# (chat_id, requester_id, video_id) -> {"link_message_id": ...}
+_yt_pick_context = _BoundedCache(max_items=2000)
+
+# Inline mode
+INLINE_GATE_CACHE_SECONDS = 600
+_inline_tokens = _BoundedCache(max_items=5000)   # token -> what to download
+_inline_gate_cache = {}                          # user_id -> (monotonic, passed)
+_inline_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+_bot_admin_cache = {}                            # chat_id -> (monotonic, is_admin)
+_bot_identity = {}
+
+
+def _new_inline_token(data: dict) -> str:
+    token = secrets.token_urlsafe(6)
+    _inline_tokens[token] = dict(data, created=time.time())
+    return token
+
+
+def _as_int(value):
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _file_ref(message):
@@ -530,6 +586,29 @@ TEXTS = {
         'ig_not_found': "❌ اینستاگرام این پست رو پیدا نکرد؛ احتمالاً حذف یا آرشیو شده، یا پیجش عمومی نیست.\n\nاگه تو اینستاگرام بدون مشکل باز میشه، از «💬 پیشنهاد و گزارش مشکل» خبرمون کن.",
         'platform_unavailable': "⏳ این سرویس الان جواب نمی‌ده. لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن.",
         'already_downloading': "⏳ این لینک در حال دانلوده؛ چند لحظه صبر کن تا برسه.",
+        'yt_not_yours': "🦆 فقط کسی که لینک رو فرستاده می‌تونه کیفیت رو انتخاب کنه.",
+        'yt_pick_for': "👤 انتخاب کیفیت فقط با {name}",
+        'group_intro': "🦆 سلام! من داکلودرم.\n\nهر لینک اینستاگرام، تیک‌تاک، یوتیوب، ساندکلاد یا اسپاتیفای که توی این گروه فرستاده بشه، فایلش رو همین‌جا میارم. لازم نیست کار دیگه‌ای بکنید، فقط لینک بفرستید!",
+        'group_intro_needs_admin': "\n\n⚠️ برای اینکه لینک‌های گروه رو ببینم، باید منو ادمین گروه کنید (هیچ دسترسی خاصی لازم نیست).",
+        'group_album_private': "🎵 آلبوم و پلی‌لیست اسپاتیفای رو توی چت خصوصی ربات بفرست تا گروه شلوغ نشه.",
+        'open_bot_btn': "🦆 باز کردن داکلودر",
+        'inline_bot_btn': "🦆 دانلود با داکلودر",
+        'inline_help_btn': "🦆 لینک رو بعد از اسم ربات بذار",
+        'inline_gate_btn': "🔒 برای استفاده، اول توی ربات عضو کانال‌ها شو",
+        'inline_ready': "✅ آماده‌ست! حالا توی هر چتی بنویس @{bot} و یه فاصله، بعد لینک رو بذار تا فایل همون‌جا ارسال بشه.",
+        'inline_download_title': "🦆 دانلود و ارسال همین‌جا",
+        'inline_download_desc': "بزن تا فایل توی همین چت ارسال بشه",
+        'inline_cached_title': "⚡️ ارسال فوری",
+        'inline_placeholder': "⏳ اردک داره میاردش…",
+        'inline_in_bot_btn': "🦆 دانلود داخل ربات",
+        'inline_spotify_bot': "🎵 آلبوم و پلی‌لیست رو داخل ربات بفرست",
+        'inline_yt_in_bot': "🎬 انتخاب کیفیت داخل ربات",
+        'inline_more_btn': "➕ بقیه‌ی پست داخل ربات",
+        'cache_ask_forward': "📦 یه پیام از کانال انبار (DuckLoader Cache) رو همین‌جا برام فوروارد کن.",
+        'cache_set_done': "✅ کانال انبار وصل شد: {title}",
+        'cache_set_failed': "❌ نتونستم توی اون کانال پیام بفرستم. مطمئن شو ربات ادمین کانال باشه و اجازه‌ی ارسال پیام داشته باشه.\n\n{error}",
+        'stats_groups': "گروه‌های فعال",
+        'stats_inline': "ارسال‌های اینلاین",
         'senddl_notice': "✅ مشکل لینک شما برطرف شد، فایلی که می‌خواستید در ادامه براتون ارسال می‌شه. 🦆",
         'tiktok_blocked': "🌍 تیک‌تاک دسترسی به این ویدیو رو از منطقه‌ی سرور ربات بسته و فعلاً قابل دریافت نیست.",
         'tiktok_login': "🔞 تیک‌تاک این ویدیو رو فقط برای کاربران واردشده نمایش می‌ده (محدودیت سنی) و فعلاً قابل دریافت نیست.",
@@ -841,6 +920,29 @@ TEXTS = {
         'ig_not_found': "❌ Instagram couldn't find this post — it was probably deleted or archived, or its account isn't public.\n\nIf it opens fine in Instagram, let us know via \"💬 Feedback\".",
         'platform_unavailable': "⏳ The service isn't responding right now. Please try again in a few minutes.",
         'already_downloading': "⏳ This link is already downloading — it'll arrive in a moment.",
+        'yt_not_yours': "🦆 Only the person who sent the link can choose the quality.",
+        'yt_pick_for': "👤 Only {name} can choose the quality",
+        'group_intro': "🦆 Hi! I'm DuckLoader.\n\nSend any Instagram, TikTok, YouTube, SoundCloud or Spotify link in this group and I'll bring the file right here. Nothing else to do — just send links!",
+        'group_intro_needs_admin': "\n\n⚠️ To see the group's links, please make me an admin (no special permissions needed).",
+        'group_album_private': "🎵 Send Spotify albums and playlists in a private chat with the bot, so the group doesn't get flooded.",
+        'open_bot_btn': "🦆 Open DuckLoader",
+        'inline_bot_btn': "🦆 Download with DuckLoader",
+        'inline_help_btn': "🦆 Put a link after the bot's name",
+        'inline_gate_btn': "🔒 To use this, first join the channels in the bot",
+        'inline_ready': "✅ All set! In any chat type @{bot}, a space, then the link — the file is sent right there.",
+        'inline_download_title': "🦆 Download and send here",
+        'inline_download_desc': "Tap to send the file in this chat",
+        'inline_cached_title': "⚡️ Send instantly",
+        'inline_placeholder': "⏳ The duck is fetching it…",
+        'inline_in_bot_btn': "🦆 Download in the bot",
+        'inline_spotify_bot': "🎵 Send albums and playlists in the bot",
+        'inline_yt_in_bot': "🎬 Choose the quality in the bot",
+        'inline_more_btn': "➕ Rest of the post in the bot",
+        'cache_ask_forward': "📦 Forward me any message from the cache channel (DuckLoader Cache).",
+        'cache_set_done': "✅ Cache channel connected: {title}",
+        'cache_set_failed': "❌ I couldn't post in that channel. Make sure the bot is an admin there and allowed to post.\n\n{error}",
+        'stats_groups': "Active groups",
+        'stats_inline': "Inline sends",
         'senddl_notice': "✅ The problem with your link has been fixed — the file you wanted is on its way. 🦆",
         'tiktok_blocked': "🌍 TikTok blocks this video in the bot server's region, so it can't be downloaded right now.",
         'tiktok_login': "🔞 TikTok only shows this video to logged-in users (age restriction), so it can't be downloaded right now.",
@@ -1090,6 +1192,12 @@ TEXTS = {
 }
 
 def _texts_for(chat_id) -> dict:
+    # Groups have no /settings of their own; their audience is Persian.
+    try:
+        if int(chat_id) < 0 and str(chat_id) not in user_settings:
+            return TEXTS["fa"]
+    except (TypeError, ValueError):
+        pass
     user = store.get_user(user_settings, chat_id)
     return TEXTS.get(user.get('lang'), TEXTS[store.DEFAULT_LANGUAGE])
 
@@ -2127,6 +2235,114 @@ def register_features(bot):
     ads.set_check_failure_handler(_alert_owner_sponsor_check_failed)
 
     # ------------------------------------------------------------------
+    # Small helpers shared by group and inline mode
+    # ------------------------------------------------------------------
+
+    def _bot_me():
+        if "me" not in _bot_identity:
+            _bot_identity["me"] = bot.get_me()
+        return _bot_identity["me"]
+
+    def _bot_username():
+        return _bot_me().username
+
+    def _cache_chat_id():
+        value = os.environ.get("CACHE_CHAT_ID") or flags.get("cache_chat_id")
+        try:
+            return int(value) if value else None
+        except (TypeError, ValueError):
+            return None
+
+    def _raw_api(method_name, params):
+        """Bot API methods newer than pyTelegramBotAPI (ephemeral messages)."""
+        return apihelper._make_request(bot.token, method_name, method="post", params=params)
+
+    def _set_reaction(chat_id, message_id, emoji):
+        """Quiet progress feedback in groups: 👀 while working, removed when
+        the file arrives, 🤷 if it failed. Groups that disabled reactions
+        simply get nothing."""
+        if not message_id:
+            return
+        try:
+            bot.set_message_reaction(
+                chat_id,
+                message_id,
+                [ReactionTypeEmoji(emoji)] if emoji else [],
+            )
+        except Exception:
+            pass
+
+    def _bot_is_admin(chat_id) -> bool:
+        cached = _bot_admin_cache.get(chat_id)
+        if cached and time.monotonic() - cached[0] < 600:
+            return cached[1]
+        try:
+            status = bot.get_chat_member(chat_id, _bot_me().id).status
+            is_admin = status in ("administrator", "creator")
+        except Exception:
+            is_admin = False
+        _bot_admin_cache[chat_id] = (time.monotonic(), is_admin)
+        return is_admin
+
+    def _open_bot_markup(t, payload="inline", text_key="open_bot_btn"):
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton(
+                t[text_key],
+                url=f"https://t.me/{_bot_username()}?start={payload}",
+            )
+        )
+        return markup
+
+    # ------------------------------------------------------------------
+    # /setcache: connect the private "DuckLoader Cache" channel
+    # ------------------------------------------------------------------
+    # Inline messages can only be turned into media that's already on
+    # Telegram, so inline downloads are uploaded to this private channel
+    # first. The owner forwards a message from it — only the owner can do
+    # this, so nobody else can point the bot's uploads at their channel.
+
+    _awaiting_cache_forward = set()
+
+    def _forwarded_channel(message):
+        origin = getattr(message, "forward_origin", None)
+        if origin is not None and getattr(origin, "type", "") == "channel":
+            return getattr(origin, "chat", None)
+        chat = getattr(message, "forward_from_chat", None)
+        if chat is not None and getattr(chat, "type", "") == "channel":
+            return chat
+        return None
+
+    @bot.message_handler(commands=["setcache"])
+    def set_cache_channel(message):
+        if not admin.is_owner(message.from_user.id) or not _is_private_chat(message.chat.type):
+            return
+        _awaiting_cache_forward.add(message.from_user.id)
+        bot.reply_to(message, _texts_for(message.chat.id)["cache_ask_forward"])
+
+    @bot.message_handler(
+        func=lambda msg:
+            msg.from_user is not None
+            and msg.from_user.id in _awaiting_cache_forward
+            and _forwarded_channel(msg) is not None,
+        content_types=["text", "photo", "video", "audio", "document", "animation", "voice", "sticker"],
+    )
+    def receive_cache_channel(message):
+        _awaiting_cache_forward.discard(message.from_user.id)
+        t = _texts_for(message.chat.id)
+        channel = _forwarded_channel(message)
+
+        try:
+            bot.send_message(channel.id, "🦆 DuckLoader cache channel connected.", disable_notification=True)
+        except Exception as e:
+            bot.reply_to(message, t["cache_set_failed"].format(error=str(e)[:300]))
+            return
+
+        flags["cache_chat_id"] = channel.id
+        store.save_flags(flags)
+        bot.reply_to(message, t["cache_set_done"].format(title=getattr(channel, "title", channel.id)))
+
+    # ------------------------------------------------------------------
     # Feedback: suggestions and problem reports, forwarded to the owner
     # ------------------------------------------------------------------
     # Registered before handle_media_link and the ad-request form, so a
@@ -2767,6 +2983,7 @@ def register_features(bot):
         )
 
         if not unjoined:
+            _inline_gate_cache[user_id] = (time.monotonic(), True)
             return True
 
         markup = InlineKeyboardMarkup(
@@ -3382,46 +3599,49 @@ def register_features(bot):
                     pass
             return False, Exception("This link is already being downloaded for this chat.")
 
+        group_lock = _group_lock(chat_id_int) if chat_id_int < 0 else contextlib.nullcontext()
+
         try:
-            if not cache_key:
-                return _download_and_send(
-                    chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, None,
-                )
+            with group_lock:
+                if not cache_key:
+                    return _download_and_send(
+                        chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, None,
+                    )
 
-            with _cache_key_lock(cache_key):
-                # Already sent this exact media before? Re-send it by file_id.
-                cached = media_cache.get(cache_key)
+                with _cache_key_lock(cache_key):
+                    # Already sent this exact media before? Re-send it by file_id.
+                    cached = media_cache.get(cache_key)
 
-                if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
-                    try:
-                        _send_cached_result(
-                            chat_id_int,
-                            reply_to_id,
-                            url,
-                            platform,
-                            cached,
-                            t,
-                            show_ui=show_ui,
-                        )
+                    if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+                        try:
+                            _send_cached_result(
+                                chat_id_int,
+                                reply_to_id,
+                                url,
+                                platform,
+                                cached,
+                                t,
+                                show_ui=show_ui,
+                            )
 
-                        if show_ui and status_msg is not None:
-                            try:
-                                bot.delete_message(chat_id_int, status_msg.message_id)
-                            except Exception:
-                                pass
+                            if show_ui and status_msg is not None:
+                                try:
+                                    bot.delete_message(chat_id_int, status_msg.message_id)
+                                except Exception:
+                                    pass
 
-                        if show_ui:
-                            _maybe_send_ad(chat_id_int)
+                            if show_ui:
+                                _maybe_send_ad(chat_id_int)
 
-                        logger.info("Served from media cache | %s", cache_key)
-                        return True, None
-                    except Exception:
-                        logger.warning("Cached re-send failed; downloading again | %s", cache_key, exc_info=True)
-                        media_cache.pop(cache_key, None)
+                            logger.info("Served from media cache | %s", cache_key)
+                            return True, None
+                        except Exception:
+                            logger.warning("Cached re-send failed; downloading again | %s", cache_key, exc_info=True)
+                            media_cache.pop(cache_key, None)
 
-                return _download_and_send(
-                    chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, cache_key,
-                )
+                    return _download_and_send(
+                        chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, cache_key,
+                    )
         finally:
             _release_in_flight(in_flight_key)
 
@@ -3449,6 +3669,10 @@ def register_features(bot):
 
         if slot is None:
             return False, Exception("The download queue is full.")
+
+        # Groups get no status messages; a reaction on the link says "on it".
+        react_target = reply_to_id if (chat_id_int < 0 and reply_to_id) else None
+        _set_reaction(chat_id_int, react_target, "👀")
 
         # The clock starts once the job really starts (queue time excluded).
         ticker = _ProgressTicker(
@@ -3517,6 +3741,8 @@ def register_features(bot):
                     )
                 except Exception:
                     pass
+            _set_reaction(chat_id_int, react_target, None)
+
             if show_ui:
                 _maybe_send_ad(chat_id_int)
 
@@ -3548,6 +3774,8 @@ def register_features(bot):
                 )
             except Exception:
                 pass
+
+            _set_reaction(chat_id_int, react_target, "🤷")
 
             return False, e
 
@@ -3595,6 +3823,8 @@ def register_features(bot):
             except Exception:
                 pass
 
+            _set_reaction(chat_id_int, react_target, "🤷")
+
             return False, e
 
         finally:
@@ -3603,17 +3833,83 @@ def register_features(bot):
 
             slot.release()
 
+    def _quality_option_label(opt, lang):
+        digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+        if opt.get("size_bytes", 0) <= 0:
+            size_label = "Unknown Size" if lang == "en" else "حجم نامشخص"
+        else:
+            size_label = f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
+            if lang == "fa":
+                size_label = size_label.replace("MB", "مگابایت").translate(digits)
+
+        if opt["kind"] == "audio":
+            return f"🎵 Audio — {size_label}" if lang == "en" else f"🎵 صوت — {size_label}"
+
+        height_str = str(opt.get("height"))
+        if lang == "fa":
+            height_str = height_str.translate(digits)
+        return f"🎬 {height_str}p — {size_label}"
+
+    def _youtube_quality_markup(probe, lang, requester_id):
+        markup = InlineKeyboardMarkup(row_width=2)
+        buttons = []
+
+        for opt in probe["options"]:
+            choice = "audio" if opt["kind"] == "audio" else str(opt.get("height"))
+            buttons.append(
+                InlineKeyboardButton(
+                    text=_quality_option_label(opt, lang),
+                    callback_data=f"{YT_PICK_PREFIX}{requester_id}_{probe['id']}_{choice}",
+                )
+            )
+
+        markup.add(*buttons)
+        return markup
+
+    def _send_ephemeral_picker(chat_id, receiver_id, probe, caption, markup) -> bool:
+        """Shows the picker only to the person who sent the link (Bot API
+        10.2 ephemeral messages; possible at any time when the bot is a
+        group admin). Returns False if it couldn't be sent ephemerally."""
+        params = {
+            "chat_id": chat_id,
+            "caption" if probe.get("thumbnail") else "text": caption,
+            "reply_markup": markup.to_json(),
+            "ephemeral_message_parameters": json.dumps({"receiver_user_id": receiver_id}),
+        }
+        try:
+            if probe.get("thumbnail"):
+                params["photo"] = probe["thumbnail"]
+                result = _raw_api("sendPhoto", params)
+            else:
+                result = _raw_api("sendMessage", params)
+        except Exception as e:
+            logger.info("Ephemeral picker not available: %s", str(e)[:200])
+            return False
+
+        if isinstance(result, dict) and result.get("ephemeral_message_id"):
+            return True
+
+        # An older Bot API server ignored the parameter and posted it
+        # publicly: remove it and fall back to the normal picker.
+        try:
+            if isinstance(result, dict) and result.get("message_id"):
+                bot.delete_message(chat_id, result["message_id"])
+        except Exception:
+            pass
+        return False
+
     def _send_youtube_quality_picker(
         message,
         t,
         lang,
         show_ui=True,
+        url=None,
     ):
         chat_id_int = message.chat.id
+        requester_id = message.from_user.id
 
-        url = platforms.extract_url(
-            message.text
-        )
+        url = url or platforms.extract_url(message.text or "")
 
         if not url:
             return
@@ -3621,33 +3917,22 @@ def register_features(bot):
         status_msg = None
 
         if show_ui:
-            status_msg = bot.reply_to(
-                message,
-                t["init"],
-            )
+            status_msg = bot.reply_to(message, t["init"])
+        else:
+            _set_reaction(chat_id_int, message.message_id, "👀")
+
         try:
-            probe = platforms.probe_youtube_qualities(
-                url
-            )
-
+            probe = platforms.probe_youtube_qualities(url)
         except Exception as e:
-
-            _send_duck_download_failed(
-                chat_id_int,
-                show_ui=show_ui,
-            )
+            _send_duck_download_failed(chat_id_int, show_ui=show_ui)
 
             store.record_error(
                 platform="youtube",
                 url=url,
-                user_id=message.from_user.id,
+                user_id=requester_id,
                 error=str(e),
             )
-
-            logger.exception(
-                "YouTube quality probe failed | url=%s",
-                url,
-            )
+            logger.exception("YouTube quality probe failed | url=%s", url)
 
             if show_ui and status_msg is not None:
                 try:
@@ -3658,112 +3943,46 @@ def register_features(bot):
                     )
                 except Exception:
                     pass
-
+            else:
+                _set_reaction(chat_id_int, message.message_id, "🤷")
             return
+
+        if not show_ui:
+            _set_reaction(chat_id_int, message.message_id, None)
 
         if not probe.get("options"):
             if show_ui and status_msg is not None:
-                bot.edit_message_text(
-                    t["yt_no_quality"],
-                    chat_id_int,
-                    status_msg.message_id,
-                )
-
+                bot.edit_message_text(t["yt_no_quality"], chat_id_int, status_msg.message_id)
+            else:
+                _set_reaction(chat_id_int, message.message_id, "🤷")
             return
 
-        digits = str.maketrans(
-            "0123456789",
-            "۰۱۲۳۴۵۶۷۸۹",
-        )
-
-        markup = InlineKeyboardMarkup(
-            row_width=2
-        )
-
-        buttons = []
-
-        for opt in probe["options"]:
-
-            if opt.get("size_bytes", 0) <= 0:
-                size_label = (
-                    "Unknown Size"
-                    if lang == "en"
-                    else "حجم نامشخص"
-                )
-
-            else:
-                size_label = (
-                    f"{round(opt['size_bytes'] / 1024 / 1024)} MB"
-                )
-
-                if lang == "fa":
-                    size_label = (
-                        size_label
-                        .replace(
-                            "MB",
-                            "مگابایت",
-                        )
-                        .translate(digits)
-                    )
-
-            if opt["kind"] == "audio":
-
-                text = (
-                    f"🎵 Audio — {size_label}"
-                    if lang == "en"
-                    else f"🎵 صوت — {size_label}"
-                )
-
-                callback_data = (
-                    f"ytq_{probe['id']}_audio"
-                )
-
-            else:
-
-                height = opt.get("height")
-                height_str = str(height)
-
-                if lang == "fa":
-                    height_str = (
-                        height_str.translate(
-                            digits
-                        )
-                    )
-
-                text = (
-                    f"🎬 {height_str}p — {size_label}"
-                )
-
-                callback_data = (
-                    f"ytq_{probe['id']}_{height}"
-                )
-
-            buttons.append(
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=callback_data,
-                )
-            )
-
-        markup.add(*buttons)
+        markup = _youtube_quality_markup(probe, lang, requester_id)
 
         if show_ui and status_msg is not None:
             try:
-                bot.delete_message(
-                    chat_id_int,
-                    status_msg.message_id,
-                )
+                bot.delete_message(chat_id_int, status_msg.message_id)
             except Exception:
                 pass
 
-        caption = (
-            t["yt_choose_quality"].format(
-                title=(
-                    probe.get("title")
-                    or ""
-                )[:200]
+        caption = t["yt_choose_quality"].format(title=(probe.get("title") or "")[:200])
+
+        if not show_ui:
+            _yt_pick_context[(chat_id_int, requester_id, probe["id"])] = {
+                "link_message_id": message.message_id,
+            }
+
+            # Only the sender sees the picker when Telegram allows it...
+            if _bot_is_admin(chat_id_int) and _send_ephemeral_picker(
+                chat_id_int, requester_id, probe, caption, markup,
+            ):
+                return
+
+            # ...otherwise everyone sees it, but only the sender can use it.
+            name = message.from_user.first_name or (
+                f"@{message.from_user.username}" if message.from_user.username else str(requester_id)
             )
-        )
+            caption = f"{caption}\n\n{t['yt_pick_for'].format(name=name)}"
 
         sent_with_thumbnail = False
 
@@ -3774,9 +3993,7 @@ def register_features(bot):
                     probe["thumbnail"],
                     caption=caption,
                     reply_markup=markup,
-                    reply_to_message_id=(
-                        message.message_id
-                    ),
+                    reply_to_message_id=message.message_id,
                 )
                 sent_with_thumbnail = True
             except Exception:
@@ -3786,15 +4003,44 @@ def register_features(bot):
                 )
 
         if not sent_with_thumbnail:
-
             bot.send_message(
                 chat_id_int,
                 caption,
                 reply_markup=markup,
-                reply_to_message_id=(
-                    message.message_id
-                ),
+                reply_to_message_id=message.message_id,
             )
+
+    def _handle_start_payload(message, payload, t) -> bool:
+        """Deep links: t.me/<bot>?start=gate | inline | yt_<id> | dl_<token>.
+        Returns True if the payload was an action (not a campaign source)."""
+        user_id = message.from_user.id
+
+        if payload == "gate":
+            if _check_sponsor_channel_gate(message.chat.id, user_id, t):
+                bot.reply_to(message, t["inline_ready"].format(bot=_bot_username()))
+            return True
+
+        if payload == "inline":
+            bot.reply_to(message, t["inline_ready"].format(bot=_bot_username()))
+            return True
+
+        if payload.startswith("yt_") and platforms.youtube_video_id(f"https://youtu.be/{payload[3:]}"):
+            fake = copy.copy(message)
+            fake.text = f"https://www.youtube.com/watch?v={payload[3:]}"
+            handle_media_link(fake)
+            return True
+
+        if payload.startswith("dl_"):
+            data = _inline_tokens.get(payload[3:])
+            if not data:
+                bot.reply_to(message, t["audio_expired"])
+                return True
+            fake = copy.copy(message)
+            fake.text = data["url"]
+            handle_media_link(fake)
+            return True
+
+        return False
 
     @bot.message_handler(
         commands=["start"]
@@ -3830,13 +4076,16 @@ def register_features(bot):
 
         user["lang"] = language
 
+        parts = (message.text or "").split(maxsplit=1)
+        payload = re.sub(r"[^A-Za-z0-9_-]", "", parts[1])[:64] if len(parts) > 1 else ""
+        is_action_payload = payload in ("gate", "inline") or payload.startswith(("yt_", "dl_"))
+
         if is_new_user:
             user["joined"] = time.strftime("%Y-%m-%d")
 
             # t.me/<bot>?start=<source> arrives as "/start <source>" —
             # one link per ad campaign shows exactly where users came from.
-            parts = (message.text or "").split(maxsplit=1)
-            source = re.sub(r"[^A-Za-z0-9_-]", "", parts[1])[:32] if len(parts) > 1 else ""
+            source = "" if is_action_payload else payload[:32]
 
             if source and not user.get("source"):
                 user["source"] = source
@@ -3849,6 +4098,9 @@ def register_features(bot):
         )
 
         t = TEXTS[language]
+
+        if is_action_payload and _is_private_chat(message.chat.type) and _handle_start_payload(message, payload, t):
+            return
 
         _delete_previous_download_ducks(
             message.chat.id
@@ -3870,7 +4122,7 @@ def register_features(bot):
             bot.reply_to(
                 message,
                 t["welcome"],
-                reply_markup=_main_reply_markup(),
+                reply_markup=_main_reply_markup() if _is_private_chat(message.chat.type) else None,
                 parse_mode="Markdown",
             )
 
@@ -3889,7 +4141,7 @@ def register_features(bot):
         bot.reply_to(
             message,
             t["welcome"],
-            reply_markup=_main_reply_markup(),
+            reply_markup=_main_reply_markup() if _is_private_chat(message.chat.type) else None,
             parse_mode="Markdown",
         )
     @bot.message_handler(commands=["whoami"])
@@ -5120,11 +5372,9 @@ def register_features(bot):
             bot.reply_to(message, t['not_launched'].format(platform=platforms.PLATFORM_NAMES[platform]))
             return
 
-        # YouTube gets the thumbnail+buttons quality picker EXCEPT when the
-        # user has already told us (via /settings) that they always want
-        # audio only — in that case there's nothing to pick, so it goes
-        # through the same direct-download path as every other platform.
-        if platform == "youtube" and user['quality'] != 'audio':
+        # YouTube always gets the thumbnail+buttons quality picker — in
+        # groups too, where only the person who sent the link can use it.
+        if platform == "youtube":
             _send_youtube_quality_picker(message, t, user['lang'], show_ui=show_ui,)
             return
 
@@ -5172,6 +5422,12 @@ def register_features(bot):
                 tracks = platforms.resolve_spotify_tracks(url)
                 if not tracks:
                     raise Exception("Spotify returned no playable tracks for this link.")
+
+                if not show_ui and len(tracks) > 1:
+                    # An album would be 20 files in a row in the group.
+                    ticker.stop()
+                    bot.reply_to(message, t["group_album_private"], reply_markup=_open_bot_markup(t))
+                    return
 
                 # An album takes about N tracks' worth of time.
                 ticker.set_expected(
@@ -5614,6 +5870,11 @@ def register_features(bot):
         )
 
         if not last_message:
+            # Came from the inline-mode gate: nothing to resume, just confirm.
+            try:
+                bot.send_message(chat_id_int, t["inline_ready"].format(bot=_bot_username()))
+            except Exception:
+                pass
             return
 
         handle_media_link(
@@ -5847,81 +6108,115 @@ def register_features(bot):
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # YouTube quality picker buttons
+    # ------------------------------------------------------------------
+    # "yq_<requester>_<video id>_<choice>": in groups only the person who
+    # sent the link may pick. "ytq_<video id>_<choice>" is the old format,
+    # still accepted so buttons sent before this update keep working.
+
+    def _parse_quality_callback(data):
+        if data.startswith(YT_PICK_PREFIX):
+            requester, _, rest = data[len(YT_PICK_PREFIX):].partition("_")
+            if not requester.isdigit() or len(rest) < 13 or rest[11] != "_":
+                raise ValueError(data)
+            return int(requester), rest[:11], rest[12:]
+        video_id, choice = data[len("ytq_"):].rsplit("_", 1)
+        return None, video_id, choice
+
+    def _delete_picker(call):
+        ephemeral_id = (getattr(call.message, "json", None) or {}).get("ephemeral_message_id")
+        try:
+            if ephemeral_id:
+                _raw_api("deleteEphemeralMessage", {
+                    "chat_id": call.message.chat.id,
+                    "receiver_user_id": call.from_user.id,
+                    "ephemeral_message_id": ephemeral_id,
+                })
+            else:
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+
     @bot.callback_query_handler(
-        func=lambda call: call.data.startswith("ytq_")
+        func=lambda call: call.data.startswith(("ytq_", YT_PICK_PREFIX))
     )
     def handle_youtube_quality_pick(call):
-        chat_id_str = str(
-            call.message.chat.id
-        )
-        chat_id_int = call.message.chat.id
-        user_id = call.from_user.id
-
-        show_ui = (
-            call.message.chat.type
-            == "private"
-        )
-
-        t = _texts_for(
-            chat_id_str
-        )
-
-        if store.is_banned(user_id):
-            bot.answer_callback_query(
-                call.id
-            )
+        if call.message is None:
+            bot.answer_callback_query(call.id)
             return
 
-        if not _check_sponsor_channel_gate(
-            chat_id_int,
-            user_id,
-            t,
-        ):
-            bot.answer_callback_query(
-                call.id
-            )
+        chat_id_int = call.message.chat.id
+        user_id = call.from_user.id
+        show_ui = call.message.chat.type == "private"
+        t = _texts_for(chat_id_int)
+
+        if store.is_banned(user_id):
+            bot.answer_callback_query(call.id)
+            return
+
+        try:
+            requester_id, video_id, choice = _parse_quality_callback(call.data)
+        except ValueError:
+            bot.answer_callback_query(call.id, "Invalid selection.", show_alert=True)
+            return
+
+        if not show_ui and requester_id is not None and requester_id != user_id:
+            # Someone else tapped the sender's picker: ignore it.
+            bot.answer_callback_query(call.id, _texts_for(user_id)["yt_not_yours"], show_alert=True)
+            return
+
+        # The sponsor gate is only ever shown in private chats.
+        if show_ui and not _check_sponsor_channel_gate(chat_id_int, user_id, t):
+            bot.answer_callback_query(call.id)
             return
 
         if _is_rate_limited(user_id):
             bot.answer_callback_query(
                 call.id,
-                t["rate_limited"].format(
-                    limit=RATE_LIMIT_COUNT
-                ),
+                t["rate_limited"].format(limit=RATE_LIMIT_COUNT),
                 show_alert=True,
             )
             return
 
-        try:
-            callback_payload = call.data[
-                len("ytq_"):]
+        bot.answer_callback_query(call.id)
 
-            video_id, choice = (
-                callback_payload.rsplit(
-                    "_",
-                    1,
-                )
+        link_message_id = None
+
+        if not show_ui:
+            context = _yt_pick_context.pop((chat_id_int, user_id, video_id), None) or {}
+            link_message_id = context.get("link_message_id") or getattr(
+                getattr(call.message, "reply_to_message", None), "message_id", None,
+            )
+            # The picker has done its job; don't leave it cluttering the group.
+            _delete_picker(call)
+
+        group_lock = _group_lock(chat_id_int) if not show_ui else contextlib.nullcontext()
+
+        with group_lock:
+            _download_youtube_choice(
+                chat_id_int, user_id, link_message_id, video_id, choice, t, show_ui,
             )
 
-        except ValueError:
-            bot.answer_callback_query(
-                call.id,
-                "Invalid selection.",
-                show_alert=True,
-            )
-            return
+    def _download_youtube_choice(chat_id_int, user_id, link_message_id, video_id, choice, t, show_ui):
+        source_url = f"https://www.youtube.com/watch?v={video_id}"
+        cache_key = platforms.media_cache_key(source_url, choice)
 
-        bot.answer_callback_query(
-            call.id
-        )
+        # The same video at the same quality was already sent somewhere:
+        # re-send it by file_id (common when a video goes around groups).
+        cached = media_cache.get(cache_key) if cache_key else None
 
-        status_msg = None
+        if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+            try:
+                _send_cached_result(chat_id_int, link_message_id, source_url, "youtube", cached, t, show_ui=show_ui)
+                if show_ui:
+                    _maybe_send_ad(chat_id_int)
+                return
+            except Exception:
+                logger.warning("Cached YouTube re-send failed; downloading again | %s", cache_key, exc_info=True)
+                media_cache.pop(cache_key, None)
 
-        if show_ui:
-            status_msg = bot.send_message(
-                chat_id_int,
-                t["init"],
-            )
+        status_msg = bot.send_message(chat_id_int, t["init"]) if show_ui else None
 
         slot = _acquire_download_slot(
             bot,
@@ -5934,6 +6229,8 @@ def register_features(bot):
 
         if slot is None:
             return
+
+        _set_reaction(chat_id_int, link_message_id, "👀")
 
         # The picker already knows this option's size: a far better guess
         # than an average over every YouTube video.
@@ -5956,30 +6253,21 @@ def register_features(bot):
         files = []
 
         try:
-
-            info, entries, files = (
-                platforms.download_youtube_quality(
-                    video_id,
-                    choice,
-                    ticker.hook,
-                )
+            info, entries, files = platforms.download_youtube_quality(
+                video_id,
+                choice,
+                ticker.hook,
             )
 
             if show_ui:
-                _finish_duck_download(
-                    chat_id_int
-                )
+                _finish_duck_download(chat_id_int)
 
             ticker.set_phase("uploading")
             delivered_bytes = _files_size(files)
 
-            source_url = (
-                f"https://www.youtube.com/watch?v={video_id}"
-            )
-
             _send_download_result(
                 chat_id_int,
-                None,
+                link_message_id,
                 source_url,
                 "youtube",
                 choice,
@@ -5989,41 +6277,34 @@ def register_features(bot):
                 files,
                 t,
                 show_ui=show_ui,
+                cache_key=cache_key,
             )
 
             ticker.stop()
             duration_model.record(timing_key, ticker.elapsed(), delivered_bytes)
+            _set_reaction(chat_id_int, link_message_id, None)
 
             _send_duck_download_complete(
                 chat_id_int,
                 show_ui=show_ui,
             )
 
-            try:
-                if show_ui and status_msg is not None:
-                    try:
-                        bot.delete_message(
-                            chat_id_int,
-                            status_msg.message_id,
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            if show_ui and status_msg is not None:
+                try:
+                    bot.delete_message(chat_id_int, status_msg.message_id)
+                except Exception:
+                    pass
 
             if show_ui:
-                _maybe_send_ad(
-                    chat_id_int
-                )
+                _maybe_send_ad(chat_id_int)
 
         except platforms.FileTooLargeError as e:
             ticker.stop()
+            _set_reaction(chat_id_int, link_message_id, "🤷")
 
             store.record_error(
                 platform="youtube",
-                url=(
-                    f"https://www.youtube.com/watch?v={video_id}"
-                ),
+                url=source_url,
                 user_id=user_id,
                 error=str(e),
             )
@@ -6031,9 +6312,7 @@ def register_features(bot):
             if show_ui and status_msg is not None:
                 try:
                     bot.edit_message_text(
-                        t["too_large"].format(
-                            size=str(e)
-                        ),
+                        t["too_large"].format(size=str(e)),
                         chat_id_int,
                         status_msg.message_id,
                     )
@@ -6042,10 +6321,7 @@ def register_features(bot):
 
         except Exception as e:
             ticker.stop()
-
-            source_url = (
-                f"https://www.youtube.com/watch?v={video_id}"
-            )
+            _set_reaction(chat_id_int, link_message_id, "🤷")
 
             store.record_error(
                 platform="youtube",
@@ -6074,4 +6350,449 @@ def register_features(bot):
             ticker.stop()
             platforms.remove_download_files(files)
 
+            slot.release()
+
+    # ------------------------------------------------------------------
+    # Groups: notice when the bot is added or removed
+    # ------------------------------------------------------------------
+
+    @bot.my_chat_member_handler()
+    def handle_bot_membership(update):
+        chat = update.chat
+
+        if chat.type not in ("group", "supergroup"):
+            return
+
+        old_status = update.old_chat_member.status
+        new_status = update.new_chat_member.status
+        _bot_admin_cache.pop(chat.id, None)
+
+        if new_status in ("left", "kicked"):
+            store.record_group(chat.id, chat.title, False)
+            return
+
+        store.record_group(chat.id, chat.title, True)
+
+        if old_status in ("left", "kicked") and new_status in ("member", "administrator"):
+            t = _texts_for(chat.id)
+            text = t["group_intro"]
+
+            # With privacy mode on, a non-admin bot never sees plain links.
+            if new_status != "administrator" and not getattr(_bot_me(), "can_read_all_group_messages", False):
+                text += t["group_intro_needs_admin"]
+
+            try:
+                bot.send_message(chat.id, text)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Inline mode: "@DuckDownloader_Bot <link>" in any chat
+    # ------------------------------------------------------------------
+    # Already-downloaded media is offered straight from the cache. Anything
+    # else is offered as a "⏳" placeholder: when the user picks it, the bot
+    # downloads the file, uploads it to the private cache channel (an inline
+    # message can only become media that's already on Telegram) and turns
+    # the placeholder into the file. Telegram shows "via @DuckDownloader_Bot"
+    # on every such message.
+
+    def _inline_gate_ok(user_id) -> bool:
+        current_flags = store.load_flags()
+
+        if not current_flags.get("sponsor_channel_gate", True) or store.is_exempt(user_id):
+            return True
+
+        cached = _inline_gate_cache.get(user_id)
+
+        if cached and time.monotonic() - cached[0] < INLINE_GATE_CACHE_SECONDS:
+            return cached[1]
+
+        passed = not ads.get_unjoined_channels(bot, user_id)
+        _inline_gate_cache[user_id] = (time.monotonic(), passed)
+        return passed
+
+    def _inline_markup(t, more_token=None):
+        markup = InlineKeyboardMarkup()
+
+        if more_token:
+            markup.add(
+                InlineKeyboardButton(
+                    t["inline_more_btn"],
+                    url=f"https://t.me/{_bot_username()}?start=dl_{more_token}",
+                )
+            )
+
+        markup.add(
+            InlineKeyboardButton(
+                t["inline_bot_btn"],
+                url=f"https://t.me/{_bot_username()}?start=inline",
+            )
+        )
+        return markup
+
+    def _inline_quality(user_id, platform):
+        user = store.get_user(user_settings, user_id)
+
+        if platform == "instagram":
+            return "480p" if user.get("low_data_mode", False) else user.get("instagram_quality", "best")
+
+        return "best"
+
+    def _cached_inline_results(cached, t, title):
+        results = []
+
+        for index, (kind, file_id) in enumerate(cached["items"][:10]):
+            result_id = f"c{index}"
+            markup = _inline_markup(t)
+
+            if kind == "video":
+                results.append(InlineQueryResultCachedVideo(
+                    result_id, file_id, title, caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+            elif kind == "photo":
+                results.append(InlineQueryResultCachedPhoto(
+                    result_id, file_id, title=title, caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+            elif kind == "audio":
+                results.append(InlineQueryResultCachedAudio(
+                    result_id, file_id, caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+            elif kind == "document":
+                results.append(InlineQueryResultCachedDocument(
+                    result_id, file_id, title, caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+
+        return results
+
+    def _fresh_cache(cache_key):
+        cached = media_cache.get(cache_key) if cache_key else None
+        if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+            return cached
+        return None
+
+    def _placeholder_result(t, token, title, description="", thumbnail_url=None):
+        return InlineQueryResultArticle(
+            f"d:{token}",
+            title,
+            InputTextMessageContent(t["inline_placeholder"]),
+            reply_markup=_inline_markup(t),
+            description=description,
+            thumbnail_url=thumbnail_url,
+        )
+
+    def _answer_inline(query, results, button=None, cache_time=0):
+        try:
+            bot.answer_inline_query(
+                query.id,
+                results,
+                cache_time=cache_time,
+                is_personal=True,
+                button=button,
+            )
+        except Exception:
+            logger.warning("answer_inline_query failed", exc_info=True)
+
+    @bot.inline_handler(func=lambda query: True)
+    def handle_inline_query(query):
+        user_id = query.from_user.id
+        t = _texts_for(user_id)
+        lang = store.get_user(user_settings, user_id).get("lang", store.DEFAULT_LANGUAGE)
+
+        if store.is_banned(user_id):
+            _answer_inline(query, [])
+            return
+
+        url = platforms.extract_url(query.query or "")
+
+        if not url:
+            _answer_inline(query, [], InlineQueryResultsButton(t["inline_help_btn"], start_parameter="inline"), 60)
+            return
+
+        if not _inline_gate_ok(user_id):
+            _answer_inline(query, [], InlineQueryResultsButton(t["inline_gate_btn"], start_parameter="gate"))
+            return
+
+        platform = platforms.detect_platform(url)
+
+        if not platform or not flags.get(platform, True):
+            _answer_inline(query, [])
+            return
+
+        has_cache_channel = _cache_chat_id() is not None
+
+        # ---------------- YouTube: one result per quality --------------
+        if platform == "youtube":
+            video_id = platforms.youtube_video_id(url)
+
+            if not video_id:
+                _answer_inline(query, [])
+                return
+
+            watch_url = f"https://www.youtube.com/watch?v={video_id}"
+            in_bot = InlineQueryResultsButton(t["inline_yt_in_bot"], start_parameter=f"yt_{video_id}")
+
+            try:
+                # Inline answers must be quick; a slow probe keeps running
+                # in the background and fills the cache for the next try.
+                probe = _inline_executor.submit(platforms.probe_youtube_qualities, watch_url).result(timeout=8)
+            except Exception:
+                _answer_inline(query, [], in_bot)
+                return
+
+            thumb = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+            title = (probe.get("title") or "")[:100]
+            results = []
+
+            for opt in probe.get("options") or []:
+                choice = "audio" if opt["kind"] == "audio" else str(opt.get("height"))
+                label = _quality_option_label(opt, lang)
+                cached = _fresh_cache(platforms.media_cache_key(watch_url, choice))
+
+                if cached:
+                    for result in _cached_inline_results(cached, t, label)[:1]:
+                        result.id = f"c{choice}"
+                        results.append(result)
+                elif has_cache_channel:
+                    token = _new_inline_token({
+                        "mode": "youtube", "url": watch_url, "video_id": video_id,
+                        "choice": choice, "user_id": user_id,
+                    })
+                    results.append(_placeholder_result(t, token, label, title, thumb))
+
+            _answer_inline(query, results, in_bot)
+            return
+
+        # ---------------- Spotify: single tracks only ------------------
+        if platform == "spotify":
+            cache_key = platforms.media_cache_key(url, "audio")
+
+            if not cache_key:
+                _answer_inline(query, [], InlineQueryResultsButton(t["inline_spotify_bot"], start_parameter="inline"))
+                return
+
+            cached = _fresh_cache(cache_key)
+
+            if cached:
+                _answer_inline(query, _cached_inline_results(cached, t, t["inline_cached_title"]))
+                return
+
+            token = _new_inline_token({"mode": "spotify", "url": url, "user_id": user_id, "quality": "audio"})
+
+            if not has_cache_channel:
+                _answer_inline(query, [], InlineQueryResultsButton(t["inline_in_bot_btn"], start_parameter=f"dl_{token}"))
+                return
+
+            _answer_inline(query, [_placeholder_result(t, token, t["inline_download_title"], t["inline_download_desc"])])
+            return
+
+        # -------------- Instagram / TikTok / SoundCloud ----------------
+        if platform == "tiktok":
+            url = platforms.resolve_tiktok_url(url)
+
+        quality = _inline_quality(user_id, platform)
+        cached = _fresh_cache(platforms.media_cache_key(url, quality))
+
+        if cached:
+            _answer_inline(query, _cached_inline_results(cached, t, t["inline_cached_title"]))
+            return
+
+        token = _new_inline_token({"mode": "direct", "url": url, "user_id": user_id, "quality": quality})
+
+        if not has_cache_channel:
+            _answer_inline(query, [], InlineQueryResultsButton(t["inline_in_bot_btn"], start_parameter=f"dl_{token}"))
+            return
+
+        _answer_inline(query, [_placeholder_result(t, token, t["inline_download_title"], t["inline_download_desc"])])
+
+    def _upload_to_cache_channel(cache_chat, files, metadata_source, platform):
+        """Uploads files to the private cache channel and returns their
+        (kind, file_id) pairs."""
+        refs = []
+        thumb_url = metadata_source.get("thumbnail")
+
+        for filepath in files:
+            kind = platforms.media_kind(filepath)
+
+            if kind == "audio" and platform != "spotify":
+                platforms.tag_audio_file(
+                    filepath,
+                    title=metadata_source.get("track") or metadata_source.get("title") or "",
+                    artist=metadata_source.get("artist") or metadata_source.get("uploader") or metadata_source.get("channel") or "",
+                    cover_url=None if platform == "youtube" else thumb_url,
+                )
+
+            with open(filepath, "rb") as media_file:
+                if kind == "video":
+                    sent = bot.send_video(
+                        cache_chat, media_file,
+                        supports_streaming=True,
+                        width=_as_int(metadata_source.get("width")),
+                        height=_as_int(metadata_source.get("height")),
+                        duration=_as_int(metadata_source.get("duration")),
+                        disable_notification=True,
+                        timeout=600,
+                    )
+                elif kind == "audio":
+                    thumb_path = platforms.make_thumbnail(thumb_url)
+                    try:
+                        thumb_file = open(thumb_path, "rb") if thumb_path else None
+                        try:
+                            sent = bot.send_audio(
+                                cache_chat, media_file,
+                                title=metadata_source.get("track") or metadata_source.get("title") or None,
+                                performer=metadata_source.get("artist") or metadata_source.get("uploader") or None,
+                                duration=_as_int(metadata_source.get("duration")),
+                                thumbnail=thumb_file,
+                                disable_notification=True,
+                                timeout=600,
+                            )
+                        finally:
+                            if thumb_file:
+                                thumb_file.close()
+                    finally:
+                        platforms.remove_download_files([thumb_path])
+                else:
+                    try:
+                        sent = bot.send_photo(cache_chat, media_file, disable_notification=True)
+                    except Exception:
+                        media_file.seek(0)
+                        sent = bot.send_document(cache_chat, media_file, disable_notification=True, timeout=600)
+
+            ref = _file_ref(sent)
+            if ref:
+                refs.append(ref)
+
+        return refs
+
+    def _inline_media(kind, file_id):
+        if kind == "video":
+            return InputMediaVideo(file_id, caption=BOT_SIGNATURE, supports_streaming=True)
+        if kind == "photo":
+            return InputMediaPhoto(file_id, caption=BOT_SIGNATURE)
+        if kind == "audio":
+            return InputMediaAudio(file_id, caption=BOT_SIGNATURE)
+        return InputMediaDocument(file_id, caption=BOT_SIGNATURE)
+
+    @bot.chosen_inline_handler(func=lambda result: True)
+    def handle_chosen_inline(result):
+        if not result.result_id.startswith("d:"):
+            # A cached file was sent: nothing to download.
+            store.record_inline_send()
+            return
+
+        data = _inline_tokens.get(result.result_id[2:])
+        inline_message_id = result.inline_message_id
+        user_id = result.from_user.id
+        t = _texts_for(user_id)
+
+        if not data or not inline_message_id:
+            return
+
+        def fail(text):
+            try:
+                bot.edit_message_text(
+                    text,
+                    inline_message_id=inline_message_id,
+                    reply_markup=_open_bot_markup(t, "inline"),
+                )
+            except Exception:
+                pass
+
+        cache_chat = _cache_chat_id()
+
+        if cache_chat is None:
+            fail(t["download_failed"])
+            return
+
+        if _is_rate_limited(user_id):
+            fail(t["rate_limited"].format(limit=RATE_LIMIT_COUNT))
+            return
+
+        mode = data["mode"]
+        url = data["url"]
+        platform = platforms.detect_platform(url) or "unknown"
+        quality = data.get("choice") if mode == "youtube" else data.get("quality", "best")
+        cache_key = platforms.media_cache_key(url, quality)
+
+        slot = _acquire_download_slot(bot, user_id, None, t, show_ui=False, platform=platform)
+
+        if slot is None:
+            fail(t["server_busy"])
+            return
+
+        files = []
+
+        try:
+            with _cache_key_lock(cache_key) if cache_key else contextlib.nullcontext():
+                cached = _fresh_cache(cache_key)
+
+                if cached:
+                    refs = cached["items"]
+                else:
+                    if mode == "youtube":
+                        info, entries, files = platforms.download_youtube_quality(data["video_id"], data["choice"])
+                    elif mode == "spotify":
+                        track = platforms.resolve_spotify_tracks(url)[0]
+                        files = [platforms.download_spotify_track(track)]
+                        info = {
+                            "id": cache_key or url,
+                            "title": track["name"],
+                            "track": track["name"],
+                            "artist": track["artists"],
+                            "uploader": track["artists"],
+                            "album": track.get("album"),
+                            "thumbnail": track.get("cover_url"),
+                            "duration": (track.get("duration_ms") or 0) / 1000,
+                            "extractor_key": "Spotify",
+                        }
+                        entries = [info]
+                    else:
+                        info, entries, files, quality = platforms.download_direct(url, quality=quality)
+
+                    metadata_source = dict(info or {})
+                    for key, value in (entries[0] if entries else {}).items():
+                        if value not in (None, "", [], {}):
+                            metadata_source[key] = value
+
+                    refs = _upload_to_cache_channel(cache_chat, files, metadata_source, platform)
+
+                    if not refs:
+                        raise Exception("Nothing could be uploaded to the cache channel.")
+
+                    if cache_key:
+                        media_cache[cache_key] = {
+                            "time": time.time(),
+                            "items": refs,
+                            "caption": _build_caption(metadata_source, url),
+                            "post_id": str(metadata_source.get("id") or int(time.time() * 1000))[:48],
+                            "thumb_url": metadata_source.get("thumbnail"),
+                            "offer_audio": any(kind == "video" for kind, _ in refs) and quality != "audio",
+                        }
+
+            more_token = None
+            if len(refs) > 1:
+                more_token = _new_inline_token({"mode": mode, "url": url, "user_id": user_id, "quality": quality})
+
+            kind, file_id = refs[0]
+            bot.edit_message_media(
+                _inline_media(kind, file_id),
+                inline_message_id=inline_message_id,
+                reply_markup=_inline_markup(t, more_token),
+            )
+
+            store.record_download(platform, user_id)
+            store.record_inline_send()
+
+        except Exception as e:
+            if not isinstance(e, platforms.UnsupportedLinkError):
+                store.record_error(platform=platform, url=url, user_id=user_id, error=f"[inline] {e}")
+                logger.exception("Inline download failed | url=%s", url)
+
+            if isinstance(e, platforms.FileTooLargeError):
+                fail(t["too_large"].format(size=str(e)))
+            else:
+                fail(_friendly_download_error(platform, e, t))
+
+        finally:
+            platforms.remove_download_files(files)
             slot.release()

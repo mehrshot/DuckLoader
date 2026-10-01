@@ -645,6 +645,30 @@ def record_download(platform: str, user_id=None) -> None:
         _save(STATS_FILE, stats)
 
 
+def record_group(chat_id, title: str, active: bool) -> None:
+    """Remembers which groups the bot is in (added -> active, removed ->
+    inactive), so /stats can show how many groups use it."""
+    with _io_lock:
+        stats = load_stats()
+        groups = stats.setdefault("groups", {})
+        entry = groups.setdefault(str(chat_id), {"joined": time.strftime("%Y-%m-%d")})
+        entry["title"] = (title or "")[:100]
+        entry["active"] = bool(active)
+        if active:
+            entry["joined"] = entry.get("joined") or time.strftime("%Y-%m-%d")
+        _save(STATS_FILE, stats)
+
+
+def record_inline_send() -> None:
+    """Counts files delivered through inline mode (per day and in total)."""
+    with _io_lock:
+        stats = load_stats()
+        stats["inline_sends"] = stats.get("inline_sends", 0) + 1
+        day = _daily_bucket(stats)
+        day["inline_sends"] = day.get("inline_sends", 0) + 1
+        _save(STATS_FILE, stats)
+
+
 def record_source(source: str) -> None:
     """Counts a new user who arrived through a t.me/<bot>?start=<source>
     link (e.g. one link per influencer campaign)."""

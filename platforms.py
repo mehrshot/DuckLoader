@@ -2669,6 +2669,16 @@ def tag_audio_file(
 # Cache keys for re-sending already uploaded files
 # ---------------------------------------------------------------------------
 
+def youtube_video_id(url: str) -> str | None:
+    """The 11-character video id of any YouTube watch/short/youtu.be URL."""
+    parsed = urllib.parse.urlparse(url)
+    video_id = (urllib.parse.parse_qs(parsed.query).get("v") or [""])[0]
+    if not video_id:
+        match = re.search(r"(?:youtu\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})", url)
+        video_id = match.group(1) if match else ""
+    return video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or "") else None
+
+
 def media_cache_key(url: str, quality: str) -> str | None:
     """A stable key for "this exact media at this quality", so a link many
     people send (e.g. the Reel an influencer just posted) is downloaded once
@@ -2687,14 +2697,15 @@ def media_cache_key(url: str, quality: str) -> str | None:
             if wanted_pk:
                 canonical += f"#{wanted_pk}"
         elif platform == "youtube":
-            query = urllib.parse.parse_qs(parsed.query)
-            video_id = (query.get("v") or [""])[0]
-            if not video_id:
-                match = re.search(r"(?:youtu\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})", url)
-                video_id = match.group(1) if match else ""
+            video_id = youtube_video_id(url)
             if not video_id:
                 return None
             canonical = f"youtube:{video_id}"
+        elif platform == "spotify":
+            match = _SPOTIFY_URL_RE.search(url)
+            if not match or match.group(1).lower() != "track":
+                return None  # albums/playlists aren't single files; spotify.link needs a request
+            canonical = f"spotify:{match.group(2)}"
         elif platform == "soundcloud":
             if _host(url) in _SOUNDCLOUD_SHORT_HOSTS:
                 return None

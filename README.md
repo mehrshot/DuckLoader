@@ -135,6 +135,7 @@ These commands work only for the user configured as `OWNER_ID`.
 | `/removesponsor <channel>` | Remove a sponsor channel |
 | `/sponsors` | List sponsor channels |
 | `/senddl <user_id> <link> [<link> ...]` | Download link(s) and deliver them to a user in the normal format (e.g. to make up for failed requests) |
+| `/setcache` | Connect the private cache channel used by inline mode (then forward any message from that channel to the bot) |
 
 The owner can also access these functions through the button-based admin panel from `/settings`.
 
@@ -272,6 +273,25 @@ ROTATING_PROXIES=socks5://127.0.0.1:9050,socks5://127.0.0.1:9051
 - A link that was already downloaded (same media, same quality) is re-sent instantly by its Telegram `file_id` for `MEDIA_CACHE_TTL_HOURS`. When many people send the same link at the same moment, only the first one downloads it; the rest wait and get the uploaded copy.
 - Sending the same link again while it is still downloading is ignored with a short notice.
 - Queued users see their position in the queue.
+
+### Groups
+
+Add the bot to a group and it downloads every supported link members send — quietly: no progress messages, duck stickers, sponsor gate or ads. A 👀 reaction on the link means "working on it", the file is sent as a reply to the link, and 🤷 means it failed. One download runs at a time per group, and Spotify albums/playlists are redirected to the private chat.
+
+YouTube shows the quality picker in groups too, but only the person who sent the link can use it. If the bot is a group admin, the picker is sent as an *ephemeral* message (Bot API 10.2+) that only that person sees; otherwise it's a normal message that ignores everyone else's taps.
+
+With privacy mode on, a bot only sees plain links in groups where it is an admin — the bot says so when it's added. Set `/setprivacy` → Disable in @BotFather to make it work everywhere.
+
+### Inline mode
+
+In any chat, type `@DuckDownloader_Bot <link>`:
+
+- Media that was already downloaded is offered instantly from the cache.
+- Otherwise a "⏳" placeholder is sent; the bot downloads the file, uploads it to the private cache channel (an inline message can only be turned into media that's already on Telegram) and replaces the placeholder with the file.
+- YouTube offers one result per quality.
+- Users who haven't joined the sponsor channels get a button that takes them to the bot first.
+
+Setup: in @BotFather enable `/setinline` and set `/setinlinefeedback` to 100%; create a private channel, make the bot an admin, then send `/setcache` to the bot and forward any message from that channel (or set `CACHE_CHAT_ID` in `.env`).
 
 ### Campaign links
 

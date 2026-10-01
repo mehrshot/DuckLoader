@@ -322,6 +322,10 @@ def _stats_text(t) -> str:
         lines.append(f"  • {platform_name}: {count}")
     lines.append(f"❌ {t['stats_errors']}: {stats.get('errors', 0)}")
 
+    groups = stats.get("groups") or {}
+    lines.append(f"👨‍👩‍👧 {t['stats_groups']}: {sum(1 for g in groups.values() if g.get('active'))}")
+    lines.append(f"🔎 {t['stats_inline']}: {stats.get('inline_sends', 0)}")
+
     daily = stats.get("daily") or {}
     if daily:
         lines.append("")
