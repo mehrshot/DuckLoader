@@ -604,6 +604,47 @@ def mark_feedback_replied(feedback_id) -> None:
                 return
 
 
+# --- recent downloads per user (shown on an empty inline query) ---
+
+RECENT_FILE = "recent_downloads.json"
+RECENT_PER_USER = 10
+RECENT_MAX_AGE = 30 * 24 * 3600
+RECENT_MAX_USERS = 20000
+
+
+def add_recent(user_id, key: str, title: str, items) -> None:
+    """Remembers what a user just received (Telegram file_ids, so it can be
+    re-sent instantly from inline mode). Newest first, no duplicates."""
+    entry = {
+        "key": str(key),
+        "title": (title or "")[:100],
+        "items": [list(item) for item in items if item][:10],
+        "time": int(time.time()),
+    }
+    if not entry["items"]:
+        return
+    with _io_lock:
+        data = _load(RECENT_FILE, {})
+        if not isinstance(data, dict):
+            data = {}
+        user_entries = [e for e in data.get(str(user_id), []) if e.get("key") != entry["key"]]
+        user_entries.insert(0, entry)
+        data[str(user_id)] = user_entries[:RECENT_PER_USER]
+        if len(data) > RECENT_MAX_USERS:
+            # Drop the users whose latest download is the oldest.
+            newest = sorted(data, key=lambda uid: (data[uid] or [{}])[0].get("time", 0), reverse=True)
+            data = {uid: data[uid] for uid in newest[:RECENT_MAX_USERS]}
+        _save(RECENT_FILE, data)
+
+
+def get_recent(user_id) -> list:
+    data = _load(RECENT_FILE, {})
+    if not isinstance(data, dict):
+        return []
+    cutoff = time.time() - RECENT_MAX_AGE
+    return [e for e in data.get(str(user_id), []) if e.get("time", 0) >= cutoff]
+
+
 # --- learned job durations (for the time-based progress bar) ---
 
 TIMINGS_FILE = "timings.json"

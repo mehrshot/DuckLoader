@@ -148,6 +148,37 @@ _bot_admin_cache = {}                            # chat_id -> (monotonic, is_adm
 _bot_identity = {}
 
 
+class _SwitchInlineButton(InlineKeyboardButton):
+    """pyTelegramBotAPI drops switch_inline_query / _current_chat when they
+    are "" (it tests truthiness), turning the button into a plain text
+    button — which Telegram rejects in inline keyboards, so the whole inline
+    answer failed and the user only saw a spinner. "" is the valid value for
+    "just type @bot", so always send these fields when they're set."""
+
+    def to_dict(self):
+        json_dict = super().to_dict()
+        if self.switch_inline_query is not None:
+            json_dict["switch_inline_query"] = self.switch_inline_query
+        if self.switch_inline_query_current_chat is not None:
+            json_dict["switch_inline_query_current_chat"] = self.switch_inline_query_current_chat
+        return json_dict
+
+
+def _recent_title(metadata: dict, platform: str) -> str:
+    """A short label for the "recent downloads" list in inline mode."""
+    title = (metadata.get("track") or metadata.get("title") or "").strip()
+    artist = (metadata.get("artist") or "").strip()
+    channel = (metadata.get("channel") or metadata.get("uploader") or "").strip()
+
+    if platform == "spotify" or (artist and title and platform == "soundcloud"):
+        return f"{artist} - {title}" if artist else title
+    if platform in ("instagram", "tiktok"):
+        description = " ".join((metadata.get("description") or "").split())[:50]
+        label = f"@{channel}" if channel else platform.title()
+        return f"{label}: {description}" if description else label
+    return title or channel or platform.title()
+
+
 def _new_inline_token(data: dict) -> str:
     token = secrets.token_urlsafe(6)
     _inline_tokens[token] = dict(data, created=time.time())
@@ -610,6 +641,7 @@ TEXTS = {
         'inline_yt_desc': "کیفیت رو همین‌جا توی چت انتخاب کن",
         'inline_yt_loading': "🎬 {title}\n\n⏳ دارم کیفیت‌ها رو پیدا می‌کنم…",
         'inline_expired': "⌛️ این دکمه منقضی شده؛ لینک رو دوباره بفرست.",
+        'inline_recent_desc': "دانلودهای اخیرت",
         'cache_ask_forward': "📦 یه پیام از کانال انبار (DuckLoader Cache) رو همین‌جا برام فوروارد کن.",
         'cache_set_done': "✅ کانال انبار وصل شد: {title}",
         'cache_set_failed': "❌ نتونستم توی اون کانال پیام بفرستم. مطمئن شو ربات ادمین کانال باشه و اجازه‌ی ارسال پیام داشته باشه.\n\n{error}",
@@ -951,6 +983,7 @@ TEXTS = {
         'inline_yt_desc': "Choose the quality right here in the chat",
         'inline_yt_loading': "🎬 {title}\n\n⏳ Looking up the available qualities…",
         'inline_expired': "⌛️ This button has expired; please send the link again.",
+        'inline_recent_desc': "Your recent downloads",
         'cache_ask_forward': "📦 Forward me any message from the cache channel (DuckLoader Cache).",
         'cache_set_done': "✅ Cache channel connected: {title}",
         'cache_set_failed': "❌ I couldn't post in that channel. Make sure the bot is an admin there and allowed to post.\n\n{error}",
@@ -2299,7 +2332,7 @@ def register_features(bot):
 
     def _inline_try_markup(t):
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton(t["inline_try_btn"], switch_inline_query=""))
+        markup.add(_SwitchInlineButton(t["inline_try_btn"], switch_inline_query=""))
         return markup
 
     def _open_bot_markup(t, payload="inline", text_key="open_bot_btn"):
@@ -3265,6 +3298,9 @@ def register_features(bot):
                     reply_to_message_id=reply_to_id if chunk_idx == 0 else None,
                 )
 
+        if chat_id_int > 0:
+            store.add_recent(chat_id_int, url, cached.get("title") or platform.title(), items)
+
         store.record_download(platform, chat_id_int)
 
     def _deliver_download_result(
@@ -3595,7 +3631,11 @@ def register_features(bot):
                 "post_id": post_id,
                 "thumb_url": thumb_url,
                 "offer_audio": offer_audio_button,
+                "title": _recent_title(metadata_source, platform),
             }
+
+        if chat_id_int > 0 and sent_refs and all(sent_refs):
+            store.add_recent(chat_id_int, cache_key or url, _recent_title(metadata_source, platform), sent_refs)
 
         store.record_download(platform, chat_id_int)
 
@@ -5525,7 +5565,7 @@ def register_features(bot):
                             with open(filepath, "rb") as audio_file:
                                 thumb_file = open(cover_thumb, "rb") if cover_thumb else None
                                 try:
-                                    bot.send_audio(
+                                    sent_audio = bot.send_audio(
                                         chat_id_int, audio_file,
                                         title=track['name'], performer=track['artists'],
                                         duration=audio_duration,
@@ -5540,6 +5580,11 @@ def register_features(bot):
 
                         sent_count += 1
                         store.record_download("spotify", chat_id_int)
+
+                        audio_ref = _file_ref(sent_audio)
+                        if audio_ref and chat_id_int > 0:
+                            store.add_recent(chat_id_int, f"spotify:{track.get('name')}:{track.get('artists')}",
+                                             f"{track['artists']} - {track['name']}", [audio_ref])
                         duration_model.record("spotify:track", time.monotonic() - track_started)
                 finally:
                     if cover_thumb:
@@ -6460,7 +6505,7 @@ def register_features(bot):
         # Types "@DuckDownloader_Bot " into the input field of whoever taps
         # it — in this same chat — so the next link is one tap away.
         markup.add(
-            InlineKeyboardButton(
+            _SwitchInlineButton(
                 t["inline_next_btn"],
                 switch_inline_query_current_chat="",
             )
@@ -6497,6 +6542,40 @@ def register_features(bot):
             elif kind == "document":
                 results.append(InlineQueryResultCachedDocument(
                     result_id, file_id, title, caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+
+        return results
+
+    def _recent_inline_results(user_id, t):
+        results = []
+
+        for index, entry in enumerate(store.get_recent(user_id)[:10]):
+            items = entry.get("items") or []
+            if not items:
+                continue
+
+            kind, file_id = items[0]
+            result_id = f"r{index}"
+            title = (entry.get("title") or "🦆")[:60]
+            markup = _inline_markup(t)
+
+            if kind == "video":
+                results.append(InlineQueryResultCachedVideo(
+                    result_id, file_id, title, description=t["inline_recent_desc"],
+                    caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+            elif kind == "photo":
+                results.append(InlineQueryResultCachedPhoto(
+                    result_id, file_id, title=title, caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+            elif kind == "audio":
+                results.append(InlineQueryResultCachedAudio(
+                    result_id, file_id, caption=BOT_SIGNATURE, reply_markup=markup,
+                ))
+            elif kind == "document":
+                results.append(InlineQueryResultCachedDocument(
+                    result_id, file_id, title, description=t["inline_recent_desc"],
+                    caption=BOT_SIGNATURE, reply_markup=markup,
                 ))
 
         return results
@@ -6541,7 +6620,15 @@ def register_features(bot):
         url = platforms.extract_url(query.query or "")
 
         if not url:
-            _answer_inline(query, [], InlineQueryResultsButton(t["inline_help_btn"], start_parameter="inline"), 60)
+            # Just "@DuckDownloader_Bot": offer the user's own recent
+            # downloads, ready to send again.
+            help_button = InlineQueryResultsButton(t["inline_help_btn"], start_parameter="inline")
+
+            if not _inline_gate_ok(user_id):
+                _answer_inline(query, [], InlineQueryResultsButton(t["inline_gate_btn"], start_parameter="gate"))
+                return
+
+            _answer_inline(query, _recent_inline_results(user_id, t), help_button)
             return
 
         if not _inline_gate_ok(user_id):
@@ -6846,6 +6933,7 @@ def register_features(bot):
 
                 if cached:
                     refs = cached["items"]
+                    recent_title = cached.get("title") or platform.title()
                 else:
                     if mode == "youtube":
                         info, entries, files = platforms.download_youtube_quality(data["video_id"], data["choice"])
@@ -6885,7 +6973,10 @@ def register_features(bot):
                             "post_id": str(metadata_source.get("id") or int(time.time() * 1000))[:48],
                             "thumb_url": metadata_source.get("thumbnail"),
                             "offer_audio": any(kind == "video" for kind, _ in refs) and quality != "audio",
+                            "title": _recent_title(metadata_source, platform),
                         }
+
+                    recent_title = _recent_title(metadata_source, platform)
 
             more_token = None
             if len(refs) > 1:
@@ -6900,6 +6991,7 @@ def register_features(bot):
 
             store.record_download(platform, user_id)
             store.record_inline_send()
+            store.add_recent(user_id, cache_key or url, recent_title, refs)
 
         except Exception as e:
             if not isinstance(e, platforms.UnsupportedLinkError):
