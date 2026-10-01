@@ -560,6 +560,7 @@ TEXTS = {
             "فعلا هم از اینستاگرام، یوتیوب، تیک تاک، اسپاتیفای و ساندکلاد "
             "پشتیبانی می‌کنم.\n\n"
             "زبان و کیفیت دلخواهت رو میتونی از /settings انتخاب کنی.\n\n"
+            "📖 راهنمای کامل و قابلیت‌های جدید: /help\n"
             "💬 پیشنهاد یا مشکلی داشتی؟ از دکمه‌ی پایین صفحه یا /feedback برامون بفرست.\n\n"
             "🦆 لینکتو بفرست تا شروع کنیم!"
         ),        'init': "⏳ در حال برقراری ارتباط...",
@@ -642,6 +643,26 @@ TEXTS = {
         'inline_yt_loading': "🎬 {title}\n\n⏳ دارم کیفیت‌ها رو پیدا می‌کنم…",
         'inline_expired': "⌛️ این دکمه منقضی شده؛ لینک رو دوباره بفرست.",
         'inline_recent_desc': "دانلودهای اخیرت",
+        'help': (
+            "📖 راهنمای داکلودر 🦆\n\n"
+            "📥 دانلود\n"
+            "لینک رو همین‌جا بفرست تا فایلش رو برات بیارم:\n"
+            "اینستاگرام (ریلز، پست، عکس، استوری و هایلایت)، یوتیوب، تیک‌تاک، ساندکلاد و اسپاتیفای.\n"
+            "برای یوتیوب، کیفیت رو خودت انتخاب می‌کنی.\n\n"
+            "💬 دانلود توی هر چتی (جدید)\n"
+            "توی چت با دوستات یا هر گروهی بنویس:\n"
+            "@{bot} لینک\n"
+            "فایل همون‌جا ارسال میشه، بدون اینکه از چت بیرون بیای. کیفیت یوتیوب رو هم همون‌جا انتخاب می‌کنی.\n"
+            "اگه فقط @{bot} رو بنویسی، دانلودهای اخیرت میاد تا دوباره بفرستیشون.\n"
+            "زیر هر فایلی که اینجا دانلود می‌کنی هم دکمه‌ی «📤 فرستادن برای دوستات» هست.\n\n"
+            "👥 داکلودر توی گروه (جدید)\n"
+            "منو به گروهت اضافه کن؛ هر لینکی که توی گروه فرستاده بشه، فایلش رو همون‌جا میارم. "
+            "کیفیت یوتیوب رو فقط کسی انتخاب می‌کنه که لینک رو فرستاده.\n\n"
+            "⚙️ /settings — زبان و کیفیت اینستاگرام\n"
+            "💬 /feedback — پیشنهاد یا گزارش مشکل"
+        ),
+        'help_try_inline_btn': "📤 امتحانش کن توی یه چت",
+        'help_add_group_btn': "➕ اضافه کردن به گروه",
         'cache_ask_forward': "📦 یه پیام از کانال انبار (DuckLoader Cache) رو همین‌جا برام فوروارد کن.",
         'cache_set_done': "✅ کانال انبار وصل شد: {title}",
         'cache_set_failed': "❌ نتونستم توی اون کانال پیام بفرستم. مطمئن شو ربات ادمین کانال باشه و اجازه‌ی ارسال پیام داشته باشه.\n\n{error}",
@@ -902,6 +923,7 @@ TEXTS = {
             "I support Instagram, TikTok, SoundCloud, Spotify, "
             "and YouTube.\n\n"
             "Choose your preferred quality in /settings.\n\n"
+            "📖 Full guide and new features: /help\n"
             "💬 Got an idea or a problem? Use the button below or /feedback.\n\n"
             "🦆 You bring the link. I’ll bring the media."
         ),        'init': "⏳ Initializing connection...",
@@ -984,6 +1006,26 @@ TEXTS = {
         'inline_yt_loading': "🎬 {title}\n\n⏳ Looking up the available qualities…",
         'inline_expired': "⌛️ This button has expired; please send the link again.",
         'inline_recent_desc': "Your recent downloads",
+        'help': (
+            "📖 DuckLoader guide 🦆\n\n"
+            "📥 Downloading\n"
+            "Send a link here and I'll bring you the file:\n"
+            "Instagram (Reels, posts, photos, stories and highlights), YouTube, TikTok, SoundCloud and Spotify.\n"
+            "For YouTube you choose the quality.\n\n"
+            "💬 Download in any chat (new)\n"
+            "In a chat with friends or in any group, type:\n"
+            "@{bot} link\n"
+            "The file is sent right there — you never leave the chat. YouTube quality is chosen right there too.\n"
+            "Type just @{bot} to see your recent downloads and send them again.\n"
+            "Files you download here also have a \"📤 Send to your friends\" button.\n\n"
+            "👥 DuckLoader in groups (new)\n"
+            "Add me to your group and I'll bring the file for every link anyone sends. "
+            "Only the person who sent a YouTube link can choose its quality.\n\n"
+            "⚙️ /settings — language and Instagram quality\n"
+            "💬 /feedback — suggestions and problem reports"
+        ),
+        'help_try_inline_btn': "📤 Try it in a chat",
+        'help_add_group_btn': "➕ Add to a group",
         'cache_ask_forward': "📦 Forward me any message from the cache channel (DuckLoader Cache).",
         'cache_set_done': "✅ Cache channel connected: {title}",
         'cache_set_failed': "❌ I couldn't post in that channel. Make sure the bot is an admin there and allowed to post.\n\n{error}",
@@ -4213,11 +4255,18 @@ def register_features(bot):
             chat_id
         )
 
+        username = _bot_username()
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            _SwitchInlineButton(t["help_try_inline_btn"], switch_inline_query=""),
+            InlineKeyboardButton(t["help_add_group_btn"], url=f"https://t.me/{username}?startgroup=true"),
+        )
+
         bot.reply_to(
             message,
-            t["welcome"],
-            reply_markup=_main_reply_markup() if _is_private_chat(message.chat.type) else None,
-            parse_mode="Markdown",
+            t["help"].format(bot=username),
+            reply_markup=markup,
+            disable_web_page_preview=True,
         )
     @bot.message_handler(commands=["whoami"])
     def whoami(message):
