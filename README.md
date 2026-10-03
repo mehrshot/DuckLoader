@@ -80,6 +80,15 @@ The form starts in Persian and can be switched to English from inside the form. 
 
 Requests are sent to the owner immediately for review and remain available in the admin panel. The owner can approve, reject, or contact the advertiser.
 
+#### Post-download ad campaigns
+
+An approved post-download ad runs as a campaign with impression and click tracking (stored in `ad_stats.json`):
+
+- **Quota** — the number in the request's duration field (e.g. `1000`, `۱۰۰۰ نمایش`, `2k`) is the impression quota. When it is reached the campaign stops and the owner gets the final report.
+- **Frequency rules** — no ad if the user saw any ad in the last 15 minutes; the same campaign at most 3 times per user, at least 12 hours apart; never again after the user clicks it. Users who have seen a campaign least, and campaigns furthest behind their quota, go first.
+- **Clicks** — the ad button is counted on the first tap and then turns into the channel link.
+- **Report** — impressions vs. quota, unique viewers, clicks, unique clickers, CTR and a daily breakdown. From the admin panel the owner can pause/resume, raise the quota, and send the report to the advertiser.
+
 ### 👥 User management
 
 The owner can:
@@ -162,7 +171,7 @@ Enable or disable downloading for each supported platform.
 
 ### 📨 Advertising requests
 
-Review pending requests and approve, reject, or contact advertisers.
+Review pending requests and approve, reject, or contact advertisers. **📊 Post-download ad reports** lists every campaign with its progress and opens its report.
 
 ### 👥 Users
 

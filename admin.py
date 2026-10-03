@@ -16,6 +16,7 @@ import time
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 
 import ads
+import campaigns
 import platforms
 import store
 
@@ -403,6 +404,9 @@ def _ad_request_status_label(
             "ad_admin_request_status_rejected"
         ]
 
+    if status in campaigns.STATUS_LABELS:
+        return campaigns.STATUS_LABELS[status]
+
     return status or "—"
 
 
@@ -485,6 +489,13 @@ def _ad_requests_markup(
 
     m.add(
         InlineKeyboardButton(
+            "📊 گزارش تبلیغ‌های بعد از دانلود",
+            callback_data="adm_camp_list",
+        )
+    )
+
+    m.add(
+        InlineKeyboardButton(
             "🔄",
             callback_data="adm_menu_ad_requests",
         )
@@ -532,6 +543,17 @@ def _ad_request_action_markup(
             ),
         )
 
+    if (
+        request.get("ad_type") == "post_download"
+        and request.get("status") in campaigns.CAMPAIGN_STATUSES
+    ):
+        m.add(
+            InlineKeyboardButton(
+                "📊 گزارش نمایش و کلیک",
+                callback_data="adm_camp_" + str(request["request_id"]),
+            )
+        )
+
     m.add(
         InlineKeyboardButton(
             t["ad_admin_contact"],
@@ -552,6 +574,45 @@ def _ad_request_action_markup(
     )
 
     return m
+
+def _campaigns_list_markup(requests, t) -> InlineKeyboardMarkup:
+    m = InlineKeyboardMarkup(row_width=1)
+    for request in requests[:20]:
+        stats = campaigns.get_stats(request["request_id"])
+        limit = campaigns.quota(request)
+        progress = f"{stats['impressions']}/{limit}" if limit else str(stats["impressions"])
+        icon = campaigns.STATUS_LABELS.get(request.get("status"), "•").split(" ")[0]
+        m.add(
+            InlineKeyboardButton(
+                f"{icon} {campaigns.display_name(request)[:30]} — {progress}",
+                callback_data="adm_camp_" + str(request["request_id"]),
+            )
+        )
+    m.add(InlineKeyboardButton(t["back"], callback_data="adm_menu_ad_requests"))
+    return m
+
+
+def campaign_report_markup(request, t) -> InlineKeyboardMarkup:
+    """Buttons under a campaign report (also used for the "quota reached"
+    message the bot sends the owner)."""
+    request_id = str(request["request_id"])
+    m = InlineKeyboardMarkup(row_width=3)
+    if request.get("status") == campaigns.ACTIVE:
+        m.add(InlineKeyboardButton("⏸ توقف نمایش", callback_data="adm_campt_" + request_id))
+    elif request.get("status") == campaigns.PAUSED:
+        m.add(InlineKeyboardButton("▶️ ادامه‌ی نمایش", callback_data="adm_campt_" + request_id))
+    m.add(
+        InlineKeyboardButton("🎯 +100", callback_data=f"adm_campq_{request_id}_100"),
+        InlineKeyboardButton("🎯 +500", callback_data=f"adm_campq_{request_id}_500"),
+        InlineKeyboardButton("🎯 +1000", callback_data=f"adm_campq_{request_id}_1000"),
+    )
+    m.add(InlineKeyboardButton("📤 ارسال گزارش برای تبلیغ‌دهنده", callback_data="adm_camps_" + request_id))
+    m.add(
+        InlineKeyboardButton("🔄", callback_data="adm_camp_" + request_id),
+        InlineKeyboardButton(t["back"], callback_data="adm_camp_list"),
+    )
+    return m
+
 
 def register_admin(bot, flags: dict, texts_for, my_settings_view):
     """`texts_for(chat_id)` returns that chat's TEXTS dict so admin replies
@@ -1142,6 +1203,59 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                     t,
                 ),
             )
+
+        elif data == "adm_camp_list":
+            running = campaigns.list_campaigns()
+            text = (
+                "📊 تبلیغ‌های بعد از دانلود\n\n"
+                "🟢 در حال نمایش  ⏸ متوقف  ✅ تمام شده\n"
+                "عدد جلوی هر تبلیغ: نمایش داده‌شده / سقف نمایش"
+                if running else
+                "هنوز هیچ تبلیغ «بعد از دانلود» تأیید نشده."
+            )
+            edit_plain(text, _campaigns_list_markup(running, t))
+
+        elif data.startswith(("adm_camp_", "adm_campt_", "adm_campq_", "adm_camps_")):
+            action, rest = data.split("_", 2)[1], data.split("_", 2)[2]
+            request_id, _, amount = rest.partition("_")
+            request = store.get_ad_request(request_id)
+            if not request:
+                bot.answer_callback_query(call.id, "Request not found.", show_alert=True)
+                return
+
+            if action == "campt":
+                if request.get("status") == campaigns.ACTIVE:
+                    request = store.update_ad_request(request_id, status=campaigns.PAUSED) or request
+                elif request.get("status") == campaigns.PAUSED:
+                    request = store.update_ad_request(request_id, status=campaigns.ACTIVE) or request
+
+            elif action == "campq":
+                shown = campaigns.get_stats(request_id)["impressions"]
+                new_quota = max(campaigns.quota(request), shown) + int(amount or 0)
+                changes = {"max_impressions": new_quota}
+                if request.get("status") == campaigns.COMPLETED:
+                    changes["status"] = campaigns.ACTIVE
+                request = store.update_ad_request(request_id, **changes) or request
+                edit_plain(campaigns.report_text(request), campaign_report_markup(request, t))
+                bot.answer_callback_query(call.id, f"🎯 سقف نمایش جدید: {new_quota:,}")
+                return
+
+            elif action == "camps":
+                try:
+                    bot.send_message(
+                        request["user_id"],
+                        campaigns.report_text(request, for_advertiser=True),
+                    )
+                    bot.answer_callback_query(call.id, "📤 گزارش برای تبلیغ‌دهنده ارسال شد.", show_alert=True)
+                except Exception:
+                    bot.answer_callback_query(
+                        call.id,
+                        "ارسال نشد؛ احتمالاً تبلیغ‌دهنده ربات رو بلاک کرده.",
+                        show_alert=True,
+                    )
+                return
+
+            edit_plain(campaigns.report_text(request), campaign_report_markup(request, t))
 
         elif data == 'adm_menu_users':
             edit(

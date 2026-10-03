@@ -36,6 +36,7 @@ from telebot.types import (
 from telebot import apihelper
 import admin
 import ads
+import campaigns
 import platforms
 import store
 
@@ -2968,87 +2969,82 @@ def register_features(bot):
                 except Exception:
                     pass
 
-        approved_requests = (
-            store.list_ad_requests(
-                "approved"
-            )
+        _send_campaign_ad(chat_id_int)
+
+    AD_CLICK_PREFIX = "adk_"
+
+    def _send_campaign_ad(chat_id_int):
+        """At most one paid post-download ad, chosen by campaigns.py's
+        frequency rules. The button is a callback first so the click can
+        be counted; it then turns into the real channel link."""
+        request, just_completed = campaigns.choose_and_record(
+            chat_id_int,
+            store.list_ad_requests(campaigns.ACTIVE),
         )
+        if request is None:
+            return
 
-        for request in approved_requests:
-            if (
-                request.get(
-                    "ad_type"
+        name = campaigns.display_name(request)
+        try:
+            if campaigns.channel_url(request):
+                markup = InlineKeyboardMarkup()
+                markup.add(
+                    InlineKeyboardButton(
+                        f"📢 {name}",
+                        callback_data=AD_CLICK_PREFIX + request["request_id"],
+                    )
                 )
-                != "post_download"
-            ):
-                continue
-
-            channel = (
-                request.get(
-                    "channel",
-                    "",
-                )
-                or ""
-            ).strip()
-
-            display_name = (
-                request.get(
-                    "display_name",
-                    "",
-                )
-                or channel
-            ).strip()
-
-            if not channel:
-                continue
-
-            if channel.startswith(
-                "https://t.me/"
-            ):
-                channel_url = channel
-            elif channel.startswith(
-                "http://t.me/"
-            ):
-                channel_url = channel
-            elif channel.startswith(
-                "t.me/"
-            ):
-                channel_url = (
-                    "https://"
-                    + channel
-                )
-            elif channel.startswith(
-                "@"
-            ):
-                channel_url = (
-                    "https://t.me/"
-                    + channel[1:]
-                )
+                bot.send_message(chat_id_int, "📣 تبلیغ", reply_markup=markup)
             else:
-                channel_url = ""
+                bot.send_message(chat_id_int, f"📣 {name}\n{request.get('channel', '')}")
+        except Exception:
+            campaigns.undo_impression(request["request_id"], chat_id_int)
+            return
 
-            try:
-                if channel_url:
-                    markup = InlineKeyboardMarkup()
-                    markup.add(
-                        InlineKeyboardButton(
-                            display_name,
-                            url=channel_url,
-                        )
-                    )
+        if just_completed:
+            _finish_campaign(request)
 
-                    bot.send_message(
-                        chat_id_int,
-                        "📣 تبلیغ",
-                        reply_markup=markup,
-                    )
-                else:
-                    bot.send_message(
-                        chat_id_int,
-                        f"📣 {display_name}\n{channel}",
-                    )
-            except Exception:
-                pass
+    def _finish_campaign(request):
+        updated = store.update_ad_request(
+            request["request_id"],
+            status=campaigns.COMPLETED,
+            completed_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        ) or request
+        owner_id = _owner_id()
+        if not owner_id:
+            return
+        try:
+            bot.send_message(
+                owner_id,
+                "✅ تبلیغ به سقف نمایشش رسید و متوقف شد.\n\n"
+                + campaigns.report_text(updated),
+                reply_markup=admin.campaign_report_markup(updated, TEXTS["fa"]),
+            )
+        except Exception:
+            logger.exception("Could not send the campaign report to the owner")
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(AD_CLICK_PREFIX))
+    def handle_ad_click(call):
+        request_id = call.data[len(AD_CLICK_PREFIX):]
+        request = store.get_ad_request(request_id)
+        url = campaigns.channel_url(request) if request else ""
+        if not url:
+            bot.answer_callback_query(call.id)
+            return
+
+        campaigns.record_click(request_id, call.from_user.id)
+
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(f"↗️ ورود به {campaigns.display_name(request)}", url=url))
+        try:
+            bot.edit_message_reply_markup(
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=markup,
+            )
+        except Exception:
+            pass
+        bot.answer_callback_query(call.id, "👇 روی دکمه بزن تا وارد کانال بشی")
 
     def _check_sponsor_channel_gate(
         chat_id_int,
