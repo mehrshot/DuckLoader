@@ -1280,6 +1280,158 @@ def _ig_csrf_token(ydl) -> str | None:
     return None
 
 
+def _ig_impersonate(ydl, request) -> None:
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+
+        target = ImpersonateTarget()
+        if ydl._impersonate_target_available(target):
+            request.extensions["impersonate"] = target
+    except Exception:
+        pass
+
+
+# --- Instagram username -> numeric user id ---
+# A story feed is fetched by the account's numeric id. The obvious API for
+# that (users/web_profile_info) is the one Instagram rate-limits hardest,
+# especially from a datacenter IP: it answered 429 for hours at a time and
+# took every story download down with it. Ids never change, so they are
+# cached for good, and otherwise read from the story / profile page the way
+# Instagram's own web app gets them; web_profile_info is only a last resort.
+
+IG_USER_IDS_FILE = "ig_user_ids.json"
+IG_USER_IDS_MAX = 50000
+IG_PROFILE_API_COOLDOWN = 30 * 60
+IG_STORY_COOLDOWN = 5 * 60
+
+_ig_user_ids_lock = threading.Lock()
+_ig_user_ids = None
+_ig_profile_api_blocked_until = 0.0
+_ig_story_blocked_until = 0.0
+
+
+def _ig_user_id_cache() -> dict:
+    global _ig_user_ids
+    if _ig_user_ids is None:
+        try:
+            with open(IG_USER_IDS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            _ig_user_ids = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _ig_user_ids = {}
+    return _ig_user_ids
+
+
+def _ig_cached_user_id(username: str):
+    with _ig_user_ids_lock:
+        return _ig_user_id_cache().get(username.lower())
+
+
+def _ig_remember_user_id(username: str, user_id) -> None:
+    username, user_id = (username or "").lower(), str(user_id or "")
+    if not username or not user_id.isdigit():
+        return
+    with _ig_user_ids_lock:
+        cache = _ig_user_id_cache()
+        if cache.get(username) == user_id:
+            return
+        cache[username] = user_id
+        if len(cache) > IG_USER_IDS_MAX:
+            for key in list(cache)[: len(cache) - IG_USER_IDS_MAX]:
+                del cache[key]
+        temp_path = f"{IG_USER_IDS_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(cache, f, separators=(",", ":"))
+            os.replace(temp_path, IG_USER_IDS_FILE)
+        except OSError:
+            logger.warning("Could not save %s", IG_USER_IDS_FILE, exc_info=True)
+
+
+def _ig_find_user_id(html: str, username: str):
+    """The numeric id of `username` in an Instagram page — only from an
+    object that also carries that username, so the logged-in viewer's own
+    id (also on the page) can never be picked by mistake."""
+    html = html.replace('\\"', '"')
+    name = re.escape(username)
+    decoder = json.JSONDecoder()
+    for match in itertools.islice(re.finditer(r'"(?:user|owner)":\s*\{', html), 300):
+        try:
+            obj, _ = decoder.raw_decode(html, match.end() - 1)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and str(obj.get("username", "")).lower() == username.lower():
+            user_id = str(obj.get("pk") or obj.get("id") or obj.get("pk_id") or "")
+            if user_id.isdigit():
+                return user_id
+    for pattern in (
+        rf'"(?:pk|id|pk_id)":"?(\d+)"?,[^{{}}]{{0,800}}?"username":"{name}"',
+        rf'"username":"{name}"[^{{}}]{{0,800}}?"(?:pk|id|pk_id)":"?(\d+)"?',
+    ):
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _ig_page(ydl, url: str) -> str:
+    request = YDLRequest(url, headers={"Referer": "https://www.instagram.com/", "Accept": "text/html,*/*"})
+    _ig_impersonate(ydl, request)
+    with ydl.urlopen(request) as response:
+        final_url = getattr(response, "url", "") or ""
+        html = response.read().decode("utf-8", "replace")
+    if "/accounts/login" in final_url or "/challenge" in final_url:
+        raise Exception("Instagram login required: the session was redirected to the login page.")
+    return html
+
+
+def _ig_resolve_user_id(ydl, username: str, story_url: str) -> str:
+    global _ig_profile_api_blocked_until
+    cached = _ig_cached_user_id(username)
+    if cached:
+        return cached
+
+    for label, page_url in (
+        ("story page", story_url),
+        ("profile page", f"https://www.instagram.com/{urllib.parse.quote(username)}/"),
+    ):
+        try:
+            html = _ig_page(ydl, page_url)
+            user_id = _ig_find_user_id(html, username)
+            if not user_id and label == "profile page":
+                match = re.search(r'"profilePage_(\d+)"', html)
+                user_id = match.group(1) if match else None
+        except Exception as e:
+            if "429" in str(e) or "login required" in str(e):
+                raise
+            logger.info("Instagram user id lookup via %s failed for %s: %s", label, username, str(e)[:200])
+            continue
+        if user_id:
+            logger.info("Instagram user id for %s found via %s", username, label)
+            _ig_remember_user_id(username, user_id)
+            return user_id
+        logger.info("Instagram user id for %s not found in the %s", username, label)
+
+    if time.time() < _ig_profile_api_blocked_until:
+        raise Exception("HTTP Error 429: Too Many Requests (Instagram profile lookups are paused)")
+    try:
+        profile = _ig_api(
+            ydl,
+            f"https://www.instagram.com/api/v1/users/web_profile_info/?username={urllib.parse.quote(username)}",
+            f"https://www.instagram.com/{username}/",
+        )
+    except Exception as e:
+        if "429" in str(e):
+            _ig_profile_api_blocked_until = time.time() + IG_PROFILE_API_COOLDOWN
+        raise
+    user_id = str(((profile.get("data") or {}).get("user") or {}).get("id") or "")
+    if not user_id.isdigit():
+        raise Exception("Instagram login required: could not resolve the story's account.")
+    logger.info("Instagram user id for %s found via web_profile_info", username)
+    _ig_remember_user_id(username, user_id)
+    return user_id
+
+
 def _ig_api(ydl, url: str, referer: str, data: bytes | None = None) -> dict:
     headers = {
         "X-IG-App-ID": _IG_APP_ID,
@@ -1296,14 +1448,7 @@ def _ig_api(ydl, url: str, referer: str, data: bytes | None = None) -> dict:
     if data is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = YDLRequest(url, data=data, headers=headers, method="POST" if data is not None else "GET")
-    try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-
-        target = ImpersonateTarget()
-        if ydl._impersonate_target_available(target):
-            request.extensions["impersonate"] = target
-    except Exception:
-        pass
+    _ig_impersonate(ydl, request)
     with ydl.urlopen(request) as response:
         final_url = getattr(response, "url", "") or ""
         body = response.read()
@@ -1324,6 +1469,11 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
         raise Exception("Not a story URL.")
     username, path_id = match.group(1), match.group(2)
 
+    global _ig_story_blocked_until
+    if time.time() < _ig_story_blocked_until:
+        minutes = max(1, round((_ig_story_blocked_until - time.time()) / 60))
+        raise Exception(f"HTTP Error 429: Too Many Requests (story downloads paused for ~{minutes} more min)")
+
     last_error = None
     for label, auth_opts in _instagram_auth_sources():
         if label == "anonymous":
@@ -1334,51 +1484,26 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
                 if not _ig_logged_in(ydl):
                     raise Exception(f"Instagram login required ({label} has no session cookie).")
 
-                reel = None
-                if wanted_pk:
-                    # One story item: its media info carries both the media
-                    # and its owner — one request instead of two, and it
-                    # avoids web_profile_info, which Instagram rate-limits
-                    # very aggressively.
-                    try:
-                        media_info = _ig_api(
-                            ydl, f"https://www.instagram.com/api/v1/media/{wanted_pk}/info/", url,
-                        )
-                        media_items = media_info.get("items") or []
-                        if media_items:
-                            reel = {"items": media_items, "user": media_items[0].get("user") or {}}
-                    except Exception as e:
-                        if "429" in str(e):
-                            raise  # rate-limited: more requests only make it worse
-                        logger.info("Story media info lookup failed, trying the reel feed: %s", str(e)[:200])
+                # The reel feed, like Instagram's own web app. (media/<pk>/info
+                # answers 400 for story items, so it is not tried.)
+                if username.lower() == "highlights":
+                    reel_id = f"highlight:{path_id}"
+                else:
+                    reel_id = _ig_resolve_user_id(ydl, username, url)
 
-                if reel is None:
-                    if username.lower() == "highlights":
-                        reel_id = f"highlight:{path_id}"
-                    else:
-                        profile = _ig_api(
-                            ydl,
-                            f"https://www.instagram.com/api/v1/users/web_profile_info/?username={urllib.parse.quote(username)}",
-                            f"https://www.instagram.com/{username}/",
-                        )
-                        user_id = ((profile.get("data") or {}).get("user") or {}).get("id")
-                        if not user_id:
-                            raise Exception("Instagram login required: could not resolve the story's account.")
-                        reel_id = str(user_id)
-
-                    payload = _ig_api(
-                        ydl,
-                        f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={urllib.parse.quote(reel_id)}",
-                        url,
-                    )
-                    reels = payload.get("reels") or {}
-                    reel = reels.get(reel_id) or next(iter(reels.values()), None)
-                    if not reel:
-                        for item in payload.get("reels_media") or []:
-                            reel = item
-                            break
-                    if not reel:
-                        raise Exception("This story is no longer available (you need to log in to access this content?).")
+                payload = _ig_api(
+                    ydl,
+                    f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={urllib.parse.quote(reel_id)}",
+                    url,
+                )
+                reels = payload.get("reels") or {}
+                reel = reels.get(reel_id) or next(iter(reels.values()), None)
+                if not reel:
+                    for item in payload.get("reels_media") or []:
+                        reel = item
+                        break
+                if not reel:
+                    raise Exception("This story is no longer available (you need to log in to access this content?).")
 
                 items = reel.get("items") or []
                 if wanted_pk:
@@ -1389,6 +1514,7 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
 
                 user = reel.get("user") or {}
                 owner = user.get("username") or (username if username.lower() != "highlights" else "")
+                _ig_remember_user_id(user.get("username"), user.get("pk") or user.get("id"))
                 filepaths, entries = [], []
                 for index, item in enumerate(items, start=1):
                     pk = str(item.get("pk") or str(item.get("id", "")).split("_")[0])
@@ -1441,6 +1567,11 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
                 raise
             last_error = e
             logger.warning("Instagram story API attempt failed | %s | %s", label, str(e)[:300])
+            if "429" in str(e):
+                # Every source is the same Instagram account: asking again
+                # only stretches the limit. Pause story requests briefly.
+                _ig_story_blocked_until = time.time() + IG_STORY_COOLDOWN
+                break
             if "no longer available" in str(e) or "no downloadable media" in str(e):
                 break
     raise last_error or Exception("Instagram login required: no Instagram session is configured.")
