@@ -430,31 +430,39 @@ _known_users_cache = None
 _known_users_lock = threading.Lock()
 
 
-def load_known_users() -> list:
+def _is_private_chat_id(chat_id) -> bool:
+    # Users have positive ids; groups and channels negative ones.
+    try:
+        return int(chat_id) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _known_users_locked() -> list:
+    """Only private chats: /broadcast goes to everyone in this list, and
+    must never post into a group or channel the bot is in. Older versions
+    also stored group ids here; they are dropped (and the file rewritten)
+    the first time it is loaded."""
     global _known_users_cache
+    if _known_users_cache is None:
+        users = _load(USERS_FILE, [])
+        _known_users_cache = [u for u in users if _is_private_chat_id(u)]
+        if len(_known_users_cache) != len(users):
+            _save(USERS_FILE, _known_users_cache)
+    return _known_users_cache
 
+
+def load_known_users() -> list:
     with _known_users_lock:
-        if _known_users_cache is None:
-            _known_users_cache = _load(
-                USERS_FILE,
-                [],
-            )
-
-        return _known_users_cache
+        return _known_users_locked()
 
 
 def track_user(chat_id) -> None:
-    global _known_users_cache
+    if not _is_private_chat_id(chat_id):
+        return
 
     with _known_users_lock:
-
-        if _known_users_cache is None:
-            _known_users_cache = _load(
-                USERS_FILE,
-                [],
-            )
-
-        if chat_id in _known_users_cache:
+        if chat_id in _known_users_locked():
             return
 
         _known_users_cache.append(
