@@ -778,7 +778,7 @@ TEXTS = {
         'ban_done': "🚫 کاربر {id} مسدود شد.",
         'unban_done': "✅ کاربر {id} از مسدودیت خارج شد.",
         'unban_not_found': "این کاربر مسدود نبود.",
-        'setad_done': "✅ متن تبلیغ ذخیره شد. با /toggle sponsor_message نمایشش رو روشن/خاموش کن.",
+        'setad_done': "✅ متن تبلیغ عمومی ذخیره شد. برای روشن/خاموش کردن، گزارش و بنر عکس‌دار: پنل ← تبلیغات ← 🖼 تبلیغ عمومی",
         'setad_cleared': "متن تبلیغ خالی شد (چیزی نمایش داده نمی‌شه).",
         'addsponsor_usage': "استفاده: /addsponsor <@یوزرنیم> <نام نمایشی>",
         'addsponsor_done': "✅ {name} به لیست کانال‌های اسپانسر اضافه شد.",
@@ -874,7 +874,7 @@ TEXTS = {
         'adm_toggles_title': "کدوم تنظیم رو می‌خوای روشن/خاموش کنی؟",
         'adm_ads_title': "بخش تبلیغات:",
         'adm_users_title': "مدیریت کاربران:",
-        'adm_setad_btn': "✏️ تنظیم متن تبلیغ",
+        'adm_setad_btn': "🖼 تبلیغ عمومی (بنر و گزارش)",
         'adm_addsponsor_btn': "➕ افزودن کانال اسپانسر",
         'adm_removesponsor_btn': "➖ حذف کانال اسپانسر",
         'adm_sponsorlist_btn': "📋 لیست کانال‌های اسپانسر",
@@ -1139,7 +1139,7 @@ TEXTS = {
         'ban_done': "🚫 User {id} banned.",
         'unban_done': "✅ User {id} unbanned.",
         'unban_not_found': "That user wasn't banned.",
-        'setad_done': "✅ Ad text saved. Use /toggle sponsor_message to turn it on/off.",
+        'setad_done': "✅ Global ad text saved. To switch it on/off, see its report or set a picture banner: panel → Ads → 🖼 Global ad",
         'setad_cleared': "Ad text cleared (nothing will be shown).",
         'addsponsor_usage': "Usage: /addsponsor <@username> <display name>",
         'addsponsor_done': "✅ {name} added to the sponsor channel list.",
@@ -1236,7 +1236,7 @@ TEXTS = {
         'adm_toggles_title': "Which setting do you want to turn on/off?",
         'adm_ads_title': "Ads section:",
         'adm_users_title': "User management:",
-        'adm_setad_btn': "✏️ Set ad text",
+        'adm_setad_btn': "🖼 Global ad (banner & report)",
         'adm_addsponsor_btn': "➕ Add sponsor channel",
         'adm_removesponsor_btn': "➖ Remove sponsor channel",
         'adm_sponsorlist_btn': "📋 List sponsor channels",
@@ -2274,6 +2274,7 @@ def register_features(bot):
         return t['settings_msg'], _settings_markup(user, t)
 
     admin.register_admin(bot, flags, _texts_for, _my_settings_view)
+    campaigns.ensure_house_campaign(int(os.environ.get("OWNER_ID", "0") or "0"))
 
     def _alert_owner_auth_problem(platform_name, detail):
         owner_id = int(os.environ.get("OWNER_ID", "0") or "0")
@@ -2604,7 +2605,7 @@ def register_features(bot):
             f"🆔 {user.id}",
             f"🌐 {user_record.get('lang', '—')}"
             + (f" | 🔗 {user_record['source']}" if user_record.get("source") else ""),
-            f"🕐 {time.strftime('%Y-%m-%d %H:%M')}",
+            f"🕐 {store.iran_time('%Y-%m-%d %H:%M')}",
         ]
 
         if kind == "bug":
@@ -2951,32 +2952,9 @@ def register_features(bot):
         )
 
     def _maybe_send_ad(chat_id_int):
-        if flags.get(
-            "sponsor_message",
-            False,
-        ):
-            ad_text = (
-                ads.load_ad_message()
-            )
-
-            if ad_text:
-                try:
-                    bot.send_message(
-                        chat_id_int,
-                        ad_text,
-                        parse_mode="Markdown",
-                    )
-                except Exception:
-                    pass
-
-        _send_campaign_ad(chat_id_int)
-
-    AD_CLICK_PREFIX = "adk_"
-
-    def _send_campaign_ad(chat_id_int):
-        """At most one paid post-download ad, chosen by campaigns.py's
-        frequency rules. The button is a callback first so the click can
-        be counted; it then turns into the real channel link."""
+        """At most one ad after a download (paid campaigns first, then the
+        owner's own), chosen by campaigns.py's frequency rules. A tracked
+        button counts the click and then turns into the real channel link."""
         request, just_completed = campaigns.choose_and_record(
             chat_id_int,
             store.list_ad_requests(campaigns.ACTIVE),
@@ -2984,20 +2962,10 @@ def register_features(bot):
         if request is None:
             return
 
-        name = campaigns.display_name(request)
         try:
-            if campaigns.channel_url(request):
-                markup = InlineKeyboardMarkup()
-                markup.add(
-                    InlineKeyboardButton(
-                        f"📢 {name}",
-                        callback_data=AD_CLICK_PREFIX + request["request_id"],
-                    )
-                )
-                bot.send_message(chat_id_int, "📣 تبلیغ", reply_markup=markup)
-            else:
-                bot.send_message(chat_id_int, f"📣 {name}\n{request.get('channel', '')}")
-        except Exception:
+            campaigns.send_ad(bot, chat_id_int, request)
+        except Exception as e:
+            logger.warning("Could not send ad %s to %s: %s", request["request_id"], chat_id_int, e)
             campaigns.undo_impression(request["request_id"], chat_id_int)
             return
 
@@ -3008,7 +2976,7 @@ def register_features(bot):
         updated = store.update_ad_request(
             request["request_id"],
             status=campaigns.COMPLETED,
-            completed_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            completed_at=store.iran_time("%Y-%m-%d %H:%M:%S"),
         ) or request
         owner_id = _owner_id()
         if not owner_id:
@@ -3023,19 +2991,17 @@ def register_features(bot):
         except Exception:
             logger.exception("Could not send the campaign report to the owner")
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith(AD_CLICK_PREFIX))
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(campaigns.CLICK_PREFIX))
     def handle_ad_click(call):
-        request_id = call.data[len(AD_CLICK_PREFIX):]
+        request_id = call.data[len(campaigns.CLICK_PREFIX):]
         request = store.get_ad_request(request_id)
-        url = campaigns.channel_url(request) if request else ""
-        if not url:
+        markup = campaigns.ad_markup(request, tracked=False, force=True) if request else None
+        if markup is None:
             bot.answer_callback_query(call.id)
             return
 
         campaigns.record_click(request_id, call.from_user.id)
 
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton(f"↗️ ورود به {campaigns.display_name(request)}", url=url))
         try:
             bot.edit_message_reply_markup(
                 call.message.chat.id,
@@ -4194,7 +4160,7 @@ def register_features(bot):
         is_action_payload = payload in ("gate", "inline") or payload.startswith(("yt_", "dl_"))
 
         if is_new_user:
-            user["joined"] = time.strftime("%Y-%m-%d")
+            user["joined"] = store.iran_time("%Y-%m-%d")
 
             # t.me/<bot>?start=<source> arrives as "/start <source>" —
             # one link per ad campaign shows exactly where users came from.

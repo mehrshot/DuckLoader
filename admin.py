@@ -11,6 +11,7 @@ fresh every call makes correctness independent of import order entirely.
 """
 
 import os
+import re
 import time
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
@@ -22,14 +23,12 @@ import store
 
 TOGGLE_KEYS = {
     "auto_quality_fallback",
-    "sponsor_message",
     "ad_requests_button",
     "sponsor_channel_gate",
 }
 
 TOGGLE_LABELS = {
     "auto_quality_fallback": "auto_quality_fallback",
-    "sponsor_message": "sponsor_message",
     "ad_requests_button": "toggle_ad_requests_button",
     "sponsor_channel_gate": "toggle_sponsor_channel_gate",
 }
@@ -174,7 +173,8 @@ def _toggles_markup(
 
 def _ads_markup(t) -> InlineKeyboardMarkup:
     m = InlineKeyboardMarkup(row_width=1)
-    m.add(InlineKeyboardButton(t['adm_setad_btn'], callback_data='adm_ask_setad'))
+    m.add(InlineKeyboardButton(t['adm_setad_btn'], callback_data='adm_camp_' + campaigns.HOUSE_ID))
+    m.add(InlineKeyboardButton("📊 گزارش همه‌ی تبلیغ‌های بعد از دانلود", callback_data='adm_camp_list'))
     m.add(InlineKeyboardButton(t['adm_addsponsor_btn'], callback_data='adm_ask_addsponsor'))
     m.add(InlineKeyboardButton(t['adm_removesponsor_btn'], callback_data='adm_ask_removesponsor'))
     m.add(InlineKeyboardButton(t['adm_sponsorlist_btn'], callback_data='adm_sponsors_list'))
@@ -600,18 +600,108 @@ def campaign_report_markup(request, t) -> InlineKeyboardMarkup:
     if request.get("status") == campaigns.ACTIVE:
         m.add(InlineKeyboardButton("⏸ توقف نمایش", callback_data="adm_campt_" + request_id))
     elif request.get("status") == campaigns.PAUSED:
-        m.add(InlineKeyboardButton("▶️ ادامه‌ی نمایش", callback_data="adm_campt_" + request_id))
+        m.add(InlineKeyboardButton("▶️ شروع / ادامه‌ی نمایش", callback_data="adm_campt_" + request_id))
     m.add(
-        InlineKeyboardButton("🎯 +100", callback_data=f"adm_campq_{request_id}_100"),
-        InlineKeyboardButton("🎯 +500", callback_data=f"adm_campq_{request_id}_500"),
-        InlineKeyboardButton("🎯 +1000", callback_data=f"adm_campq_{request_id}_1000"),
+        InlineKeyboardButton("🖼 تنظیم بنر", callback_data="adm_campb_" + request_id),
+        InlineKeyboardButton("👁 پیش‌نمایش", callback_data="adm_campv_" + request_id),
     )
-    m.add(InlineKeyboardButton("📤 ارسال گزارش برای تبلیغ‌دهنده", callback_data="adm_camps_" + request_id))
+    m.add(
+        InlineKeyboardButton(
+            "🔘 دکمه زیر بنر: " + ("روشن ✅" if campaigns.wants_button(request) else "خاموش"),
+            callback_data="adm_campk_" + request_id,
+        ),
+        InlineKeyboardButton("🔗 لینک دکمه", callback_data="adm_campl_" + request_id),
+    )
+    if not campaigns.is_house(request):
+        m.add(
+            InlineKeyboardButton("🎯 +100", callback_data=f"adm_campq_{request_id}_100"),
+            InlineKeyboardButton("🎯 +500", callback_data=f"adm_campq_{request_id}_500"),
+            InlineKeyboardButton("🎯 +1000", callback_data=f"adm_campq_{request_id}_1000"),
+        )
+        m.add(InlineKeyboardButton("📤 ارسال گزارش برای تبلیغ‌دهنده", callback_data="adm_camps_" + request_id))
     m.add(
         InlineKeyboardButton("🔄", callback_data="adm_camp_" + request_id),
         InlineKeyboardButton(t["back"], callback_data="adm_camp_list"),
     )
     return m
+
+
+CAMPAIGN_BANNER_PROMPT = (
+    "🖼 پست بنر رو بفرست یا از هر کانالی فوروارد کن:\n"
+    "• عکس، ویدیو یا گیف با کپشن\n"
+    "• یا فقط متن\n\n"
+    "فرمت‌بندی کپشن (بولد، لینک، ایموجی و …) همون‌طور حفظ میشه. "
+    "ایموجی‌های پریمیوم به ایموجی معمولی تبدیل میشن.\n\n"
+    "/cancel برای انصراف"
+)
+
+CAMPAIGN_LINK_PROMPT = (
+    "🔗 لینک کانال رو بفرست، مثل @sut_tw یا https://t.me/sut_tw\n"
+    "اگه می‌خوای متن دکمه چیز دیگه‌ای باشه، توی خط دوم بنویسش.\n"
+    "برای حذف لینک: -\n\n"
+    "/cancel برای انصراف"
+)
+
+
+def _set_house_ad_text(owner_id, text):
+    """/setad: the owner's own ad as a plain text banner."""
+    campaigns.ensure_house_campaign(owner_id)
+    if text:
+        store.update_ad_request(
+            campaigns.HOUSE_ID,
+            banner={"type": "text", "file_id": None, "text": text, "entities": [], "markdown": True},
+        )
+    else:
+        store.update_ad_request(campaigns.HOUSE_ID, banner=None, status=campaigns.PAUSED)
+
+
+def _handle_campaign_input(bot, message, action, t):
+    """The owner's answer to "send the banner" / "send the button link"."""
+    kind, _, request_id = action.partition(":")
+    chat_id = message.chat.id
+    request = store.get_ad_request(request_id)
+    if not request:
+        bot.reply_to(message, "Request not found.")
+        return
+    if (message.text or "").strip().startswith("/"):
+        bot.reply_to(message, t["adm_cancelled"])
+        return
+
+    if kind == "campbanner":
+        banner = campaigns.banner_from_message(message)
+        if not banner:
+            _pending_action[message.from_user.id] = action
+            bot.reply_to(message, "این نوع پیام رو نمی‌تونم بنر کنم. عکس، ویدیو، گیف یا متن بفرست (یا /cancel).")
+            return
+        request = store.update_ad_request(request_id, banner=banner) or request
+        bot.reply_to(message, "✅ بنر ذخیره شد. کاربرها دقیقاً این رو می‌بینن 👇")
+    else:
+        lines = [line.strip() for line in (message.text or "").splitlines() if line.strip()]
+        if not lines:
+            _pending_action[message.from_user.id] = action
+            bot.reply_to(message, CAMPAIGN_LINK_PROMPT)
+            return
+        if lines[0] in ("-", "حذف"):
+            changes = {"channel": "", "button_text": ""}
+        else:
+            link = lines[0]
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,}", link):
+                link = "@" + link
+            if not campaigns.channel_url({"channel": link}):
+                _pending_action[message.from_user.id] = action
+                bot.reply_to(message, "این لینک معتبر نیست.\n\n" + CAMPAIGN_LINK_PROMPT)
+                return
+            changes = {"channel": link, "button_text": lines[1][:60] if len(lines) > 1 else ""}
+        request = store.update_ad_request(request_id, **changes) or request
+        bot.reply_to(message, "✅ لینک دکمه ذخیره شد. پیش‌نمایش 👇")
+
+    try:
+        campaigns.send_ad(bot, chat_id, request, preview=True)
+    except ValueError:
+        bot.send_message(chat_id, "(هنوز بنر یا لینکی برای نمایش تنظیم نشده.)")
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ پیش‌نمایش ارسال نشد: {e}")
+    bot.send_message(chat_id, campaigns.report_text(request), reply_markup=campaign_report_markup(request, t))
 
 
 def register_admin(bot, flags: dict, texts_for, my_settings_view):
@@ -717,7 +807,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             return
 
         text = message.text.partition(" ")[2].strip()
-        ads.save_ad_message(text)
+        _set_house_ad_text(message.from_user.id, text)
         bot.reply_to(message, t['setad_done'] if text else t['setad_cleared'])
 
     @bot.message_handler(
@@ -1055,9 +1145,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 store.update_ad_request(
                     request_id,
                     status="approved",
-                    reviewed_at=time.strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
+                    reviewed_at=store.iran_time("%Y-%m-%d %H:%M:%S"),
                 )
             )
 
@@ -1068,6 +1156,9 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                     show_alert=True,
                 )
                 return
+
+            if updated.get("ad_type") == "post_download":
+                updated = store.update_ad_request(request_id, status=campaigns.PAUSED) or updated
 
             if (
                 updated.get(
@@ -1129,6 +1220,15 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 ),
             )
 
+            if updated.get("ad_type") == "post_download":
+                bot.answer_callback_query(
+                    call.id,
+                    "✅ تأیید شد. تبلیغ فعلاً متوقفه: از «📊 گزارش نمایش و کلیک» بنر رو تنظیم کن، "
+                    "پیش‌نمایشش رو ببین و ▶️ رو بزن.",
+                    show_alert=True,
+                )
+                return
+
         elif data.startswith(
             "adm_adreq_reject_"
         ):
@@ -1165,9 +1265,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 store.update_ad_request(
                     request_id,
                     status="rejected",
-                    reviewed_at=time.strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
+                    reviewed_at=store.iran_time("%Y-%m-%d %H:%M:%S"),
                 )
             )
 
@@ -1215,10 +1313,15 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             )
             edit_plain(text, _campaigns_list_markup(running, t))
 
-        elif data.startswith(("adm_camp_", "adm_campt_", "adm_campq_", "adm_camps_")):
+        elif data.startswith((
+            "adm_camp_", "adm_campt_", "adm_campq_", "adm_camps_",
+            "adm_campb_", "adm_campv_", "adm_campk_", "adm_campl_",
+        )):
             action, rest = data.split("_", 2)[1], data.split("_", 2)[2]
             request_id, _, amount = rest.partition("_")
             request = store.get_ad_request(request_id)
+            if not request and request_id == campaigns.HOUSE_ID:
+                request = campaigns.ensure_house_campaign(user_id)
             if not request:
                 bot.answer_callback_query(call.id, "Request not found.", show_alert=True)
                 return
@@ -1227,7 +1330,34 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 if request.get("status") == campaigns.ACTIVE:
                     request = store.update_ad_request(request_id, status=campaigns.PAUSED) or request
                 elif request.get("status") == campaigns.PAUSED:
+                    if not campaigns.can_show(request):
+                        bot.answer_callback_query(call.id, "اول بنر یا لینک دکمه رو تنظیم کن.", show_alert=True)
+                        return
                     request = store.update_ad_request(request_id, status=campaigns.ACTIVE) or request
+
+            elif action == "campb":
+                _pending_action[user_id] = f"campbanner:{request_id}"
+                bot.send_message(chat_id_int, CAMPAIGN_BANNER_PROMPT)
+
+            elif action == "campl":
+                _pending_action[user_id] = f"camplink:{request_id}"
+                bot.send_message(chat_id_int, CAMPAIGN_LINK_PROMPT)
+
+            elif action == "campv":
+                try:
+                    campaigns.send_ad(bot, chat_id_int, request, preview=True)
+                    bot.answer_callback_query(call.id)
+                except ValueError:
+                    bot.answer_callback_query(call.id, "هنوز بنر یا لینکی تنظیم نشده.", show_alert=True)
+                except Exception as e:
+                    bot.answer_callback_query(call.id, f"پیش‌نمایش ارسال نشد: {e}"[:200], show_alert=True)
+                return
+
+            elif action == "campk":
+                if not campaigns.channel_url(request):
+                    bot.answer_callback_query(call.id, "اول «🔗 لینک دکمه» رو تنظیم کن.", show_alert=True)
+                    return
+                request = store.update_ad_request(request_id, button=not campaigns.wants_button(request)) or request
 
             elif action == "campq":
                 shown = campaigns.get_stats(request_id)["impressions"]
@@ -1539,6 +1669,8 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             "text",
             "sticker",
             "animation",
+            "photo",
+            "video",
         ],
     )
     def handle_admin_reply(message):
@@ -1557,6 +1689,10 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
         t = texts_for(
             message.chat.id
         )
+
+        if action.startswith(("campbanner:", "camplink:")):
+            _handle_campaign_input(bot, message, action, t)
+            return
 
         # -----------------------------------------------------------
         # Duck reaction upload
@@ -1661,8 +1797,9 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             return
 
         if action == "setad":
-            ads.save_ad_message(
-                text
+            _set_house_ad_text(
+                user_id,
+                text,
             )
 
             bot.reply_to(

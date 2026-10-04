@@ -12,6 +12,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 SETTINGS_FILE = "user_settings.json"
 FLAGS_FILE = "feature_flags.json"
@@ -116,6 +117,19 @@ def _save(path, data) -> None:
                     pass
 
 
+# Dates the owner reads (ad requests, feedback, daily stats, error log) are
+# in Iran time, not the VPS's own timezone.
+try:
+    from zoneinfo import ZoneInfo
+    IRAN_TZ = ZoneInfo("Asia/Tehran")
+except Exception:  # no tz database: Iran has had no DST since 2022
+    IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+
+
+def iran_time(fmt: str = "%Y-%m-%d %H:%M:%S", ts=None) -> str:
+    return datetime.fromtimestamp(time.time() if ts is None else ts, IRAN_TZ).strftime(fmt)
+
+
 # --- feature flags (platform locks + bot-wide toggles) ---
 
 def load_flags() -> dict:
@@ -167,9 +181,7 @@ def create_ad_request(
         while request_id is None or request_id in requests:
             request_id = uuid.uuid4().hex[:8].upper()
 
-        created_at = time.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        created_at = iran_time("%Y-%m-%d %H:%M:%S")
 
         request = {
             "request_id": request_id,
@@ -235,9 +247,7 @@ def update_ad_request(
         )
 
         request["updated_at"] = (
-            time.strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            iran_time("%Y-%m-%d %H:%M:%S")
         )
 
         requests[str(request_id)] = (
@@ -580,7 +590,7 @@ def add_feedback(
         data["last_id"] = feedback_id
         items.append({
             "id": feedback_id,
-            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "time": iran_time("%Y-%m-%d %H:%M:%S"),
             "user_id": user_id,
             "username": username,
             "name": name,
@@ -667,7 +677,7 @@ DAILY_STATS_KEEP_DAYS = 60
 def _daily_bucket(stats: dict) -> dict:
     daily = stats.setdefault("daily", {})
     day = daily.setdefault(
-        time.strftime("%Y-%m-%d"),
+        iran_time("%Y-%m-%d"),
         {"new_users": 0, "downloads": 0, "active_users": []},
     )
     for old_day in sorted(daily)[:-DAILY_STATS_KEEP_DAYS]:
@@ -692,11 +702,11 @@ def record_group(chat_id, title: str, active: bool) -> None:
     with _io_lock:
         stats = load_stats()
         groups = stats.setdefault("groups", {})
-        entry = groups.setdefault(str(chat_id), {"joined": time.strftime("%Y-%m-%d")})
+        entry = groups.setdefault(str(chat_id), {"joined": iran_time("%Y-%m-%d")})
         entry["title"] = (title or "")[:100]
         entry["active"] = bool(active)
         if active:
-            entry["joined"] = entry.get("joined") or time.strftime("%Y-%m-%d")
+            entry["joined"] = entry.get("joined") or iran_time("%Y-%m-%d")
         _save(STATS_FILE, stats)
 
 
@@ -743,9 +753,7 @@ def record_error(
         _save(STATS_FILE, stats)
 
     event = {
-        "time": time.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
+        "time": iran_time("%Y-%m-%d %H:%M:%S"),
         "platform": platform,
         "user_id": user_id,
         "url": url,

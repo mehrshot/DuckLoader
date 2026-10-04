@@ -86,6 +86,10 @@ An approved post-download ad runs as a campaign with impression and click tracki
 
 - **Quota** — the number in the request's duration field (e.g. `1000`, `۱۰۰۰ نمایش`, `2k`) is the impression quota. When it is reached the campaign stops and the owner gets the final report.
 - **Frequency rules** — no ad if the user saw any ad in the last 15 minutes; the same campaign at most 3 times per user, at least 12 hours apart; never again after the user clicks it. Users who have seen a campaign least, and campaigns furthest behind their quota, go first.
+- **Banner** — the owner sends or forwards a photo / video / GIF post with caption (or a text post) and it is sent to users exactly like that, formatting included. Without a banner a short "📣 Ad" message with the button is sent.
+- **Button or caption link** — per campaign, the owner chooses a "join the channel" button under the banner (clicks are counted: the first tap is recorded and the button turns into the channel link) or no button, with the channel written in the caption (clicks can't be counted). The button link and text can be changed from the panel.
+- **Approval** — an approved post-download ad starts paused, so the banner can be set and previewed before pressing ▶️.
+- **Global ad** — the owner's own ad (`/setad`, or panel → Ads → 🖼 Global ad) is a campaign too, with a banner, the same frequency rules and a report, but no quota; paid campaigns are always shown first.
 - **Clicks** — the ad button is counted on the first tap and then turns into the channel link.
 - **Report** — impressions vs. quota, unique viewers, clicks, unique clickers, CTR and a daily breakdown. From the admin panel the owner can pause/resume, raise the quota, and send the report to the advertiser.
 
@@ -138,7 +142,7 @@ These commands work only for the user configured as `OWNER_ID`.
 | `/broadcast <message>` | Broadcast a message to known users |
 | `/ban <user_id>` | Ban a user |
 | `/unban <user_id>` | Unban a user |
-| `/setad <message>` | Set the global advertisement text |
+| `/setad <message>` | Set the global ad as a text banner (picture banners: panel → Ads → 🖼 Global ad) |
 | `/checksponsor <channel>` | Check bot access to a sponsor channel |
 | `/addsponsor <channel> <name>` | Add a sponsor channel |
 | `/removesponsor <channel>` | Remove a sponsor channel |

@@ -8,16 +8,27 @@ Frequency rules, instead of a flat "one ad per user":
     downloading five files in a row sees one ad, not five;
   * the same campaign at most 3 times per user, at least 12 hours apart;
   * never again to a user who already clicked it;
-  * among the campaigns a user may see, the one they have seen least wins,
-    then the one furthest behind its quota (so several campaigns finish
-    at a similar pace).
+  * paid campaigns go before the owner's own "house" ad; among them, the
+    one the user has seen least wins, then the one furthest behind its
+    quota (so several campaigns finish at a similar pace).
+
+Each campaign can have a banner (a photo / video / GIF with caption, or a
+text post, sent exactly as the owner sent or forwarded it to the bot) and,
+optionally, a "join the channel" button under it. The button is what makes
+clicks countable; a link written in the caption is not.
 """
 
+import logging
 import random
 import re
 import time
 
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
+
+import ads
 import store
+
+logger = logging.getLogger(__name__)
 
 STATS_FILE = "ad_stats.json"
 
@@ -29,6 +40,12 @@ ACTIVE = "approved"
 PAUSED = "paused"
 COMPLETED = "completed"
 CAMPAIGN_STATUSES = (ACTIVE, PAUSED, COMPLETED)
+
+# The owner's own ad (the old global /setad text) is a campaign too, so it
+# gets the same banner, frequency rules and report. It never has a quota.
+HOUSE_ID = "GLOBAL"
+
+CLICK_PREFIX = "adk_"
 
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "0123456789" * 2)
 
@@ -68,7 +85,151 @@ def channel_url(request) -> str:
 
 
 def display_name(request) -> str:
+    if is_house(request) and not request.get("display_name"):
+        return "تبلیغ عمومی"
     return (request.get("display_name") or request.get("channel") or "").strip()
+
+
+def is_house(request) -> bool:
+    return request.get("request_id") == HOUSE_ID
+
+
+def wants_button(request) -> bool:
+    return request.get("button", True) is not False
+
+
+def can_show(request) -> bool:
+    return bool(request.get("banner") or channel_url(request))
+
+
+def button_text(request) -> str:
+    return (request.get("button_text") or f"↗️ ورود به {display_name(request)}")[:60]
+
+
+def ad_markup(request, tracked=True, force=False):
+    """The button under the ad, or None. `tracked` makes it a callback that
+    counts the click and then turns into the real link."""
+    url = channel_url(request)
+    if not url or not (force or wants_button(request)):
+        return None
+    m = InlineKeyboardMarkup()
+    if tracked:
+        m.add(InlineKeyboardButton(button_text(request), callback_data=CLICK_PREFIX + request["request_id"]))
+    else:
+        m.add(InlineKeyboardButton(button_text(request), url=url))
+    return m
+
+
+# --- banner ---
+
+BANNER_LABELS = {
+    "photo": "عکس",
+    "video": "ویدیو",
+    "animation": "گیف",
+    "text": "متن",
+}
+
+
+def banner_from_message(message):
+    """A photo / video / GIF / text message (sent or forwarded to the bot)
+    -> what is needed to send it again: file_id, caption and its formatting."""
+    if message.photo:
+        kind, file_id = "photo", message.photo[-1].file_id
+    elif message.animation:
+        kind, file_id = "animation", message.animation.file_id
+    elif message.video:
+        kind, file_id = "video", message.video.file_id
+    elif message.text:
+        kind, file_id = "text", None
+    else:
+        return None
+
+    if kind == "text":
+        text, entities = message.text, message.entities
+    else:
+        text, entities = message.caption, message.caption_entities
+
+    # Bots can't send custom (premium) emoji; the plain emoji stays in the
+    # text.
+    entities = [
+        {k: v for k, v in e.to_dict().items() if v is not None}
+        for e in (entities or [])
+        if e.type != "custom_emoji"
+    ]
+    return {"type": kind, "file_id": file_id, "text": text or "", "entities": entities}
+
+
+def send_banner(bot, chat_id, banner, reply_markup=None):
+    kind = banner.get("type")
+    text = banner.get("text") or None
+    entities = [MessageEntity.de_json(dict(e)) for e in banner.get("entities") or []] or None
+
+    def send(parse_mode):
+        if kind == "photo":
+            return bot.send_photo(chat_id, banner["file_id"], caption=text, caption_entities=entities,
+                                  parse_mode=parse_mode, reply_markup=reply_markup)
+        if kind == "animation":
+            return bot.send_animation(chat_id, banner["file_id"], caption=text, caption_entities=entities,
+                                      parse_mode=parse_mode, reply_markup=reply_markup)
+        if kind == "video":
+            return bot.send_video(chat_id, banner["file_id"], caption=text, caption_entities=entities,
+                                  parse_mode=parse_mode, reply_markup=reply_markup, supports_streaming=True)
+        return bot.send_message(chat_id, text or "📣", entities=entities,
+                                parse_mode=parse_mode, reply_markup=reply_markup)
+
+    if banner.get("markdown") and not entities:
+        # The old /setad text was written in Markdown.
+        try:
+            return send("Markdown")
+        except Exception:
+            pass
+    return send(None)
+
+
+def send_ad(bot, chat_id, request, preview=False):
+    """Sends the ad as users see it. A preview's button is the plain link,
+    so the owner's own taps aren't counted."""
+    banner = request.get("banner")
+    markup = ad_markup(request, tracked=not preview, force=not banner)
+    if banner:
+        return send_banner(bot, chat_id, banner, markup)
+    if markup is None:
+        raise ValueError("campaign has neither a banner nor a link")
+    return bot.send_message(chat_id, "📣 تبلیغ", reply_markup=markup)
+
+
+def ensure_house_campaign(owner_id) -> dict:
+    """Creates the owner's own campaign the first time, carrying over the old
+    global ad text (and whether it was switched on)."""
+    with store._ad_requests_lock:
+        requests = store._load(store.AD_REQUESTS_FILE, {})
+        if isinstance(requests.get(HOUSE_ID), dict):
+            return requests[HOUSE_ID]
+
+        legacy_text = (ads.load_ad_message() or "").strip()
+        legacy_on = bool(store.load_flags().get("sponsor_message", False))
+        now = store.iran_time()
+        request = {
+            "request_id": HOUSE_ID,
+            "status": ACTIVE if legacy_text and legacy_on else PAUSED,
+            "ad_type": "post_download",
+            "user_id": owner_id,
+            "telegram_username": "",
+            "telegram_name": "",
+            "channel": "",
+            "display_name": "",
+            "duration": "",
+            "max_impressions": 0,
+            "button": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if legacy_text:
+            request["banner"] = {"type": "text", "file_id": None, "text": legacy_text,
+                                 "entities": [], "markdown": True}
+        requests[HOUSE_ID] = request
+        store._save(store.AD_REQUESTS_FILE, requests)
+        return request
 
 
 # --- storage ---
@@ -113,7 +274,7 @@ def choose_and_record(user_id, requests, now=None):
         for request in requests:
             if request.get("status") != ACTIVE or request.get("ad_type") != "post_download":
                 continue
-            if not display_name(request):
+            if not can_show(request):
                 continue
             stats = _campaign(data, request["request_id"])
             limit = quota(request)
@@ -125,7 +286,7 @@ def choose_and_record(user_id, requests, now=None):
             if seen >= MAX_PER_USER or (seen and now - last_seen < MIN_GAP_SAME_AD):
                 continue
             progress = stats["impressions"] / (limit or 1000)
-            candidates.append(((seen, progress, random.random()), request))
+            candidates.append(((is_house(request), seen, progress, random.random()), request))
 
         if not candidates:
             return None, False
@@ -135,7 +296,7 @@ def choose_and_record(user_id, requests, now=None):
         stats["impressions"] += 1
         seen = stats["viewers"].get(uid, [0, 0])[0]
         stats["viewers"][uid] = [seen + 1, int(now)]
-        day = stats["daily"].setdefault(time.strftime("%Y-%m-%d", time.localtime(now)), [0, 0])
+        day = stats["daily"].setdefault(store.iran_time("%Y-%m-%d", now), [0, 0])
         day[0] += 1
         stats.setdefault("first_impression", int(now))
         stats["last_impression"] = int(now)
@@ -161,7 +322,7 @@ def undo_impression(request_id, user_id) -> None:
             stats["viewers"].pop(uid, None)
         else:
             stats["viewers"][uid] = [seen - 1, last_seen]
-        day = stats["daily"].get(time.strftime("%Y-%m-%d"))
+        day = stats["daily"].get(store.iran_time("%Y-%m-%d"))
         if day and day[0] > 0:
             day[0] -= 1
         data["last_ad"].pop(uid, None)
@@ -180,7 +341,7 @@ def record_click(request_id, user_id) -> bool:
         first = uid not in stats["clickers"]
         if first:
             stats["clickers"][uid] = int(time.time())
-        day = stats["daily"].setdefault(time.strftime("%Y-%m-%d"), [0, 0])
+        day = stats["daily"].setdefault(store.iran_time("%Y-%m-%d"), [0, 0])
         day[1] += 1
         store._save(STATS_FILE, data)
         return first
@@ -213,7 +374,7 @@ def _pct(part, whole) -> str:
 
 
 def _date(ts) -> str:
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "—"
+    return store.iran_time("%Y-%m-%d %H:%M", ts) if ts else "—"
 
 
 def report_text(request, for_advertiser=False) -> str:
@@ -223,13 +384,32 @@ def report_text(request, for_advertiser=False) -> str:
     viewers = len(stats["viewers"])
     clickers = len(stats["clickers"])
 
-    lines = [
-        f"📊 گزارش تبلیغ {request['request_id']}",
-        f"📢 {display_name(request)}"
-        + (f" ({request.get('channel')})" if request.get("channel") and request.get("channel") != display_name(request) else ""),
-    ]
+    if is_house(request):
+        lines = ["📊 گزارش تبلیغ عمومی (تبلیغ خودت)"]
+    else:
+        lines = [
+            f"📊 گزارش تبلیغ {request['request_id']}",
+            f"📢 {display_name(request)}"
+            + (f" ({request.get('channel')})" if request.get("channel") and request.get("channel") != display_name(request) else ""),
+        ]
     if not for_advertiser:
         lines.append(f"وضعیت: {STATUS_LABELS.get(request.get('status'), request.get('status') or '—')}")
+        banner = request.get("banner")
+        if banner:
+            kind = BANNER_LABELS.get(banner.get("type"), "؟")
+            lines.append(f"🖼 بنر: {kind}" + (" با کپشن" if banner.get("type") != "text" and banner.get("text") else ""))
+        else:
+            lines.append("🖼 بنر: تنظیم نشده (فقط پیام کوتاه «📣 تبلیغ» با دکمه نمایش داده میشه)")
+        url = channel_url(request)
+        lines.append(f"🔗 لینک دکمه: {url or 'ندارد'}")
+        if not url:
+            lines.append("🔘 دکمه: — (اول لینک رو تنظیم کن)")
+        elif wants_button(request) or not banner:
+            lines.append(f"🔘 دکمه زیر بنر: «{button_text(request)}» — کلیک‌ها شمرده میشن")
+        else:
+            lines.append("🔘 دکمه: ندارد (لینک توی کپشنه؛ کلیک شمرده نمیشه)")
+        if not can_show(request):
+            lines.append("⚠️ تا بنر یا لینک تنظیم نشه، این تبلیغ به کسی نشون داده نمیشه.")
     lines += [
         f"شروع نمایش: {_date(stats.get('first_impression'))}",
         f"آخرین نمایش: {_date(stats.get('last_impression'))}",
