@@ -704,6 +704,12 @@ TEXTS = {
 
         'settings_quality': "🎬 کیفیت پیش‌فرض اینستاگرام",
         'settings_low_data': "📶 حالت مصرف اینترنت کم",
+        'settings_inline_caption': "📝 کپشن پست‌ها در حالت اینلاین: {state}",
+        'state_on': "روشن ✅",
+        'state_off': "خاموش",
+        'inline_caption_on_toast': "کپشن پست‌ها در حالت اینلاین نمایش داده میشه.",
+        'inline_caption_off_toast': "از این به بعد پست‌ها در حالت اینلاین بدون کپشن فرستاده میشن.",
+        'inline_hide_not_yours': "فقط کسی که این پست رو فرستاده می‌تونه کپشنش رو مخفی کنه.",
         'settings_language': "🌐 زبان",
         'settings_current': "📋 تنظیمات فعلی",
         'settings_reset': "♻️ بازنشانی تنظیمات",
@@ -1067,6 +1073,12 @@ TEXTS = {
 
         'settings_quality': "🎬 Instagram Default Quality",
         'settings_low_data': "📶 Low Data Mode",
+        'settings_inline_caption': "📝 Captions in inline mode: {state}",
+        'state_on': "On ✅",
+        'state_off': "Off",
+        'inline_caption_on_toast': "Posts sent in inline mode will include their caption.",
+        'inline_caption_off_toast': "From now on, posts sent in inline mode won't include a caption.",
+        'inline_hide_not_yours': "Only the person who sent this post can hide its caption.",
         'settings_language': "🌐 Language",
         'settings_current': "📋 Current Settings",
         'settings_reset': "♻️ Reset Settings",
@@ -1723,6 +1735,15 @@ def _settings_markup(
         InlineKeyboardButton(
             text=low_data_text,
             callback_data="settings_low_data",
+        )
+    )
+
+    markup.add(
+        InlineKeyboardButton(
+            text=t["settings_inline_caption"].format(
+                state=t["state_on"] if user.get("inline_caption", True) is not False else t["state_off"]
+            ),
+            callback_data="settings_inline_caption",
         )
     )
 
@@ -4336,6 +4357,26 @@ def register_features(bot):
 
             return
 
+        if data == "settings_inline_caption":
+            user["inline_caption"] = user.get("inline_caption", True) is False
+            user_settings[chat_id] = user
+            store.save_user_settings(user_settings)
+
+            t = TEXTS[user.get("lang", "en")]
+
+            bot.edit_message_text(
+                f"{t['settings_msg']}\n\n{_current_settings_text(user, t)}",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=_settings_markup(user, t),
+                parse_mode="Markdown",
+            )
+            bot.answer_callback_query(
+                call.id,
+                t["inline_caption_on_toast"] if user["inline_caption"] else t["inline_caption_off_toast"],
+            )
+            return
+
         if data == "settings_quality":
 
             t = TEXTS[
@@ -6502,8 +6543,29 @@ def register_features(bot):
         _inline_gate_cache[user_id] = (time.monotonic(), passed)
         return passed
 
-    def _inline_markup(t, more_token=None):
+    INLINE_HIDE_PREFIX = "ihc_"
+
+    def _inline_caption_for(user_id, caption):
+        """The caption an inline post goes out with, and whether it gets the
+        "hide caption" button: the full caption (stats + post text) unless
+        the sender turned it off in /settings."""
+        wants = store.get_user(user_settings, user_id).get("inline_caption", True) is not False
+        if wants and caption and caption != BOT_SIGNATURE:
+            return caption, True
+        return BOT_SIGNATURE, False
+
+    def _inline_markup(t, more_token=None, hide_for=None):
         markup = InlineKeyboardMarkup()
+
+        if hide_for:
+            # Only the sender's tap counts (checked in the handler); the
+            # "more" token rides along so that button survives the edit.
+            markup.add(
+                InlineKeyboardButton(
+                    t["hide_caption"],
+                    callback_data=f"{INLINE_HIDE_PREFIX}{hide_for}_{more_token or ''}",
+                )
+            )
 
         if more_token:
             markup.add(
@@ -6523,6 +6585,33 @@ def register_features(bot):
         )
         return markup
 
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(INLINE_HIDE_PREFIX))
+    def handle_inline_hide_caption(call):
+        owner, _, more_token = call.data[len(INLINE_HIDE_PREFIX):].partition("_")
+
+        if str(call.from_user.id) != owner:
+            bot.answer_callback_query(
+                call.id,
+                _texts_for(call.from_user.id)["inline_hide_not_yours"],
+                show_alert=True,
+            )
+            return
+
+        if not call.inline_message_id:
+            bot.answer_callback_query(call.id)
+            return
+
+        try:
+            bot.edit_message_caption(
+                caption=BOT_SIGNATURE,
+                inline_message_id=call.inline_message_id,
+                reply_markup=_inline_markup(_texts_for(call.from_user.id), more_token or None),
+            )
+        except Exception as e:
+            if "not modified" not in str(e):
+                logger.warning("Could not hide an inline caption: %s", e)
+        bot.answer_callback_query(call.id)
+
     def _inline_quality(user_id, platform):
         user = store.get_user(user_settings, user_id)
 
@@ -6531,28 +6620,29 @@ def register_features(bot):
 
         return "best"
 
-    def _cached_inline_results(cached, t, title):
+    def _cached_inline_results(cached, t, title, user_id):
         results = []
+        caption, hide = _inline_caption_for(user_id, cached.get("caption"))
 
         for index, (kind, file_id) in enumerate(cached["items"][:10]):
             result_id = f"c{index}"
-            markup = _inline_markup(t)
+            markup = _inline_markup(t, hide_for=user_id if hide else None)
 
             if kind == "video":
                 results.append(InlineQueryResultCachedVideo(
-                    result_id, file_id, title, caption=BOT_SIGNATURE, reply_markup=markup,
+                    result_id, file_id, title, caption=caption, reply_markup=markup,
                 ))
             elif kind == "photo":
                 results.append(InlineQueryResultCachedPhoto(
-                    result_id, file_id, title=title, caption=BOT_SIGNATURE, reply_markup=markup,
+                    result_id, file_id, title=title, caption=caption, reply_markup=markup,
                 ))
             elif kind == "audio":
                 results.append(InlineQueryResultCachedAudio(
-                    result_id, file_id, caption=BOT_SIGNATURE, reply_markup=markup,
+                    result_id, file_id, caption=caption, reply_markup=markup,
                 ))
             elif kind == "document":
                 results.append(InlineQueryResultCachedDocument(
-                    result_id, file_id, title, caption=BOT_SIGNATURE, reply_markup=markup,
+                    result_id, file_id, title, caption=caption, reply_markup=markup,
                 ))
 
         return results
@@ -6568,25 +6658,27 @@ def register_features(bot):
             kind, file_id = items[0]
             result_id = f"r{index}"
             title = (entry.get("title") or "🦆")[:60]
-            markup = _inline_markup(t)
+            known = media_cache.get(entry.get("key")) or {}
+            caption, hide = _inline_caption_for(user_id, known.get("caption"))
+            markup = _inline_markup(t, hide_for=user_id if hide else None)
 
             if kind == "video":
                 results.append(InlineQueryResultCachedVideo(
                     result_id, file_id, title, description=t["inline_recent_desc"],
-                    caption=BOT_SIGNATURE, reply_markup=markup,
+                    caption=caption, reply_markup=markup,
                 ))
             elif kind == "photo":
                 results.append(InlineQueryResultCachedPhoto(
-                    result_id, file_id, title=title, caption=BOT_SIGNATURE, reply_markup=markup,
+                    result_id, file_id, title=title, caption=caption, reply_markup=markup,
                 ))
             elif kind == "audio":
                 results.append(InlineQueryResultCachedAudio(
-                    result_id, file_id, caption=BOT_SIGNATURE, reply_markup=markup,
+                    result_id, file_id, caption=caption, reply_markup=markup,
                 ))
             elif kind == "document":
                 results.append(InlineQueryResultCachedDocument(
                     result_id, file_id, title, description=t["inline_recent_desc"],
-                    caption=BOT_SIGNATURE, reply_markup=markup,
+                    caption=caption, reply_markup=markup,
                 ))
 
         return results
@@ -6699,7 +6791,7 @@ def register_features(bot):
             cached = _fresh_cache(cache_key)
 
             if cached:
-                _answer_inline(query, _cached_inline_results(cached, t, t["inline_cached_title"]))
+                _answer_inline(query, _cached_inline_results(cached, t, t["inline_cached_title"], user_id))
                 return
 
             token = _new_inline_token({"mode": "spotify", "url": url, "user_id": user_id, "quality": "audio"})
@@ -6719,7 +6811,7 @@ def register_features(bot):
         cached = _fresh_cache(platforms.media_cache_key(url, quality))
 
         if cached:
-            _answer_inline(query, _cached_inline_results(cached, t, t["inline_cached_title"]))
+            _answer_inline(query, _cached_inline_results(cached, t, t["inline_cached_title"], user_id))
             return
 
         token = _new_inline_token({"mode": "direct", "url": url, "user_id": user_id, "quality": quality})
@@ -6790,14 +6882,14 @@ def register_features(bot):
 
         return refs
 
-    def _inline_media(kind, file_id):
+    def _inline_media(kind, file_id, caption=BOT_SIGNATURE):
         if kind == "video":
-            return InputMediaVideo(file_id, caption=BOT_SIGNATURE, supports_streaming=True)
+            return InputMediaVideo(file_id, caption=caption, supports_streaming=True)
         if kind == "photo":
-            return InputMediaPhoto(file_id, caption=BOT_SIGNATURE)
+            return InputMediaPhoto(file_id, caption=caption)
         if kind == "audio":
-            return InputMediaAudio(file_id, caption=BOT_SIGNATURE)
-        return InputMediaDocument(file_id, caption=BOT_SIGNATURE)
+            return InputMediaAudio(file_id, caption=caption)
+        return InputMediaDocument(file_id, caption=caption)
 
     def _inline_fail(inline_message_id, t, text):
         try:
@@ -6945,6 +7037,7 @@ def register_features(bot):
                 if cached:
                     refs = cached["items"]
                     recent_title = cached.get("title") or platform.title()
+                    full_caption = cached.get("caption")
                 else:
                     if mode == "youtube":
                         info, entries, files = platforms.download_youtube_quality(data["video_id"], data["choice"])
@@ -6976,11 +7069,13 @@ def register_features(bot):
                     if not refs:
                         raise Exception("Nothing could be uploaded to the cache channel.")
 
+                    full_caption = _build_caption(metadata_source, url)
+
                     if cache_key:
                         media_cache[cache_key] = {
                             "time": time.time(),
                             "items": refs,
-                            "caption": _build_caption(metadata_source, url),
+                            "caption": full_caption,
                             "post_id": str(metadata_source.get("id") or int(time.time() * 1000))[:48],
                             "thumb_url": metadata_source.get("thumbnail"),
                             "offer_audio": any(kind == "video" for kind, _ in refs) and quality != "audio",
@@ -6994,10 +7089,11 @@ def register_features(bot):
                 more_token = _new_inline_token({"mode": mode, "url": url, "user_id": user_id, "quality": quality})
 
             kind, file_id = refs[0]
+            caption, hide = _inline_caption_for(user_id, full_caption)
             bot.edit_message_media(
-                _inline_media(kind, file_id),
+                _inline_media(kind, file_id, caption),
                 inline_message_id=inline_message_id,
-                reply_markup=_inline_markup(t, more_token),
+                reply_markup=_inline_markup(t, more_token, hide_for=user_id if hide else None),
             )
 
             store.record_download(platform, user_id)
