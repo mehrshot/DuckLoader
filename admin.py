@@ -18,6 +18,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 
 import ads
 import campaigns
+import estimator
 import platforms
 import store
 
@@ -338,6 +339,22 @@ def _stats_text(t) -> str:
                 f"{len(bucket.get('active_users') or [])} | "
                 f"{bucket.get('downloads', 0)}"
             )
+
+    lines.append("")
+    lines.append(t["stats_eta_title"])
+    week, previous = estimator.accuracy(7), estimator.accuracy(7, offset_days=7)
+    if week["count"]:
+        def pct(value):
+            return "—" if value is None else f"{value * 100:.0f}%"
+        lines.append(t["stats_eta_body"].format(
+            first=pct(week["first_median"]),
+            prev=pct(previous["first_median"]),
+            within=pct(week["first_within"]),
+            refined=pct(week["refined_median"]),
+            count=week["count"],
+        ))
+    else:
+        lines.append(t["stats_eta_empty"])
 
     sources = stats.get("sources") or {}
     if sources:

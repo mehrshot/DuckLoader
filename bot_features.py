@@ -37,6 +37,7 @@ from telebot import apihelper
 import admin
 import ads
 import campaigns
+import estimator
 import platforms
 import store
 
@@ -441,7 +442,8 @@ class _ProgressTicker:
     forward, never back. It stays below 100% until the file is delivered,
     then the status message is deleted as before."""
 
-    def __init__(self, bot, chat_id, status_msg, t, show_ui, expected_seconds):
+    def __init__(self, bot, chat_id, status_msg, t, show_ui, expected_seconds, job=None):
+        self._job = job  # estimator.Job: re-estimates once the file size is known
         self._bot = bot
         self._chat_id = chat_id
         self._status_msg = status_msg
@@ -488,6 +490,10 @@ class _ProgressTicker:
         """yt-dlp progress hook: real byte progress, if it's ahead of time."""
         if d.get("status") != "downloading":
             return
+        if self._job is not None:
+            refined = self._job.on_size(d.get("total_bytes") or d.get("total_bytes_estimate"))
+            if refined:
+                self.set_expected(refined)
         try:
             fraction = float(str(d.get("_percent_str") or "0").strip().rstrip("%")) / 100
         except ValueError:
@@ -542,6 +548,40 @@ class _ProgressTicker:
             self._render()
 
 
+class _StatusCycler:
+    """While something slow runs (a YouTube probe takes ~10 s), steps a
+    status message through a few texts so it never looks stuck. texts[0]
+    is what the message already shows; the last one stays."""
+
+    def __init__(self, edit, texts, interval=2.2):
+        self._edit = edit
+        self._texts = list(texts or [])
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = None
+
+    def __enter__(self):
+        if len(self._texts) > 1:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+        return False
+
+    def _run(self):
+        for text in self._texts[1:]:
+            if self._stop.wait(self._interval):
+                return
+            try:
+                self._edit(text)
+            except Exception:
+                pass
+
+
 def _files_size(paths) -> int:
     total = 0
     for path in paths or []:
@@ -565,6 +605,13 @@ TEXTS = {
             "💬 پیشنهاد یا مشکلی داشتی؟ از دکمه‌ی پایین صفحه یا /feedback برامون بفرست.\n\n"
             "🦆 لینکتو بفرست تا شروع کنیم!"
         ),        'init': "⏳ در حال برقراری ارتباط...",
+        'yt_probe_steps': [
+            "🔎 در حال بررسی لینک یوتیوب...",
+            "📡 در حال دریافت اطلاعات ویدیو از یوتیوب...",
+            "🎞 در حال پیدا کردن کیفیت‌های موجود...",
+            "📏 در حال محاسبه‌ی حجم هر کیفیت...",
+            "✨ تقریباً آماده‌ست، چند لحظه...",
+        ],
         'downloading': "🔄 **در حال دانلود** {bar} {percent}\n\n📦 حجم: {size}\n⏱ زمان: {eta}",
         'progress_line': "{label} {bar} {percent}\n\n⏱ زمان تقریبی باقی‌مانده: {eta}",
         'feedback_choose': "💬 چه چیزی می‌خوای برامون بفرستی؟",
@@ -775,6 +822,14 @@ TEXTS = {
         'status_on': "روشن",
         'status_off': "خاموش",
         'stats_users': "کاربران",
+        'stats_eta_title': "🎯 دقت تخمین زمان دانلود (۷ روز اخیر)",
+        'stats_eta_body': (
+            "• خطای تخمین اول کار (میانه): {first} — هفته‌ی قبل: {prev}\n"
+            "• تخمین‌های با خطای کمتر از ۲۵٪: {within}\n"
+            "• خطای تخمین بعد از دانلود فایل: {refined}\n"
+            "• دانلودهای اندازه‌گیری‌شده: {count}"
+        ),
+        'stats_eta_empty': "هنوز دانلودی اندازه‌گیری نشده.",
         'stats_errors': "خطاها",
         'stats_daily_title': "📅 ۷ روز اخیر (کاربر جدید | کاربر فعال | دانلود):",
         'stats_sources_title': "🔗 کاربران جذب‌شده از لینک‌های start:",
@@ -934,6 +989,13 @@ TEXTS = {
             "💬 Got an idea or a problem? Use the button below or /feedback.\n\n"
             "🦆 You bring the link. I’ll bring the media."
         ),        'init': "⏳ Initializing connection...",
+        'yt_probe_steps': [
+            "🔎 Checking the YouTube link...",
+            "📡 Getting the video's details from YouTube...",
+            "🎞 Finding the available qualities...",
+            "📏 Working out the size of each quality...",
+            "✨ Almost ready, one moment...",
+        ],
         'downloading': "🔄 **Downloading** {bar} {percent}\n\n📦 Size: {size}\n⏱ ETA: {eta}",
         'progress_line': "{label} {bar} {percent}\n\n⏱ Estimated time left: {eta}",
         'feedback_choose': "💬 What would you like to send us?",
@@ -1142,6 +1204,14 @@ TEXTS = {
         'status_on': "on",
         'status_off': "off",
         'stats_users': "Users",
+        'stats_eta_title': "🎯 Download time estimate accuracy (last 7 days)",
+        'stats_eta_body': (
+            "• First estimate error (median): {first} — previous week: {prev}\n"
+            "• Estimates within 25%: {within}\n"
+            "• Error once the file is downloaded: {refined}\n"
+            "• Downloads measured: {count}"
+        ),
+        'stats_eta_empty': "No downloads measured yet.",
         'stats_errors': "Errors",
         'stats_daily_title': "📅 Last 7 days (new users | active users | downloads):",
         'stats_sources_title': "🔗 Users who joined via start links:",
@@ -1648,6 +1718,9 @@ def _build_caption(
         lines.append(
             stats_line
         )
+
+    if "youtube" in platform and entry.get("title"):
+        lines.append(f"🎬 {str(entry['title']).strip()}")
 
     header = "\n".join(lines)
     footer = f"\n\n{BOT_SIGNATURE}"
@@ -3775,9 +3848,12 @@ def register_features(bot):
         _set_reaction(chat_id_int, react_target, "👀")
 
         # The clock starts once the job really starts (queue time excluded).
+        job = estimator.Job(
+            estimator.job_key(platform, url, quality),
+            prior=duration_model.expected(timing_key),
+        )
         ticker = _ProgressTicker(
-            bot, chat_id_int, status_msg, t, show_ui,
-            duration_model.expected(timing_key),
+            bot, chat_id_int, status_msg, t, show_ui, job.initial, job=job,
         ).start()
 
         _send_duck_reaction(
@@ -3809,6 +3885,9 @@ def register_features(bot):
             )
             ticker.set_phase("uploading")
             delivered_bytes = _files_size(files)
+            refined = job.fetched(delivered_bytes, items=len(files), media_seconds=(info or {}).get("duration"))
+            if refined:
+                ticker.set_expected(refined)
 
             _send_download_result(
                 chat_id_int,
@@ -3827,6 +3906,7 @@ def register_features(bot):
 
             ticker.stop()
             duration_model.record(timing_key, ticker.elapsed(), delivered_bytes)
+            job.finish()
 
             _send_duck_download_complete(
                 chat_id_int,
@@ -3929,6 +4009,7 @@ def register_features(bot):
 
         finally:
             ticker.stop()
+            job.close()
             platforms.remove_download_files(files)
 
             slot.release()
@@ -4016,13 +4097,19 @@ def register_features(bot):
 
         status_msg = None
 
+        steps = t["yt_probe_steps"]
+
         if show_ui:
-            status_msg = bot.reply_to(message, t["init"])
+            status_msg = bot.reply_to(message, steps[0])
         else:
             _set_reaction(chat_id_int, message.message_id, "👀")
 
         try:
-            probe = platforms.probe_youtube_qualities(url)
+            with _StatusCycler(
+                lambda text: bot.edit_message_text(text, chat_id_int, status_msg.message_id),
+                steps if status_msg is not None else [],
+            ):
+                probe = platforms.probe_youtube_qualities(url)
         except Exception as e:
             _send_duck_download_failed(chat_id_int, show_ui=show_ui)
 
@@ -5535,7 +5622,7 @@ def register_features(bot):
 
             ticker = _ProgressTicker(
                 bot, chat_id_int, status_msg, t, show_ui,
-                duration_model.expected("spotify:track"),
+                estimator.estimate_total("spotify:track", prior=duration_model.expected("spotify:track")),
             ).start()
 
             _send_duck_reaction(
@@ -5559,7 +5646,8 @@ def register_features(bot):
                 # An album takes about N tracks' worth of time.
                 ticker.set_expected(
                     ticker.elapsed()
-                    + duration_model.expected("spotify:track") * len(tracks)
+                    + estimator.estimate_total("spotify:track", prior=duration_model.expected("spotify:track"))
+                    * len(tracks)
                 )
 
                 failed_tracks = []
@@ -5571,6 +5659,7 @@ def register_features(bot):
                     for i, track in enumerate(tracks):
                         track_label = f"{track['artists']} - {track['name']}"
                         track_started = time.monotonic()
+                        track_job = estimator.Job("spotify:track", prior=duration_model.expected("spotify:track"))
 
                         ticker.set_phase("downloading")
                         if len(tracks) > 1:
@@ -5587,8 +5676,10 @@ def register_features(bot):
                         try:
                             filepath = platforms.download_spotify_track(track, None)
                         except platforms.FileTooLargeError:
+                            track_job.close()
                             raise
                         except Exception as track_error:
+                            track_job.close()
                             last_track_error = track_error
                             failed_tracks.append(track_label)
                             logger.warning(
@@ -5597,6 +5688,9 @@ def register_features(bot):
                                 str(track_error)[:300],
                             )
                             continue
+
+                        track_job.fetched(_files_size([filepath]), items=1,
+                                          media_seconds=(track.get('duration_ms') or 0) / 1000 or None)
 
                         try:
                             ticker.set_phase("uploading")
@@ -5627,7 +5721,9 @@ def register_features(bot):
                                 finally:
                                     if thumb_file:
                                         thumb_file.close()
+                            track_job.finish()
                         finally:
+                            track_job.close()
                             platforms.remove_download_files([filepath])
 
                         sent_count += 1
@@ -6270,6 +6366,14 @@ def register_features(bot):
         except Exception:
             pass
 
+    def _delete_quietly(chat_id, message_id):
+        if not message_id:
+            return
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+
     @bot.callback_query_handler(
         func=lambda call: call.data.startswith(("ytq_", YT_PICK_PREFIX))
     )
@@ -6328,9 +6432,11 @@ def register_features(bot):
         with group_lock:
             _download_youtube_choice(
                 chat_id_int, user_id, link_message_id, video_id, choice, t, show_ui,
+                picker_message_id=call.message.message_id if show_ui else None,
             )
 
-    def _download_youtube_choice(chat_id_int, user_id, link_message_id, video_id, choice, t, show_ui):
+    def _download_youtube_choice(chat_id_int, user_id, link_message_id, video_id, choice, t, show_ui,
+                                 picker_message_id=None):
         source_url = f"https://www.youtube.com/watch?v={video_id}"
         cache_key = platforms.media_cache_key(source_url, choice)
 
@@ -6341,6 +6447,7 @@ def register_features(bot):
         if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
             try:
                 _send_cached_result(chat_id_int, link_message_id, source_url, "youtube", cached, t, show_ui=show_ui)
+                _delete_quietly(chat_id_int, picker_message_id)
                 if show_ui:
                     _maybe_send_ad(chat_id_int)
                 return
@@ -6367,12 +6474,14 @@ def register_features(bot):
         # The picker already knows this option's size: a far better guess
         # than an average over every YouTube video.
         timing_key = f"youtube:{'audio' if choice == 'audio' else 'video'}"
+        option_size = platforms.youtube_option_size(video_id, choice)
+        job = estimator.Job(
+            estimator.job_key("youtube", source_url, choice),
+            prior=duration_model.expected(timing_key, option_size),
+            size_bytes=option_size,
+        )
         ticker = _ProgressTicker(
-            bot, chat_id_int, status_msg, t, show_ui,
-            duration_model.expected(
-                timing_key,
-                platforms.youtube_option_size(video_id, choice),
-            ),
+            bot, chat_id_int, status_msg, t, show_ui, job.initial, job=job,
         ).start()
 
         _send_duck_reaction(
@@ -6396,6 +6505,9 @@ def register_features(bot):
 
             ticker.set_phase("uploading")
             delivered_bytes = _files_size(files)
+            refined = job.fetched(delivered_bytes, items=len(files), media_seconds=(info or {}).get("duration"))
+            if refined:
+                ticker.set_expected(refined)
 
             _send_download_result(
                 chat_id_int,
@@ -6414,7 +6526,10 @@ def register_features(bot):
 
             ticker.stop()
             duration_model.record(timing_key, ticker.elapsed(), delivered_bytes)
+            job.finish()
             _set_reaction(chat_id_int, link_message_id, None)
+            # The quality picker has done its job: keep the chat clean.
+            _delete_quietly(chat_id_int, picker_message_id)
 
             _send_duck_download_complete(
                 chat_id_int,
@@ -6480,6 +6595,7 @@ def register_features(bot):
 
         finally:
             ticker.stop()
+            job.close()
             platforms.remove_download_files(files)
 
             slot.release()
@@ -6928,7 +7044,13 @@ def register_features(bot):
         lang = store.get_user(user_settings, user.id).get("lang", store.DEFAULT_LANGUAGE)
 
         try:
-            probe = platforms.probe_youtube_qualities(data["url"])
+            with _StatusCycler(
+                lambda text: bot.edit_message_text(
+                    text, inline_message_id=inline_message_id, reply_markup=_inline_markup(t),
+                ),
+                t["yt_probe_steps"],
+            ):
+                probe = platforms.probe_youtube_qualities(data["url"])
         except Exception as e:
             store.record_error(platform="youtube", url=data["url"], user_id=user.id, error=f"[inline] {e}")
             _inline_fail(inline_message_id, t, _friendly_download_error("youtube", e, t))
@@ -7029,6 +7151,7 @@ def register_features(bot):
             return
 
         files = []
+        job = None
 
         try:
             with _cache_key_lock(cache_key) if cache_key else contextlib.nullcontext():
@@ -7039,6 +7162,7 @@ def register_features(bot):
                     recent_title = cached.get("title") or platform.title()
                     full_caption = cached.get("caption")
                 else:
+                    job = estimator.Job(estimator.job_key(platform, url, quality))
                     if mode == "youtube":
                         info, entries, files = platforms.download_youtube_quality(data["video_id"], data["choice"])
                     elif mode == "spotify":
@@ -7064,10 +7188,13 @@ def register_features(bot):
                         if value not in (None, "", [], {}):
                             metadata_source[key] = value
 
+                    job.fetched(_files_size(files), items=len(files), media_seconds=metadata_source.get("duration"))
                     refs = _upload_to_cache_channel(cache_chat, files, metadata_source, platform)
 
                     if not refs:
                         raise Exception("Nothing could be uploaded to the cache channel.")
+
+                    job.finish()
 
                     full_caption = _build_caption(metadata_source, url)
 
@@ -7111,5 +7238,7 @@ def register_features(bot):
                 _inline_fail(inline_message_id, t, _friendly_download_error(platform, e, t))
 
         finally:
+            if job is not None:
+                job.close()
             platforms.remove_download_files(files)
             slot.release()
