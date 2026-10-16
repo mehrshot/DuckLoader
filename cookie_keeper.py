@@ -184,7 +184,10 @@ async def touch_site(
     site_name: str,
     context: BrowserContext,
     page: Page,
-) -> bool:
+) -> str:
+    """"active", "logged_out" (the site sent us to its login page) or
+    "error" (the page didn't load: network blip, timeout, browser trouble —
+    says nothing about the session)."""
 
     url = SITES[site_name]["url"]
 
@@ -203,34 +206,34 @@ async def touch_site(
         await page.wait_for_timeout(
             5_000
         )
-
-        if looks_logged_out(
+    except Exception as e:
+        logger.warning(
+            "%s session check failed (page did not load): %s",
             site_name,
-            page,
-        ):
-            logger.error(
-                "%s session appears logged out.",
-                site_name,
-            )
-            return False
-
-        cookies = await context.cookies()
-
-        logger.info(
-            "%s session looks active "
-            "(browser cookies available: %d).",
-            site_name,
-            len(cookies),
+            str(e).splitlines()[0][:200],
         )
+        return "error"
 
-        return True
-
-    except Exception:
-        logger.exception(
-            "%s session refresh failed.",
+    if looks_logged_out(
+        site_name,
+        page,
+    ):
+        logger.error(
+            "%s session appears logged out.",
             site_name,
         )
-        return False
+        return "logged_out"
+
+    cookies = await context.cookies()
+
+    logger.info(
+        "%s session looks active "
+        "(browser cookies available: %d).",
+        site_name,
+        len(cookies),
+    )
+
+    return "active"
 
 
 async def bootstrap_site(
@@ -305,64 +308,67 @@ async def bootstrap_site(
             await context.close()
 
 
+# A failed check is retried after a minute instead of the full interval;
+# only several failures in a row are reported (as "can't check", not as a
+# logout). If the browser driver itself is broken (e.g. "write EPIPE"),
+# relaunching inside this process doesn't help: the service exits and
+# systemd starts it fresh.
+RETRY_INTERVAL = 60
+FAILURES_BEFORE_ALERT = 3
+FAILURES_BEFORE_EXIT = 6
+CHECK_TIMEOUT = 150
+
+
+async def _close_quietly(context) -> None:
+    if context is None:
+        return
+    try:
+        await asyncio.wait_for(context.close(), timeout=30)
+    except Exception:
+        pass
+
+
 async def maintain_site(
     playwright,
     site_name: str,
 ) -> None:
 
     context = None
-    logged_out_alert_sent = False
+    alerted = None  # what the owner was last told: "logged_out" / "unreachable"
+    failures = 0
 
     while True:
+
+        status = "error"
 
         try:
             if (
                 context is None
                 or context.pages == []
             ):
-                if context is not None:
-                    try:
-                        await context.close()
-                    except Exception:
-                        pass
+                await _close_quietly(context)
 
-                context = await launch_browser(
-                    playwright,
-                    site_name,
-                    headless=True,
+                context = await asyncio.wait_for(
+                    launch_browser(
+                        playwright,
+                        site_name,
+                        headless=True,
+                    ),
+                    timeout=CHECK_TIMEOUT,
                 )
 
             page = await get_page(
                 context
             )
 
-            healthy = await touch_site(
-                site_name,
-                context,
-                page,
+            status = await asyncio.wait_for(
+                touch_site(
+                    site_name,
+                    context,
+                    page,
+                ),
+                timeout=CHECK_TIMEOUT,
             )
-
-            if healthy:
-
-                if logged_out_alert_sent:
-                    send_owner_message(
-                        f"🦆 DuckLoader {site_name} "
-                        "browser session is active again."
-                    )
-
-                logged_out_alert_sent = False
-
-            else:
-
-                if not logged_out_alert_sent:
-                    send_owner_message(
-                        f"⚠️ DuckLoader {site_name} "
-                        "browser session appears to be logged out.\n\n"
-                        "Run cookie_keeper.py bootstrap "
-                        f"{site_name} to log in again."
-                    )
-
-                    logged_out_alert_sent = True
 
         except Exception:
             logger.exception(
@@ -370,13 +376,51 @@ async def maintain_site(
                 site_name,
             )
 
-            if context is not None:
-                try:
-                    await context.close()
-                except Exception:
-                    pass
+        if status == "error":
+            # The page or the browser may be stuck: start fresh next time.
+            await _close_quietly(context)
+            context = None
+            failures += 1
 
-                context = None
+            if failures >= FAILURES_BEFORE_ALERT and alerted != "unreachable":
+                send_owner_message(
+                    f"⚠️ DuckLoader: {site_name} session could not be checked "
+                    f"({failures} attempts in a row failed to load the page).\n\n"
+                    "This is a network or browser problem, not a logout. "
+                    "Downloads may still work."
+                )
+                alerted = "unreachable"
+
+            if failures >= FAILURES_BEFORE_EXIT:
+                logger.error(
+                    "%s: %d failed checks in a row; exiting so systemd restarts the keeper.",
+                    site_name,
+                    failures,
+                )
+                raise SystemExit(1)
+
+            await asyncio.sleep(RETRY_INTERVAL)
+            continue
+
+        failures = 0
+
+        if status == "logged_out":
+            if alerted != "logged_out":
+                send_owner_message(
+                    f"⚠️ DuckLoader {site_name} "
+                    "browser session is logged out "
+                    "(the site redirected to its login page).\n\n"
+                    "Run cookie_keeper.py bootstrap "
+                    f"{site_name} to log in again."
+                )
+                alerted = "logged_out"
+
+        elif alerted is not None:
+            send_owner_message(
+                f"🦆 DuckLoader {site_name} "
+                "browser session is active again."
+            )
+            alerted = None
 
         await asyncio.sleep(
             REFRESH_INTERVAL
