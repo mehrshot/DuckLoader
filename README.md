@@ -308,6 +308,12 @@ In any chat, type `@DuckDownloader_Bot <link>`:
 
 Setup: in @BotFather enable `/setinline` and set `/setinlinefeedback` to 100%; create a private channel, make the bot an admin, then send `/setcache` to the bot and forward any message from that channel (or set `CACHE_CHAT_ID` in `.env`).
 
+### Video to audio
+
+A video sent or forwarded to the bot in a private chat (also round video notes and videos sent as files) gets a **🎧 Audio file** button, and **🎙 Voice message** for clips up to 10 minutes. The audio file is an `.m4a` that keeps the original sound track untouched when it is AAC/MP3 (almost always), so even a large video takes only seconds; the cover is a frame of the video. It uses the same download queue, progress bar and rate limit as downloads. The owner can turn it off in the admin panel (General settings → 🎧 Video to audio) or with `/toggle video_to_audio`.
+
+Telegram lets bots receive files of at most 20 MB unless the local Bot API server runs in `--local` mode. `tools/enable_local_bot_api.sh` switches the Docker container to local mode: it copies its data to `/home/mahshot/telegram-bot-api` (set `LOCAL_BOT_API_DIR` if you use another folder), re-creates the container with the same settings plus `TELEGRAM_LOCAL=1`, keeps the old one for rollback, and installs a cron job that deletes received videos after an hour. Inputs are capped at `VIDEO_TO_AUDIO_MAX_MB` (default 1024).
+
 ### Campaign links
 
 Give every ad campaign its own start link, e.g. `https://t.me/DuckDownloader_Bot?start=insta_ali`. New users who arrive through it are counted per source, and `/stats` (or 📊 in the admin panel) shows the last 7 days of new users, active users and downloads — the numbers advertisers ask for.

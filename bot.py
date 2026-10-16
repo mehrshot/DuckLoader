@@ -79,6 +79,7 @@ import platforms
 BOT_TOKEN = os.environ["BOT_TOKEN"]  # set in .env — see the setup notes above
 
 apihelper.API_URL = "http://127.0.0.1:8081/bot{0}/{1}"
+apihelper.FILE_URL = "http://127.0.0.1:8081/file/bot{0}/{1}"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

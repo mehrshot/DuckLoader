@@ -155,6 +155,10 @@ _youtube_probe_cache_lock = threading.Lock()
 _youtube_probe_semaphore = threading.Semaphore(1)
 
 
+class NoAudioError(Exception):
+    """The video has no sound track."""
+
+
 class FileTooLargeError(Exception):
     pass
 
@@ -375,6 +379,83 @@ def cleanup_stray_downloads() -> None:
                 os.remove(path)
         except OSError:
             pass
+
+
+# Audio codecs an .m4a (MP4) file can carry as they are; anything else
+# (Opus/Vorbis from WebM, PCM, ...) is encoded to AAC.
+_M4A_COPY_CODECS = {"aac", "mp3", "alac"}
+
+
+def extract_audio_from_video(video_path: str, voice: bool = False):
+    """Returns (audio_path, cover_path or None, duration_seconds or None).
+
+    m4a keeps the original sound track untouched when it is AAC/MP3 (almost
+    every Telegram video): no re-encoding, so even a large video takes only
+    seconds and barely any CPU. voice=True makes an OGG/Opus voice message.
+    The cover is one frame of the video, sized for a Telegram thumbnail."""
+    ffmpeg_exe, ffprobe_exe = _ffmpeg_exe("ffmpeg"), _ffmpeg_exe("ffprobe")
+    if not ffmpeg_exe:
+        raise Exception("ffmpeg not found.")
+
+    codec, duration, has_video = None, None, True
+    if ffprobe_exe:
+        probe = subprocess.run(
+            [ffprobe_exe, "-v", "error", "-print_format", "json", "-show_streams", "-show_format", video_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        data = json.loads(probe.stdout or "{}")
+        streams = data.get("streams") or []
+        audio = [s for s in streams if s.get("codec_type") == "audio"]
+        if probe.returncode == 0 and not audio:
+            raise NoAudioError("This video has no sound track.")
+        codec = (audio[0].get("codec_name") or "").lower() if audio else None
+        has_video = any(s.get("codec_type") == "video" for s in streams)
+        try:
+            duration = float((data.get("format") or {}).get("duration") or 0) or None
+        except (TypeError, ValueError):
+            duration = None
+
+    job_dir = _new_job_dir()
+    try:
+        if voice:
+            out_path = os.path.join(job_dir, "voice.ogg")
+            attempts = [["-c:a", "libopus", "-b:a", "64k", "-ac", "1"]]
+        else:
+            out_path = os.path.join(job_dir, "audio.m4a")
+            encode = ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+            copy = ["-c:a", "copy", "-movflags", "+faststart"]
+            attempts = [copy, encode] if codec in _M4A_COPY_CODECS else [encode]
+
+        error = ""
+        for codec_args in attempts:
+            result = subprocess.run(
+                [ffmpeg_exe, "-y", "-v", "error", "-i", video_path, "-vn", "-map", "0:a:0", *codec_args, out_path],
+                capture_output=True, text=True, timeout=3600,
+            )
+            if result.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                break
+            error = (result.stderr or "").strip()[-400:]
+            if "matches no streams" in error or "does not contain any stream" in error:
+                raise NoAudioError("This video has no sound track.")
+        else:
+            raise Exception(f"ffmpeg could not extract the audio: {error}")
+
+        cover_path = None
+        if has_video and not voice:
+            cover_path = os.path.join(job_dir, "cover.jpg")
+            seek = str(min(1.0, (duration or 2) / 2))
+            cover = subprocess.run(
+                [ffmpeg_exe, "-y", "-v", "error", "-ss", seek, "-i", video_path, "-frames:v", "1",
+                 "-vf", "scale=320:320:force_original_aspect_ratio=decrease", "-q:v", "5", cover_path],
+                capture_output=True, timeout=120,
+            )
+            if cover.returncode != 0 or not os.path.isfile(cover_path) or os.path.getsize(cover_path) > 200 * 1024:
+                cover_path = None
+
+        return out_path, cover_path, duration
+    except BaseException:
+        _remove_tree(job_dir)
+        raise
 
 
 def media_kind(filepath: str) -> str:

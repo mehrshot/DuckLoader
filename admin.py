@@ -26,12 +26,14 @@ TOGGLE_KEYS = {
     "auto_quality_fallback",
     "ad_requests_button",
     "sponsor_channel_gate",
+    "video_to_audio",
 }
 
 TOGGLE_LABELS = {
     "auto_quality_fallback": "auto_quality_fallback",
     "ad_requests_button": "toggle_ad_requests_button",
     "sponsor_channel_gate": "toggle_sponsor_channel_gate",
+    "video_to_audio": "toggle_video_to_audio",
 }
 # user_id -> which text-input action a /settings panel button is waiting on
 _pending_action = {}

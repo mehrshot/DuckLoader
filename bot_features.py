@@ -706,6 +706,8 @@ TEXTS = {
             "👥 داکلودر توی گروه (جدید)\n"
             "منو به گروهت اضافه کن؛ هر لینکی که توی گروه فرستاده بشه، فایلش رو همون‌جا میارم. "
             "کیفیت یوتیوب رو فقط کسی انتخاب می‌کنه که لینک رو فرستاده.\n\n"
+            "🎧 تبدیل ویدیو به صدا (جدید)\n"
+            "هر ویدیویی رو اینجا بفرست یا فوروارد کن تا صداش رو به‌صورت فایل صوتی یا ویس برات جدا کنم.\n\n"
             "⚙️ /settings — زبان و کیفیت اینستاگرام\n"
             "💬 /feedback — پیشنهاد یا گزارش مشکل"
         ),
@@ -914,6 +916,18 @@ TEXTS = {
         'ad_admin_request_status_rejected': "❌ رد شده",
         'toggle_ad_requests_button': "📣 دکمه تبلیغات در ربات",
         'toggle_sponsor_channel_gate': "🔒 الزام عضویت در کانال‌های اسپانسر",
+        'toggle_video_to_audio': "🎧 تبدیل ویدیو به صدا",
+        'v2a_prompt': "🎧 صدای این ویدیو رو جدا کنم؟",
+        'v2a_audio_btn': "🎧 فایل صوتی",
+        'v2a_voice_btn': "🎙 ویس",
+        'v2a_default_title': "صدای ویدیو",
+        'v2a_expired': "⚠️ این دکمه دیگه معتبر نیست؛ ویدیو رو دوباره بفرست.",
+        'v2a_disabled': "⚠️ تبدیل ویدیو به صدا فعلاً غیرفعاله.",
+        'v2a_too_big': "⚠️ حجم این ویدیو ({size} مگ) بیشتر از سقف {limit} مگه.",
+        'v2a_too_big_server': "⚠️ فعلاً فقط ویدیوهای تا ۲۰ مگ رو می‌تونم تبدیل کنم.",
+        'v2a_no_audio': "🔇 این ویدیو صدا نداره.",
+        'v2a_failed': "❌ تبدیل این ویدیو انجام نشد. یه بار دیگه امتحان کن.",
+        'progress_converting': "🎧 در حال جدا کردن صدا",
         'adm_title': "🛠 **پنل مدیریت**",
         'adm_platforms': "🔒 پلتفرم‌ها",
         'adm_toggles': "⚙️ تنظیمات کلی",
@@ -1101,6 +1115,8 @@ TEXTS = {
             "👥 DuckLoader in groups (new)\n"
             "Add me to your group and I'll bring the file for every link anyone sends. "
             "Only the person who sent a YouTube link can choose its quality.\n\n"
+            "🎧 Video to audio (new)\n"
+            "Send or forward any video here and I'll extract its sound as an audio file or a voice message.\n\n"
             "⚙️ /settings — language and Instagram quality\n"
             "💬 /feedback — suggestions and problem reports"
         ),
@@ -1308,6 +1324,18 @@ TEXTS = {
         'ad_admin_request_status_rejected': "❌ Rejected",
         'toggle_ad_requests_button': "📣 Ad Requests Button",
         'toggle_sponsor_channel_gate': "🔒 Sponsor Channel Membership Requirement",
+        'toggle_video_to_audio': "🎧 Video to audio",
+        'v2a_prompt': "🎧 Extract the sound of this video?",
+        'v2a_audio_btn': "🎧 Audio file",
+        'v2a_voice_btn': "🎙 Voice message",
+        'v2a_default_title': "Video sound",
+        'v2a_expired': "⚠️ This button has expired; send the video again.",
+        'v2a_disabled': "⚠️ Video to audio is turned off for now.",
+        'v2a_too_big': "⚠️ This video is {size} MB; the limit is {limit} MB.",
+        'v2a_too_big_server': "⚠️ For now I can only convert videos up to 20 MB.",
+        'v2a_no_audio': "🔇 This video has no sound.",
+        'v2a_failed': "❌ Couldn't convert this video. Please try again.",
+        'progress_converting': "🎧 Extracting the audio",
         'adm_title': "🛠 **Admin Panel**",
         'adm_platforms': "🔒 Platforms",
         'adm_toggles': "⚙️ General Settings",
@@ -5551,6 +5579,230 @@ def register_features(bot):
             ad_t["submitted"],
             reply_markup=_main_reply_markup(),
         )
+
+    # ------------------------------------------------------------------
+    # Video -> audio: a video sent to the bot (private chat only) gets an
+    # "extract the sound" offer.
+    # ------------------------------------------------------------------
+
+    V2A_PREFIX = "v2a_"
+    V2A_MAX_BYTES = int(os.environ.get("VIDEO_TO_AUDIO_MAX_MB", "1024")) * 1024 * 1024
+    V2A_VOICE_MAX_SECONDS = 600
+    # In --local mode the Bot API server saves received files itself and
+    # getFile returns their path inside its container; this is where that
+    # folder is mounted on the host (see tools/enable_local_bot_api.sh).
+    LOCAL_BOT_API_DIR = os.environ.get("LOCAL_BOT_API_DIR", "/home/mahshot/telegram-bot-api")
+    BOT_API_WORK_DIR = "/var/lib/telegram-bot-api"
+    _v2a_requests = _BoundedCache()
+
+    def _video_of(message):
+        if message.video:
+            return message.video, getattr(message.video, "file_name", None)
+        if getattr(message, "video_note", None):
+            return message.video_note, None
+        document = message.document
+        if document and (document.mime_type or "").startswith("video/"):
+            return document, document.file_name
+        return None, None
+
+    def _v2a_title(message, file_name, t):
+        caption = (message.caption or "").strip().splitlines()
+        if caption and caption[0].strip():
+            return caption[0].strip()[:64]
+        if file_name:
+            return os.path.splitext(file_name)[0][:64]
+        return t["v2a_default_title"]
+
+    def _fetch_user_file(file_id):
+        """(path, is_temporary). In local mode the Bot API server already has
+        the file on this machine; otherwise it is downloaded (20 MB max)."""
+        path = bot.get_file(file_id).file_path or ""
+
+        if path.startswith("/") or os.path.isabs(path):
+            if path.startswith(BOT_API_WORK_DIR + "/"):
+                path = os.path.join(LOCAL_BOT_API_DIR, path[len(BOT_API_WORK_DIR) + 1:])
+            if not os.access(path, os.R_OK):
+                raise Exception(
+                    f"The Bot API server's file isn't readable at {path} "
+                    "(check LOCAL_BOT_API_DIR and the folder permissions)."
+                )
+            return path, False
+
+        data = bot.download_file(path)
+        local_path = os.path.join(platforms._new_job_dir(), "input" + (os.path.splitext(path)[1] or ".mp4"))
+        with open(local_path, "wb") as f:
+            f.write(data)
+        return local_path, True
+
+    @bot.message_handler(
+        func=lambda msg: msg.chat.type == "private" and _video_of(msg)[0] is not None,
+        content_types=["video", "video_note", "document"],
+    )
+    def handle_video_for_audio(message):
+        user_id = message.from_user.id
+
+        if store.is_banned(user_id) or not flags.get("video_to_audio", True):
+            return
+
+        store.track_user(message.chat.id)
+        store.record_active(user_id)
+        t = _texts_for(message.chat.id)
+
+        media, file_name = _video_of(message)
+        size = getattr(media, "file_size", 0) or 0
+
+        if size > V2A_MAX_BYTES:
+            bot.reply_to(message, t["v2a_too_big"].format(size=size // (1024 * 1024), limit=V2A_MAX_BYTES // (1024 * 1024)))
+            return
+
+        duration = getattr(media, "duration", None)
+        token = secrets.token_urlsafe(6)
+        _v2a_requests[token] = {
+            "file_id": media.file_id,
+            "duration": duration,
+            "title": _v2a_title(message, file_name, t),
+            "user_id": user_id,
+            "message_id": message.message_id,
+        }
+
+        markup = InlineKeyboardMarkup(row_width=2)
+        buttons = [InlineKeyboardButton(t["v2a_audio_btn"], callback_data=f"{V2A_PREFIX}a_{token}")]
+        if duration and duration <= V2A_VOICE_MAX_SECONDS:
+            buttons.append(InlineKeyboardButton(t["v2a_voice_btn"], callback_data=f"{V2A_PREFIX}v_{token}"))
+        markup.add(*buttons)
+
+        bot.reply_to(message, t["v2a_prompt"], reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(V2A_PREFIX))
+    def handle_video_to_audio(call):
+        kind, _, token = call.data[len(V2A_PREFIX):].partition("_")
+        chat_id_int = call.message.chat.id
+        user_id = call.from_user.id
+        t = _texts_for(chat_id_int)
+        request = _v2a_requests.get(token)
+
+        if not request or request["user_id"] != user_id:
+            bot.answer_callback_query(call.id, t["v2a_expired"], show_alert=True)
+            return
+
+        if not flags.get("video_to_audio", True):
+            bot.answer_callback_query(call.id, t["v2a_disabled"], show_alert=True)
+            return
+
+        if request.get("busy"):
+            bot.answer_callback_query(call.id)
+            return
+
+        if not _check_sponsor_channel_gate(chat_id_int, user_id, t):
+            bot.answer_callback_query(call.id)
+            return
+
+        if _is_rate_limited(user_id):
+            bot.answer_callback_query(call.id, t["rate_limited"].format(limit=RATE_LIMIT_COUNT), show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id)
+        request["busy"] = True
+
+        # The offer message becomes the progress message, and goes away at
+        # the end so the chat stays clean.
+        status_msg = call.message
+        try:
+            bot.edit_message_text(t["init"], chat_id_int, status_msg.message_id)
+        except Exception:
+            pass
+
+        slot = _acquire_download_slot(bot, chat_id_int, status_msg, t, show_ui=True, platform="convert")
+
+        if slot is None:
+            request["busy"] = False
+            try:
+                bot.edit_message_text(t["server_busy"], chat_id_int, status_msg.message_id)
+            except Exception:
+                pass
+            return
+
+        voice = kind == "v"
+        job = estimator.Job("convert:voice" if voice else "convert:audio", prior=8.0)
+        ticker = _ProgressTicker(bot, chat_id_int, status_msg, t, True, job.initial, job=job).start()
+        cleanup = []
+
+        try:
+            source_path, temporary = _fetch_user_file(request["file_id"])
+            # A temporary download is ours; the local Bot API server's own
+            # copy is removed too when we're allowed to (else its cleanup
+            # job does it).
+            cleanup.append(source_path)
+
+            ticker.set_phase("converting")
+            audio_path, cover_path, duration = platforms.extract_audio_from_video(source_path, voice=voice)
+            cleanup += [audio_path, cover_path]
+            duration = request.get("duration") or duration
+
+            refined = job.fetched(_files_size([audio_path]), items=1, media_seconds=duration)
+            if refined:
+                ticker.set_expected(refined)
+
+            ticker.set_phase("uploading")
+            with open(audio_path, "rb") as audio_file:
+                if voice:
+                    bot.send_voice(
+                        chat_id_int, audio_file,
+                        duration=_as_int(duration),
+                        reply_to_message_id=request["message_id"],
+                        timeout=600,
+                    )
+                else:
+                    thumb_file = open(cover_path, "rb") if cover_path else None
+                    try:
+                        bot.send_audio(
+                            chat_id_int, audio_file,
+                            title=request["title"],
+                            duration=_as_int(duration),
+                            thumbnail=thumb_file,
+                            caption=BOT_SIGNATURE,
+                            reply_to_message_id=request["message_id"],
+                            timeout=600,
+                        )
+                    finally:
+                        if thumb_file:
+                            thumb_file.close()
+
+            ticker.stop()
+            job.finish()
+            store.record_download("video_to_audio", user_id)
+            _v2a_requests.pop(token, None)
+
+            try:
+                bot.delete_message(chat_id_int, status_msg.message_id)
+            except Exception:
+                pass
+
+            _maybe_send_ad(chat_id_int)
+
+        except Exception as e:
+            ticker.stop()
+            request["busy"] = False
+
+            if isinstance(e, platforms.NoAudioError):
+                text = t["v2a_no_audio"]
+            elif "file is too big" in str(e).lower():
+                text = t["v2a_too_big_server"]
+            else:
+                text = t["v2a_failed"]
+                store.record_error(platform="video_to_audio", url="", user_id=user_id, error=str(e))
+                logger.exception("Video to audio failed")
+
+            try:
+                bot.edit_message_text(text, chat_id_int, status_msg.message_id)
+            except Exception:
+                pass
+
+        finally:
+            ticker.stop()
+            job.close()
+            platforms.remove_download_files(cleanup)
+            slot.release()
 
     @bot.message_handler(func=lambda msg: bool(msg.text) and platforms.detect_platform(msg.text) is not None)
     def handle_media_link(message):
