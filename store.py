@@ -699,9 +699,64 @@ def record_download(platform: str, user_id=None) -> None:
         stats["downloads"][platform] = stats["downloads"].get(platform, 0) + 1
         day = _daily_bucket(stats)
         day["downloads"] += 1
-        if user_id is not None and user_id not in day["active_users"]:
+        # Group downloads are called with the group's (negative) chat id;
+        # only people count as active users (see record_active).
+        if _is_private_chat_id(user_id) and user_id not in day["active_users"]:
             day["active_users"].append(user_id)
         _save(STATS_FILE, stats)
+
+
+def record_active(user_id) -> None:
+    """Marks a person as active today (sent a link, in private or in a
+    group, or sent a file inline)."""
+    if not _is_private_chat_id(user_id):
+        return
+    with _io_lock:
+        stats = load_stats()
+        day = _daily_bucket(stats)
+        if user_id in day["active_users"]:
+            return
+        day["active_users"].append(user_id)
+        _save(STATS_FILE, stats)
+
+
+def active_users_summary() -> dict:
+    """Distinct active people per day / week / month from the daily
+    buckets, and how many days each of this week's users came back."""
+    daily = load_stats().get("daily") or {}
+    now = time.time()
+
+    def users(first, last):
+        people = set()
+        for i in range(first, last):
+            for uid in daily.get(iran_time("%Y-%m-%d", now - i * 86400), {}).get("active_users") or []:
+                if _is_private_chat_id(uid):
+                    people.add(int(uid))
+        return people
+
+    week = users(0, 7)
+    previous_week = users(7, 14)
+    days_seen = {}
+    for i in range(7):
+        for uid in users(i, i + 1):
+            days_seen[uid] = days_seen.get(uid, 0) + 1
+    month = users(0, 30)
+    daily_counts = [len(users(i, i + 1)) for i in range(7)]
+    average_daily = sum(daily_counts) / 7
+    return {
+        "today": daily_counts[0],
+        "yesterday": daily_counts[1],
+        "week": len(week),
+        "previous_week": len(previous_week),
+        "month": len(month),
+        "average_daily": average_daily,
+        "one_day": sum(1 for n in days_seen.values() if n == 1),
+        "few_days": sum(1 for n in days_seen.values() if 2 <= n <= 3),
+        "many_days": sum(1 for n in days_seen.values() if n >= 4),
+        "returning": len(week & previous_week),
+        "stickiness": average_daily / len(month) if month else None,
+        "first_day": min(daily) if daily else None,
+    }
 
 
 def record_group(chat_id, title: str, active: bool) -> None:

@@ -328,15 +328,27 @@ def _stats_text(t) -> str:
     lines.append(f"👨‍👩‍👧 {t['stats_groups']}: {sum(1 for g in groups.values() if g.get('active'))}")
     lines.append(f"🔎 {t['stats_inline']}: {stats.get('inline_sends', 0)}")
 
+    active = store.active_users_summary()
+    lines.append("")
+    lines.append(t["stats_active_title"])
+    lines.append(t["stats_active_body"].format(
+        **{**active,
+           "average_daily": f"{active['average_daily']:.0f}",
+           "stickiness": "—" if active["stickiness"] is None else f"{active['stickiness'] * 100:.0f}%"},
+    ))
+    if active["first_day"] and active["first_day"] > store.iran_time("%Y-%m-%d", time.time() - 29 * 86400):
+        lines.append(t["stats_active_since"].format(day=active["first_day"]))
+
     daily = stats.get("daily") or {}
     if daily:
         lines.append("")
         lines.append(t["stats_daily_title"])
         for day in sorted(daily)[-7:][::-1]:
             bucket = daily[day]
+            people = sum(1 for uid in bucket.get("active_users") or [] if store._is_private_chat_id(uid))
             lines.append(
                 f"{day}: +{bucket.get('new_users', 0)} | "
-                f"{len(bucket.get('active_users') or [])} | "
+                f"{people} | "
                 f"{bucket.get('downloads', 0)}"
             )
 

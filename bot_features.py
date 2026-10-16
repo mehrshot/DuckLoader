@@ -832,6 +832,17 @@ TEXTS = {
         'stats_eta_empty': "هنوز دانلودی اندازه‌گیری نشده.",
         'stats_errors': "خطاها",
         'stats_daily_title': "📅 ۷ روز اخیر (کاربر جدید | کاربر فعال | دانلود):",
+        'stats_active_title': "📈 کاربران فعال (هر نفر فقط یک بار شمرده میشه)",
+        'stats_active_body': (
+            "• امروز: {today} | دیروز: {yesterday}\n"
+            "• ۷ روز اخیر: {week} نفر — ۷ روز قبلش: {previous_week}\n"
+            "• ۳۰ روز اخیر: {month} نفر\n"
+            "• میانگین فعال روزانه در این هفته: {average_daily}\n"
+            "• فعال‌های این هفته: {one_day} نفر ۱ روز، {few_days} نفر ۲ تا ۳ روز، {many_days} نفر ۴ روز یا بیشتر\n"
+            "• برگشتی از هفته‌ی قبل: {returning} نفر\n"
+            "• چسبندگی (میانگین روزانه به ماهانه): {stickiness}"
+        ),
+        'stats_active_since': "(دیتای فعالیت از {day} موجوده؛ عدد ۳۰ روزه تا پر شدن ۳۰ روز کامل نیست)",
         'stats_sources_title': "🔗 کاربران جذب‌شده از لینک‌های start:",
         'broadcast_usage': "استفاده: /broadcast <پیام>",
         'broadcast_done': "✅ به {sent} کاربر ارسال شد ({failed} ناموفق).",
@@ -1214,6 +1225,17 @@ TEXTS = {
         'stats_eta_empty': "No downloads measured yet.",
         'stats_errors': "Errors",
         'stats_daily_title': "📅 Last 7 days (new users | active users | downloads):",
+        'stats_active_title': "📈 Active users (each person counted once)",
+        'stats_active_body': (
+            "• Today: {today} | Yesterday: {yesterday}\n"
+            "• Last 7 days: {week} people — the 7 days before: {previous_week}\n"
+            "• Last 30 days: {month} people\n"
+            "• Average daily active this week: {average_daily}\n"
+            "• This week's users: {one_day} on 1 day, {few_days} on 2-3 days, {many_days} on 4+ days\n"
+            "• Came back from last week: {returning}\n"
+            "• Stickiness (daily average / monthly): {stickiness}"
+        ),
+        'stats_active_since': "(activity data starts on {day}; the 30-day number isn't complete until then + 30 days)",
         'stats_sources_title': "🔗 Users who joined via start links:",
         'broadcast_usage': "Usage: /broadcast <message>",
         'broadcast_done': "✅ Sent to {sent} users ({failed} failed).",
@@ -5544,6 +5566,7 @@ def register_features(bot):
             return  # silently ignore banned users
 
         store.track_user(chat_id_int)
+        store.record_active(user_id)
         user = store.get_user(user_settings, chat_id_str)
         t = TEXTS[user['lang']]
 
@@ -7019,6 +7042,8 @@ def register_features(bot):
 
     @bot.chosen_inline_handler(func=lambda result: True)
     def handle_chosen_inline(result):
+        store.record_active(result.from_user.id)
+
         if not result.result_id.startswith(("d:", "y:")):
             # A cached file was sent: nothing to download.
             store.record_inline_send()
