@@ -38,6 +38,7 @@ import admin
 import ads
 import campaigns
 import estimator
+import media_store
 import platforms
 import store
 
@@ -83,9 +84,12 @@ caption_cache = _BoundedCache()
 # cache_key -> what was sent last time (Telegram file_ids + caption data).
 # When an influencer posts a Reel, hundreds of people send the same link;
 # after the first download everyone else gets the already-uploaded file
-# instantly, with zero extra requests to Instagram.
-MEDIA_CACHE_TTL = int(os.environ.get("MEDIA_CACHE_TTL_HOURS", "72")) * 3600
-media_cache = _BoundedCache(max_items=3000)
+# instantly, with zero extra requests to Instagram. Kept on disk (survives
+# restarts); every result is also copied into the cache channel so the
+# files stay on Telegram. The caption (likes, views) is from the first
+# download, hence the expiry.
+MEDIA_CACHE_TTL = int(os.environ.get("MEDIA_CACHE_TTL_HOURS", "720")) * 3600
+media_cache = media_store.MediaCache()
 
 # (chat_id, link) pairs currently being downloaded, so a double-tap or an
 # impatient resend doesn't start a second identical download.
@@ -2487,6 +2491,40 @@ def register_features(bot):
         except (TypeError, ValueError):
             return None
 
+    _archive_state = {"warned": False}
+
+    def _archive_to_cache_channel(cache_key, source_chat_id, message_ids):
+        """Copies a delivered result into the private cache channel, in the
+        background (copying doesn't upload anything again): the files stay
+        on Telegram, so the cached file_ids keep working even if the user
+        deletes the chat, and the owner can browse everything there."""
+        cache_chat = _cache_chat_id()
+        message_ids = sorted(i for i in message_ids if i)
+        if cache_chat is None or not message_ids or source_chat_id == cache_chat:
+            return
+
+        def work():
+            try:
+                if len(message_ids) == 1:
+                    copied = [bot.copy_message(cache_chat, source_chat_id, message_ids[0],
+                                               disable_notification=True).message_id]
+                else:
+                    copied = []
+                    for start in range(0, len(message_ids), 100):
+                        copied += [m.message_id for m in bot.copy_messages(
+                            cache_chat, source_chat_id, message_ids[start:start + 100], disable_notification=True,
+                        )]
+                entry = media_cache.get(cache_key) if cache_key else None
+                if entry is not None:
+                    entry["archived"] = copied
+                    media_cache[cache_key] = entry
+            except Exception as e:
+                if not _archive_state["warned"]:
+                    _archive_state["warned"] = True
+                    logger.warning("Could not copy a result to the cache channel (is the bot an admin there?): %s", e)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _raw_api(method_name, params):
         """Bot API methods newer than pyTelegramBotAPI (ephemeral messages)."""
         return apihelper._make_request(bot.token, method_name, method="post", params=params)
@@ -3551,6 +3589,7 @@ def register_features(bot):
         )
 
         sent_refs = []
+        sent_messages = []
 
         if len(valid_files) == 1:
             filepath = valid_files[0]
@@ -3652,6 +3691,7 @@ def register_features(bot):
                         timeout=600,
                     )
                     sent_refs.append(_file_ref(sent_message))
+                    sent_messages.append(sent_message)
 
                     if not show_ui:
                         caption_cache[post_id] = {
@@ -3709,6 +3749,7 @@ def register_features(bot):
                                 timeout=600,
                             )
                             sent_refs.append(_file_ref(sent_message))
+                            sent_messages.append(sent_message)
                         finally:
                             if thumb_file:
                                 thumb_file.close()
@@ -3725,6 +3766,7 @@ def register_features(bot):
                         sent_message = bot.send_document(chat_id_int, media_file, caption=caption, reply_markup=markup, reply_to_message_id=reply_to_id, timeout=600)
 
                     sent_refs.append(_file_ref(sent_message))
+                    sent_messages.append(sent_message)
 
         elif len(valid_files) > 1:
             chunks = [valid_files[idx:idx + 10] for idx in range(0, len(valid_files), 10)]
@@ -3761,6 +3803,7 @@ def register_features(bot):
                     bot.send_chat_action(chat_id_int, 'upload_document')
                     sent_group = bot.send_media_group(chat_id_int, media_group, reply_to_message_id=reply_to_id if chunk_idx == 0 else None, timeout=600)
                     sent_refs.extend(_file_ref(sent) for sent in (sent_group or []))
+                    sent_messages.extend(sent_group or [])
                 finally:
                     for f in open_files:
                         f.close()
@@ -3784,6 +3827,8 @@ def register_features(bot):
 
         if chat_id_int > 0 and sent_refs and all(sent_refs):
             store.add_recent(chat_id_int, cache_key or url, _recent_title(metadata_source, platform), sent_refs)
+
+        _archive_to_cache_channel(cache_key, chat_id_int, [m.message_id for m in sent_messages if m])
 
         store.record_download(platform, chat_id_int)
 
@@ -5596,11 +5641,12 @@ def register_features(bot):
     _v2a_requests = _BoundedCache()
 
     def _video_of(message):
-        if message.video:
-            return message.video, getattr(message.video, "file_name", None)
+        video = getattr(message, "video", None)
+        if video:
+            return video, getattr(video, "file_name", None)
         if getattr(message, "video_note", None):
             return message.video_note, None
-        document = message.document
+        document = getattr(message, "document", None)
         if document and (document.mime_type or "").startswith("video/"):
             return document, document.file_name
         return None, None
@@ -5883,6 +5929,25 @@ def register_features(bot):
             )
 
         if platform == "spotify":
+            # A single track that was already delivered: send it again by
+            # file_id (albums and playlists aren't cached as a whole).
+            spotify_key = platforms.media_cache_key(url, "audio")
+            cached = media_cache.get(spotify_key) if spotify_key else None
+            if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+                try:
+                    _send_cached_result(chat_id_int, message.message_id, url, "spotify", cached, t, show_ui=show_ui)
+                    if status_msg is not None:
+                        try:
+                            bot.delete_message(chat_id_int, status_msg.message_id)
+                        except Exception:
+                            pass
+                    if show_ui:
+                        _maybe_send_ad(chat_id_int)
+                    return
+                except Exception:
+                    logger.warning("Cached Spotify re-send failed; downloading again | %s", spotify_key, exc_info=True)
+                    media_cache.pop(spotify_key, None)
+
             slot = _acquire_download_slot(
                 bot,
                 chat_id_int,
@@ -6005,6 +6070,21 @@ def register_features(bot):
                         store.record_download("spotify", chat_id_int)
 
                         audio_ref = _file_ref(sent_audio)
+                        if len(tracks) == 1 and audio_ref and spotify_key:
+                            media_cache[spotify_key] = {
+                                "time": time.time(),
+                                "items": [audio_ref],
+                                "caption": caption or BOT_SIGNATURE,
+                                "post_id": f"sp{int(time.time() * 1000)}",
+                                "thumb_url": track.get("cover_url"),
+                                "offer_audio": False,
+                                "title": track_label,
+                            }
+                        _archive_to_cache_channel(
+                            spotify_key if len(tracks) == 1 else None,
+                            chat_id_int,
+                            [sent_audio.message_id],
+                        )
                         if audio_ref and chat_id_int > 0:
                             store.add_recent(chat_id_int, f"spotify:{track.get('name')}:{track.get('artists')}",
                                              f"{track['artists']} - {track['name']}", [audio_ref])
@@ -7478,6 +7558,7 @@ def register_features(bot):
                     if cache_key:
                         media_cache[cache_key] = {
                             "time": time.time(),
+                            "archived": True,
                             "items": refs,
                             "caption": full_caption,
                             "post_id": str(metadata_source.get("id") or int(time.time() * 1000))[:48],

@@ -148,7 +148,7 @@ These commands work only for the user configured as `OWNER_ID`.
 | `/removesponsor <channel>` | Remove a sponsor channel |
 | `/sponsors` | List sponsor channels |
 | `/senddl <user_id> <link> [<link> ...]` | Download link(s) and deliver them to a user in the normal format (e.g. to make up for failed requests) |
-| `/setcache` | Connect the private cache channel used by inline mode (then forward any message from that channel to the bot) |
+| `/setcache` | Connect the private cache channel (then forward any message from that channel to the bot). Every delivered file is kept there; inline mode needs it |
 
 The owner can also access these functions through the button-based admin panel from `/settings`.
 
@@ -277,13 +277,13 @@ ROTATING_PROXIES=socks5://127.0.0.1:9050,socks5://127.0.0.1:9051
 | `MAX_CONCURRENT_DOWNLOADS` | No | Downloads running at once, bot-wide (default 4) |
 | `INSTAGRAM_MAX_CONCURRENT` | No | Instagram downloads running at once (default 3) |
 | `MAX_QUEUE_WAITING` | No | Requests allowed to wait in the queue (default 40) |
-| `MEDIA_CACHE_TTL_HOURS` | No | How long an uploaded file is re-sent by file_id for the same link (default 72) |
+| `MEDIA_CACHE_TTL_HOURS` | No | How long an already-delivered link is re-sent from the cache instead of downloaded again (default 720 = 30 days; the caption's likes/views are from the first download) |
 | `SPOTIFY_MAX_TRACKS` | No | Max tracks fetched from one album/playlist link (default 50) |
 | `MAX_PLAYLIST_ENTRIES` | No | Max items from one link, e.g. a highlight or SoundCloud set (default 30) |
 
 ### Handling traffic spikes
 
-- A link that was already downloaded (same media, same quality) is re-sent instantly by its Telegram `file_id` for `MEDIA_CACHE_TTL_HOURS`. When many people send the same link at the same moment, only the first one downloads it; the rest wait and get the uploaded copy.
+- A link that was already downloaded (same media, same quality, by anyone, in private, in a group or inline; Spotify single tracks too) is re-sent instantly by its Telegram `file_id` for `MEDIA_CACHE_TTL_HOURS`. The index is kept on disk (`media_cache.db`, survives restarts) and every delivered result is copied into the cache channel, so the files stay on Telegram even if the user deletes the chat. When many people send the same link at the same moment, only the first one downloads it; the rest wait and get the uploaded copy.
 - Sending the same link again while it is still downloading is ignored with a short notice.
 - Queued users see their position in the queue.
 

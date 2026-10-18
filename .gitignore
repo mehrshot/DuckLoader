@@ -41,3 +41,8 @@ downloads/
 .idea/
 .DS_Store
 Thumbs.dbinstagram_cookies.txt
+
+# Media cache index (SQLite)
+*.db
+*.db-wal
+*.db-shm
