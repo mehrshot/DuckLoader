@@ -2889,6 +2889,67 @@ def register_features(bot):
 
     # Registered before handle_media_link: the command text contains links,
     # and handlers are matched in registration order.
+    def _senddl_spotify(target_id, url, t):
+        """Spotify for /senddl: re-sent from the cache when the track was
+        already delivered, otherwise found and sent like a normal request."""
+        key = platforms.media_cache_key(url, "audio")
+        cached = media_cache.get(key) if key else None
+
+        if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+            try:
+                _send_cached_result(target_id, None, url, "spotify", cached, t, show_ui=True)
+                _maybe_send_ad(target_id)
+                return f"✅ {url} (from the cache)"
+            except Exception:
+                logger.warning("Cached Spotify re-send failed for /senddl | %s", key, exc_info=True)
+                media_cache.pop(key, None)
+
+        try:
+            tracks = platforms.resolve_spotify_tracks(url)
+            if not tracks:
+                raise Exception("Spotify returned no playable tracks for this link.")
+
+            for track in tracks:
+                filepath = platforms.download_spotify_track(track, None)
+                cover = None
+                try:
+                    cover = platforms.make_thumbnail(track.get("cover_url"))
+                    caption = f"💿 {track['album']}\n\n{BOT_SIGNATURE}" if track.get("album") else BOT_SIGNATURE
+                    with open(filepath, "rb") as audio_file:
+                        thumb_file = open(cover, "rb") if cover else None
+                        try:
+                            sent = bot.send_audio(
+                                target_id, audio_file,
+                                title=track["name"], performer=track["artists"],
+                                duration=int((track.get("duration_ms") or 0) / 1000) or None,
+                                thumbnail=thumb_file, caption=caption, timeout=600,
+                            )
+                        finally:
+                            if thumb_file:
+                                thumb_file.close()
+                finally:
+                    platforms.remove_download_files([filepath, cover])
+
+                ref = _file_ref(sent)
+                if len(tracks) == 1 and key and ref:
+                    media_cache[key] = {
+                        "time": time.time(),
+                        "items": [ref],
+                        "caption": caption,
+                        "post_id": f"sp{int(time.time() * 1000)}",
+                        "thumb_url": track.get("cover_url"),
+                        "offer_audio": False,
+                        "title": f"{track['artists']} - {track['name']}",
+                    }
+                _archive_to_cache_channel(key if len(tracks) == 1 else None, target_id, [sent.message_id])
+                store.record_download("spotify", target_id)
+
+            _maybe_send_ad(target_id)
+            return f"✅ {url}"
+        except Exception as e:
+            logger.exception("Spotify /senddl failed | %s", url)
+            return f"❌ {url}\n{str(e)[:300]}"
+
     @bot.message_handler(commands=["senddl"])
     def owner_send_download(message):
         """/senddl <user_id> <link> [<link> ...] — owner only.
@@ -2934,7 +2995,7 @@ def register_features(bot):
             platform = platforms.detect_platform(url)
 
             if platform == "spotify":
-                results.append(f"⚠️ {url}\nSpotify links aren't supported by /senddl.")
+                results.append(_senddl_spotify(target_id, url, target_t))
                 continue
 
             if platform == "instagram":
