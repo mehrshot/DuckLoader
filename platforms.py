@@ -2496,6 +2496,18 @@ _VERSION_MARKERS = (
 MATCH_ACCEPT_SCORE = 50
 MATCH_STRONG_SCORE = 85
 MAX_MATCH_DOWNLOAD_ATTEMPTS = 6
+# Candidates further than this from the Spotify length are never the same
+# recording (and 30-second previews always are). Closer than the strict
+# check in download_matching_audio but within this, a candidate is kept as
+# a fallback: often the only upload of a song is a version with a short
+# intro/outro (e.g. 287 s for a 268 s track), and failing outright was worse.
+DURATION_HARD_LIMIT = 25
+
+
+class _DurationMismatch(Exception):
+    def __init__(self, actual, expected):
+        super().__init__(f"downloaded audio is {actual:.0f}s, expected {expected:.0f}s")
+        self.diff = abs(actual - expected)
 
 
 def _normalize_text(text: str) -> str:
@@ -2590,7 +2602,7 @@ def _score_candidate(track: dict, cand: dict) -> float:
     duration = cand.get("duration")
     if expected and duration:
         diff = abs(float(duration) - expected)
-        if diff > 25:
+        if diff > DURATION_HARD_LIMIT:
             return -100.0
         duration_score = 30 if diff <= 2 else 25 if diff <= 5 else 12 if diff <= 10 else 0
     else:
@@ -2716,7 +2728,22 @@ def download_matching_audio(track: dict, progress_hook=None, sources=("ytmusic",
     attempts = 0
     last_error = None
     youtube_blocked = False  # bot check with no working cookies: stop trying YouTube URLs
+    fallback = None  # (diff, filepath, cand): best download that only missed the strict length check
     stages = _match_sources(track, sources)
+
+    def tag(filepath):
+        tag_audio_file(
+            filepath,
+            title=track["name"],
+            artist=track.get("artists", ""),
+            album=track.get("album", ""),
+            cover_url=track.get("cover_url"),
+            album_artist=track.get("album_artist", ""),
+            release_date=track.get("release_date", ""),
+            track_number=track.get("track_number"),
+            total_tracks=track.get("total_tracks"),
+            disc_number=track.get("disc_number"),
+        )
 
     for stage_index, (source, search) in enumerate(stages):
         for cand in search():
@@ -2755,29 +2782,40 @@ def download_matching_audio(track: dict, progress_hook=None, sources=("ytmusic",
                 filepath = files[0]
                 actual = _audio_duration(filepath)
                 if expected and actual and abs(actual - expected) > tolerance:
-                    raise Exception(f"downloaded audio is {actual:.0f}s, expected {expected:.0f}s")
-                tag_audio_file(
-                    filepath,
-                    title=track["name"],
-                    artist=track.get("artists", ""),
-                    album=track.get("album", ""),
-                    cover_url=track.get("cover_url"),
-                    album_artist=track.get("album_artist", ""),
-                    release_date=track.get("release_date", ""),
-                    track_number=track.get("track_number"),
-                    total_tracks=track.get("total_tracks"),
-                    disc_number=track.get("disc_number"),
-                )
+                    raise _DurationMismatch(actual, expected)
+                tag(filepath)
+                if fallback:
+                    remove_download_files([fallback[1]])
                 return filepath
             except FileTooLargeError:
+                if fallback:
+                    remove_download_files([fallback[1]])
                 raise
             except Exception as e:
                 last_error = e
                 logger.warning("Match candidate failed | %s | %s", cand["url"], str(e)[:300])
-                if filepath:
+                if (
+                    isinstance(e, _DurationMismatch)
+                    and filepath
+                    and e.diff <= DURATION_HARD_LIMIT
+                    and (fallback is None or e.diff < fallback[0])
+                ):
+                    if fallback:
+                        remove_download_files([fallback[1]])
+                    fallback = (e.diff, filepath, cand)
+                elif filepath:
                     remove_download_files([filepath])
                 if _is_youtube_url(cand["url"]) and any(h in str(e).lower() for h in _YOUTUBE_BOT_CHECK_HINTS):
                     youtube_blocked = True
+
+    if fallback:
+        diff, filepath, cand = fallback
+        logger.info(
+            "Match accepted with a different length (%.0fs off) | %.0f | %s | %s",
+            diff, cand["score"], cand["title"], cand["url"],
+        )
+        tag(filepath)
+        return filepath
 
     raise last_error or Exception(f"No matching audio found for: {track.get('artists')} - {track.get('name')}")
 
