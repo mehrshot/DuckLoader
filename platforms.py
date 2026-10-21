@@ -1728,13 +1728,68 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
     return info, entries, files, tier
 
 
+# Where Instagram's media info keeps a Reel's views, best first. yt-dlp only
+# reads "view_count", which Instagram no longer fills for Reels: their views
+# are "ig_play_count" (plays on Instagram, what the app shows) and
+# "play_count" (Instagram + Facebook). Without this every caption said 0.
+_IG_VIEW_KEYS = ("view_count", "ig_play_count", "play_count", "video_view_count", "video_play_count")
+
+
+def _ig_views_in(media) -> int | None:
+    if not isinstance(media, dict):
+        return None
+    for key in _IG_VIEW_KEYS:
+        value = media.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _patch_ytdlp_instagram_views() -> None:
+    """Makes yt-dlp's Instagram extractor fill view_count from the play
+    counts above (no extra request: they are in the media info it already
+    fetched)."""
+    try:
+        from yt_dlp.extractor import instagram as ytdlp_instagram
+
+        original = ytdlp_instagram.InstagramBaseIE._extract_product
+    except Exception:
+        logger.warning("Could not hook yt-dlp's Instagram extractor; view counts may be 0", exc_info=True)
+        return
+    if getattr(original, "_duckloader_views", False):
+        return
+
+    def _extract_product(self, product_info, *args, **kwargs):
+        result = original(self, product_info, *args, **kwargs)
+        try:
+            media = product_info[0] if isinstance(product_info, list) else product_info
+            views = _ig_views_in(media)
+            if views and isinstance(result, dict) and not result.get("view_count"):
+                result["view_count"] = views
+        except Exception:
+            pass
+        return result
+
+    _extract_product._duckloader_views = True
+    ytdlp_instagram.InstagramBaseIE._extract_product = _extract_product
+
+
+_patch_ytdlp_instagram_views()
+
+
 def _get_instagram_view_count(*objects):
     """The Reel's real view count from any yt-dlp metadata shape (searched
     recursively; only positive integers count)."""
 
     def _search(obj):
         if isinstance(obj, dict):
-            for key in ("view_count", "video_view_count", "play_count", "video_play_count"):
+            for key in _IG_VIEW_KEYS:
                 value = obj.get(key)
                 if value is None or isinstance(value, bool):
                     continue
