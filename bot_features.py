@@ -7994,11 +7994,16 @@ def register_features(bot):
         # than an average over every YouTube video.
         timing_key = f"youtube:{'audio' if choice == 'audio' else 'video'}"
         option_size = platforms.youtube_option_size(video_id, choice)
-        target = _yt_range_targets.get((chat_id_int, user_id)) or {}
-        if section and option_size and target.get("duration"):
-            option_size = int(option_size * (section[1] - section[0]) / target["duration"])
+        job_key = estimator.job_key("youtube", source_url, choice)
+        if section and platforms.youtube_section_strategy(video_id, choice) == "ranges":
+            # Only the part is fetched (through ffmpeg, much slower per MB):
+            # its own size, and its own learned speed.
+            target = _yt_range_targets.get((chat_id_int, user_id)) or {}
+            if option_size and target.get("duration"):
+                option_size = int(option_size * (section[1] - section[0]) / target["duration"])
+            job_key = "youtube:section"
         job = estimator.Job(
-            estimator.job_key("youtube", source_url, choice),
+            job_key,
             prior=duration_model.expected(timing_key, option_size),
             size_bytes=option_size,
         )

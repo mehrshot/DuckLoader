@@ -1296,7 +1296,7 @@ def _download_entries(ydl, url, job_dir, extract_audio, wanted_ids):
         path = _find_downloaded_file(processed, job_dir, entry_id, extract_audio)
         if not path or not os.path.exists(path):
             raise Exception(f"downloaded file does not exist: {entry_id}")
-        if not extract_audio and media_kind(path) == "video":
+        if not extract_audio and media_kind(path) == "video" and not ydl.params.get("duck_keep_codec"):
             path = _ensure_h264_mp4(path)
         _check_file_size(path, MIN_VALID_FILE_BYTES)
 
@@ -2802,6 +2802,66 @@ def _youtube_download(url: str, selector: str, extract_audio: bool, progress_hoo
 # cut, i.e. re-encoded); longer ones start at the nearest keyframe, fast.
 YOUTUBE_EXACT_SECTION_SECONDS = 60
 
+# How a section of a YouTube video is fetched. yt-dlp's own section download
+# hands the streams to ffmpeg: one plain connection that YouTube throttles,
+# and no progress reports (a 1:50 part of a 29-minute video took 3 minutes,
+# mostly sitting at "97%"). Downloading the whole file the normal way
+# (chunked, fast, with progress) and cutting it here is far quicker - as
+# long as the whole file is a reasonable size. Audio is small: always whole.
+YOUTUBE_SECTION_FULL_MAX_BYTES = int(os.environ.get("YOUTUBE_SECTION_FULL_MAX_MB", "500") or 500) * 1024 * 1024
+
+
+def youtube_section_strategy(video_id: str, choice: str) -> str:
+    """"full" (download the whole file, then cut it here) or "ranges"
+    (only the section, through yt-dlp/ffmpeg)."""
+    if choice == "audio":
+        return "full"
+    size = youtube_option_size(video_id, choice)
+    return "full" if size and size <= YOUTUBE_SECTION_FULL_MAX_BYTES else "ranges"
+
+
+def _cut_audio_file(path: str, start: float, end: float) -> str:
+    """A part of an audio file, stream-copied (audio frames are tiny, so the
+    cut is exact enough); re-encoded to MP3 only if copying fails."""
+    ffmpeg_exe = _ffmpeg_exe("ffmpeg")
+    if not ffmpeg_exe:
+        raise Exception("ffmpeg not found.")
+    job_dir = _new_job_dir()
+    ext = os.path.splitext(path)[1] or ".mp3"
+    out = os.path.join(job_dir, "section" + ext)
+    args = [ffmpeg_exe, "-y", "-v", "error", "-ss", f"{start:.3f}", "-i", path, "-t", f"{end - start:.3f}", "-vn"]
+    result = subprocess.run([*args, "-c", "copy", out], capture_output=True, text=True, timeout=600)
+    if result.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) == 0:
+        out = os.path.join(job_dir, "section.mp3")
+        result = subprocess.run([*args, "-c:a", "libmp3lame", "-b:a", "192k", out], capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            _remove_tree(job_dir)
+            raise Exception(f"Could not cut the audio: {(result.stderr or '').strip()[-300:]}")
+    return out
+
+
+def _download_full_then_cut(url, selector, extract_audio, progress_hook, section):
+    """The whole file (fast normal download), then the section cut here."""
+    import media_tools  # here: media_tools imports this module
+
+    info, entries, files = _youtube_download(
+        url, selector, extract_audio, progress_hook,
+        extra_opts=None if extract_audio else {"duck_keep_codec": True},
+    )
+    full = files[0]
+    try:
+        start, end = media_tools.fit_range(float(section[0]), float(section[1]), media_tools.duration_of(full))
+        if extract_audio:
+            clip = _cut_audio_file(full, start, end)
+        else:
+            clip = _ensure_h264_mp4(media_tools.make("cut", full, start, end))
+    finally:
+        remove_download_files(files)
+    for entry in [info, *(entries or [])]:
+        if isinstance(entry, dict):
+            entry["duration"] = round(end - start, 2)
+    return info, entries, [clip]
+
 
 def _section_opts(section, audio):
     """yt-dlp options that download only (start, end) of a video - only
@@ -2824,7 +2884,11 @@ def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=
         raise ValueError("Invalid YouTube video id.")
     url = f"https://www.youtube.com/watch?v={video_id}"
 
+    full_then_cut = bool(section) and youtube_section_strategy(video_id, height_or_audio) == "full"
+
     if height_or_audio == "audio":
+        if full_then_cut:
+            return _download_full_then_cut(url, "bestaudio[ext=m4a]/bestaudio/best", True, progress_hook, section)
         return _youtube_download(url, "bestaudio[ext=m4a]/bestaudio/best", True, progress_hook,
                                  extra_opts=_section_opts(section, True))
 
@@ -2834,6 +2898,8 @@ def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=
         f"bestvideo[height<={height}]+bestaudio/"
         f"best[height<={height}]/best"
     )
+    if full_then_cut:
+        return _download_full_then_cut(url, selector, False, progress_hook, section)
     return _youtube_download(url, selector, False, progress_hook, extra_opts=_section_opts(section, False))
 
 
