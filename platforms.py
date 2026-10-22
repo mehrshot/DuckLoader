@@ -1825,20 +1825,62 @@ def _ig_route_page(ydl, ctx):
     if reels:
         # The page carries story data, just none for this account.
         return "empty", None
-    if not ctx.get("reel_id") and _ig_page_says_private(html, ctx["username"]):
+    if not ctx.get("reel_id") and _ig_page_says_private(ydl, html, ctx["username"]):
         # No story data at all because the bot's account may not see them.
         return "private", None
     return "inconclusive", None
 
 
-def _ig_page_says_private(html: str, username: str) -> bool:
-    """Whether the page marks `username` as a private account."""
-    text = html.replace('\\"', '"')
-    name = re.escape(username)
-    return bool(
-        re.search(rf'"username":\s*"{name}"[^{{}}]{{0,2000}}?"is_private":\s*true', text, re.IGNORECASE)
-        or re.search(rf'"is_private":\s*true[^{{}}]{{0,2000}}?"username":\s*"{name}"', text, re.IGNORECASE)
-    )
+def _ig_user_objects(html: str, username: str, limit: int = 20):
+    """The JSON objects in a page that describe `username` itself (their
+    own "username" key is that name). Instagram nests other objects
+    (follower counts, bio links...) between a user's fields, and the page
+    also describes other accounts (the logged-in viewer, suggestions), so a
+    field like is_private is only read from these objects."""
+    found = []
+    decoder = json.JSONDecoder()
+    for text in (html, html.replace('\\"', '"')):
+        for match in itertools.islice(re.finditer(rf'"username":\s*"{re.escape(username)}"', text, re.IGNORECASE), limit):
+            start = match.start()
+            for _ in range(30):  # walk outwards to the object that owns this key
+                start = text.rfind("{", 0, start)
+                if start < 0 or match.start() - start > 30000:
+                    break
+                try:
+                    obj, end = decoder.raw_decode(text, start)
+                except ValueError:
+                    continue
+                if end > match.start() and isinstance(obj, dict) and str(obj.get("username", "")).lower() == username.lower():
+                    found.append(obj)
+                    break
+        if found:
+            break
+    return found
+
+
+def ig_account_privacy(html: str, username: str):
+    """True (private) / False (public) as the page says for `username`
+    itself, or None if the page doesn't say."""
+    flags = [obj.get("is_private") for obj in _ig_user_objects(html, username) if isinstance(obj.get("is_private"), bool)]
+    if True in flags:
+        return True
+    return False if flags else None
+
+
+def _ig_page_says_private(ydl, html: str, username: str) -> bool:
+    """Whether `username` is a private account: from the story page, or,
+    when that page doesn't say, from the profile page (one more request,
+    only in this failure case)."""
+    private = ig_account_privacy(html, username)
+    if private is None:
+        try:
+            private = ig_account_privacy(_ig_page(ydl, f"https://www.instagram.com/{urllib.parse.quote(username)}/"), username)
+        except Exception as e:
+            if "429" in str(e):
+                raise
+            logger.info("Profile page for the privacy check failed: %s", str(e)[:200])
+    logger.info("Story: %s is %s", username, {True: "private", False: "public", None: "unknown (not in the pages)"}[private])
+    return private is True
 
 
 def _ig_route_feed(host, headers_override=None):

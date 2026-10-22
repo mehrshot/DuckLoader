@@ -11,7 +11,6 @@ control. Each username costs ~5 requests to Instagram; don't loop it.
 """
 
 import os
-import re
 import sys
 import time
 import urllib.parse
@@ -30,8 +29,8 @@ def check(ydl, username):
     profile_url = f"https://www.instagram.com/{urllib.parse.quote(username)}/"
     try:
         html = platforms._ig_page(ydl, profile_url)
-        private = re.search(r'"is_private":\s*(true|false)', html)
-        print("Private account:", private.group(1) if private else "unknown (not in the page)")
+        private = platforms.ig_account_privacy(html, username)
+        print("Private account:", {True: "yes", False: "no", None: "unknown (not in the page)"}[private])
     except Exception as e:
         print("Profile page:", str(e)[:300])
 
