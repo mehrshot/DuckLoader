@@ -1567,7 +1567,7 @@ def _ig_resolve_user_id(ydl, username: str, story_url: str) -> str:
     return user_id
 
 
-def _ig_api(ydl, url: str, referer: str, data: bytes | None = None) -> dict:
+def _ig_api(ydl, url: str, referer: str, data: bytes | None = None, headers_override: dict | None = None) -> dict:
     headers = {
         "X-IG-App-ID": _IG_APP_ID,
         "X-ASBD-ID": "359341",
@@ -1577,6 +1577,7 @@ def _ig_api(ydl, url: str, referer: str, data: bytes | None = None) -> dict:
         "Referer": referer,
         "Accept": "*/*",
     }
+    headers.update(headers_override or {})
     csrf = _ig_csrf_token(ydl)
     if csrf:
         headers["X-CSRFToken"] = csrf
@@ -1656,57 +1657,220 @@ def _ig_reel_owner(reel) -> tuple:
     return str(reel.get("id") or reel.get("pk") or ""), str(user.get("username") or "")
 
 
-def _ig_story_reel_from_page(ydl, page_url, username, reel_id):
-    """The wanted user's (or highlight's) reel from the story page, or None.
-    The page also carries other accounts' stories (the viewer's tray), so
-    only the one matching the username / highlight id is taken."""
+# ---------------------------------------------------------------------------
+# Instagram stories: several independent routes, with health tracking
+# ---------------------------------------------------------------------------
+#
+# Instagram changes how its web app gets stories every so often (in Oct 2026
+# the feed API started answering 500 for everyone and the data moved into
+# the story page). So a story is looked up through a chain of routes; each
+# answers "found", "empty" (works, this account just has no story) or
+# "inconclusive", or is broken (HTTP error, unexpected answer). A route that
+# found nothing while a later one found the story counts as broken too.
+# After IG_ROUTE_BREAK_AFTER broken results in a row a route goes to the end
+# of the chain for IG_ROUTE_DEMOTE_SECONDS (then it's tried first again), and
+# the owner is told when a route breaks and when it recovers. Health is kept
+# in ig_story_routes.json. yt-dlp's own story extractor, updated
+# independently, stays the last resort in _download_instagram.
+
+IG_STORY_ROUTES_FILE = "ig_story_routes.json"
+IG_ROUTE_BREAK_AFTER = 3
+IG_ROUTE_DEMOTE_SECONDS = 6 * 3600
+_IG_ANDROID_HEADERS = {
+    "User-Agent": "Instagram 337.0.0.35.102 Android (33/13; 420dpi; 1080x2340; samsung; SM-G991B; o1s; exynos2100; en_US; 609188640)",
+    "X-IG-App-ID": "567067343352427",
+}
+
+_ig_routes_lock = threading.Lock()
+_ig_routes_state = None
+_route_alert_handler = None
+
+
+class IgRouteBroken(Exception):
+    """The route itself failed (not: this account has no story)."""
+
+
+def set_route_alert_handler(handler) -> None:
+    """`handler(text)` is called when a story route breaks or recovers."""
+    global _route_alert_handler
+    _route_alert_handler = handler
+
+
+def _route_alert(text):
+    logger.warning("Story routes: %s", text)
+    if _route_alert_handler:
+        try:
+            _route_alert_handler(text)
+        except Exception:
+            logger.exception("Route alert handler failed")
+
+
+def _ig_routes_load() -> dict:
+    global _ig_routes_state
+    if _ig_routes_state is None:
+        try:
+            with open(IG_STORY_ROUTES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            _ig_routes_state = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _ig_routes_state = {}
+    return _ig_routes_state
+
+
+def _ig_routes_save() -> None:
+    temp_path = f"{IG_STORY_ROUTES_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        html = _ig_page(ydl, page_url)
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(_ig_routes_state, f, indent=1)
+        os.replace(temp_path, IG_STORY_ROUTES_FILE)
+    except OSError:
+        logger.warning("Could not save %s", IG_STORY_ROUTES_FILE, exc_info=True)
+
+
+def ig_story_route_health() -> dict:
+    """{route: state} for the diagnostics tool and logs."""
+    with _ig_routes_lock:
+        return {k: dict(v) for k, v in _ig_routes_load().items()}
+
+
+def _ig_route_record(name, ok, error=None) -> None:
+    alert = None
+    with _ig_routes_lock:
+        state = _ig_routes_load().setdefault(name, {"ok": 0, "broken": 0, "streak": 0, "demoted_until": 0})
+        now = time.time()
+        if ok:
+            if state.get("demoted_until"):
+                alert = f"✅ مسیر «{name}» برای دانلود استوری اینستاگرام دوباره کار می‌کنه."
+            state.update(ok=state.get("ok", 0) + 1, streak=0, demoted_until=0, last_ok=int(now))
+        else:
+            state.update(broken=state.get("broken", 0) + 1, streak=state.get("streak", 0) + 1,
+                         last_error=str(error or "")[:300], last_broken=int(now))
+            if state["streak"] >= IG_ROUTE_BREAK_AFTER and not state.get("demoted_until"):
+                state["demoted_until"] = int(now + IG_ROUTE_DEMOTE_SECONDS)
+                alert = (
+                    f"⚠️ مسیر «{name}» برای دانلود استوری اینستاگرام از کار افتاده "
+                    f"({state['streak']} بار پشت سر هم).\n{state['last_error'][:200]}\n\n"
+                    "ربات خودکار از مسیرهای دیگه استفاده می‌کنه و ۶ ساعت دیگه دوباره امتحانش می‌کنه."
+                )
+            elif state.get("demoted_until") and now >= state["demoted_until"]:
+                # Re-tried after its break and still broken: another pause.
+                state["demoted_until"] = int(now + IG_ROUTE_DEMOTE_SECONDS)
+        _ig_routes_save()
+    if alert:
+        _route_alert(alert)
+
+
+def _ig_routes_in_order(names) -> list:
+    """Healthy routes in their usual order, routes on a break after them."""
+    now = time.time()
+    with _ig_routes_lock:
+        state = _ig_routes_load()
+        paused = {n for n in names if (state.get(n) or {}).get("demoted_until", 0) > now}
+    return [n for n in names if n not in paused] + [n for n in names if n in paused]
+
+
+def _ig_is_target(reel, ctx) -> bool:
+    owner_id, owner_name = _ig_reel_owner(reel)
+    if ctx.get("reel_id"):
+        return owner_id == ctx["reel_id"]
+    return owner_name.lower() == ctx["username"].lower()
+
+
+def _ig_route_page(ydl, ctx):
+    """The story page's embedded data (what Instagram's web app uses)."""
+    try:
+        html = _ig_page(ydl, ctx["page_url"])
     except Exception as e:
         if "429" in str(e) or "login required" in str(e):
             raise
-        logger.info("Story page could not be loaded (%s); trying the API", str(e)[:200])
-        return None
+        raise IgRouteBroken(f"story page: {str(e)[:200]}") from e
 
     reels = _ig_reels_in_page(html)
-    target = None
-    for reel in reels:
-        owner_id, owner_name = _ig_reel_owner(reel)
-        if (reel_id and owner_id == reel_id) or (not reel_id and owner_name.lower() == username.lower()):
-            target = reel
-            break
+    target = next((r for r in reels if _ig_is_target(r, ctx)), None)
     logger.info(
-        "Story page: %d reel(s) [%s]; %s %s",
-        len(reels), ", ".join(f"{n or i}:{len(r.get('items') or [])}" for r in reels[:6] for i, n in [_ig_reel_owner(r)]),
-        "found" if target else "no reel for", reel_id or username,
+        "Story page: %d reel(s) [%s]; %s %s", len(reels),
+        ", ".join(f"{n or i}:{len(r.get('items') or [])}" for r in reels[:6] for i, n in [_ig_reel_owner(r)]),
+        "found" if target else "no reel for", ctx.get("reel_id") or ctx["username"],
     )
-    if target is None and not reel_id:
-        user_id = _ig_find_user_id(html, username)
+    if not ctx.get("reel_id") and not target:
+        user_id = _ig_find_user_id(html, ctx["username"])
         if user_id:
-            _ig_remember_user_id(username, user_id)
-    return target if target and target.get("items") else None
+            _ig_remember_user_id(ctx["username"], user_id)
+    if target and target.get("items"):
+        return "found", target
+    if reels:
+        # The page carries story data, just none for this account.
+        return "empty", None
+    return "inconclusive", None
 
 
-def _ig_story_reel_from_api(ydl, reel_id, referer):
-    """Fallback: the feed API, web first, then the app host (the web one has
-    been answering HTTP 500 since Oct 2026)."""
-    quoted = urllib.parse.quote(reel_id)
-    last_error = None
-    for host in ("www.instagram.com", "i.instagram.com"):
+def _ig_route_feed(host, headers_override=None):
+    def route(ydl, ctx):
+        reel_id = ctx.get("reel_id") or _ig_resolve_user_id(ydl, ctx["username"], ctx["url"])
+        ctx["reel_id_for_api"] = reel_id
         try:
-            payload = _ig_api(ydl, f"https://{host}/api/v1/feed/reels_media/?reel_ids={quoted}", referer)
+            payload = _ig_api(
+                ydl, f"https://{host}/api/v1/feed/reels_media/?reel_ids={urllib.parse.quote(reel_id)}",
+                ctx["url"], headers_override=headers_override,
+            )
         except Exception as e:
-            if not re.match(r"HTTP Error 5\d\d", str(e)):
+            if "429" in str(e) or "login required" in str(e):
                 raise
-            logger.info("Story feed on %s answered %s", host, str(e)[:200])
-            last_error = e
-            continue
+            raise IgRouteBroken(str(e)[:200]) from e
         reels = payload.get("reels") or {}
         reel = reels.get(reel_id) or next(iter(reels.values()), None)
         if not reel:
             reel = next(iter(payload.get("reels_media") or []), None)
-        return reel
-    raise last_error
+        if reel and reel.get("items"):
+            return "found", reel
+        # "ok" with no reel: this endpoint has said that even for accounts
+        # with live stories, so it proves nothing.
+        return "inconclusive", None
+    return route
+
+
+IG_STORY_ROUTES = {
+    "page": _ig_route_page,
+    "web_api": _ig_route_feed("www.instagram.com"),
+    "app_api": _ig_route_feed("i.instagram.com"),
+    "android_api": _ig_route_feed("i.instagram.com", _IG_ANDROID_HEADERS),
+}
+
+
+def _ig_story_reel(ydl, url, username, path_id):
+    """The story reel through the first route that works. Returns None when
+    a working route says the account has no story; raises IgRouteBroken when
+    no route could tell (the caller then tries yt-dlp)."""
+    highlight = username.lower() == "highlights"
+    ctx = {
+        "url": url,
+        "username": username,
+        "reel_id": f"highlight:{path_id}" if highlight else None,
+        "page_url": f"https://www.instagram.com/stories/highlights/{path_id}/" if highlight else url,
+    }
+    order = _ig_routes_in_order(list(IG_STORY_ROUTES))
+    tried = []
+    for name in order:
+        try:
+            outcome, reel = IG_STORY_ROUTES[name](ydl, ctx)
+        except IgRouteBroken as e:
+            logger.warning("Story route %s failed: %s", name, e)
+            _ig_route_record(name, False, e)
+            tried.append((name, "broken"))
+            continue
+        if outcome == "found":
+            _ig_route_record(name, True)
+            for previous, previous_outcome in tried:
+                if previous_outcome == "inconclusive":
+                    _ig_route_record(previous, False, "found nothing where another route found the story")
+            if name != order[0]:
+                logger.info("Story found via fallback route %s", name)
+            return reel
+        if outcome == "empty":
+            _ig_route_record(name, True)
+            return None
+        tried.append((name, outcome))
+    raise IgRouteBroken("no story route worked (" + ", ".join(f"{n}: {o}" for n, o in tried) + ")")
 
 
 def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
@@ -1733,20 +1897,7 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
                 if not _ig_logged_in(ydl):
                     raise Exception(f"Instagram login required ({label} has no session cookie).")
 
-                # The story page first: since Oct 2026 Instagram's web app
-                # gets stories from the data embedded in that page, and the
-                # old feed API answers HTTP 500. The API stays as a fallback.
-                if username.lower() == "highlights":
-                    reel_id = f"highlight:{path_id}"
-                    page_url = f"https://www.instagram.com/stories/highlights/{path_id}/"
-                else:
-                    reel_id = None
-                    page_url = url
-                reel = _ig_story_reel_from_page(ydl, page_url, username, reel_id)
-                if reel is None:
-                    if reel_id is None:
-                        reel_id = _ig_resolve_user_id(ydl, username, url)
-                    reel = _ig_story_reel_from_api(ydl, reel_id, url)
+                reel = _ig_story_reel(ydl, url, username, path_id)
                 if not reel:
                     raise Exception("This story is no longer available (you need to log in to access this content?).")
 
@@ -1842,9 +1993,10 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
         except Exception as e:
             api_error = e
             logger.info("Instagram story API path failed, falling back to yt-dlp: %s", str(e)[:300])
-            # yt-dlp's story extractor asks the same feed, so after these it
-            # would only fail again with a misleading "log in" message.
-            if "no longer available" in str(e) or "429" in str(e) or re.match(r"HTTP Error 5\d\d", str(e)):
+            # A story that is gone, or a rate limit: yt-dlp can't help. When
+            # all our routes are broken it is the last resort (updated
+            # independently, it may already know Instagram's new way).
+            if "no longer available" in str(e) or "429" in str(e):
                 raise Exception(f"[instagram:story] {e}") from e
 
     wanted_ids = {_ig_pk_to_shortcode(wanted_pk)} if wanted_pk else None

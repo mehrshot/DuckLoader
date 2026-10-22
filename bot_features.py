@@ -2499,6 +2499,16 @@ def register_features(bot):
 
     platforms.set_auth_alert_handler(_alert_owner_auth_problem)
 
+    def _alert_owner_story_route(text):
+        owner_id = int(os.environ.get("OWNER_ID", "0") or "0")
+        if owner_id:
+            try:
+                bot.send_message(owner_id, text)
+            except Exception:
+                logger.exception("Could not send the story-route alert to the owner")
+
+    platforms.set_route_alert_handler(_alert_owner_story_route)
+
     def _alert_owner_sponsor_check_failed(channel_username, error):
         owner_id = int(os.environ.get("OWNER_ID", "0") or "0")
 

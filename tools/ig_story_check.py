@@ -1,19 +1,19 @@
 """
-Checks why a page's stories can't be downloaded, using the bot's own
-Instagram session: finds the account id, then asks Instagram for its
-current stories through each known route once and prints what each one
-returned, to see which route still works.
+Checks Instagram story downloading with the bot's own session: runs every
+story route the bot has (the same code the bot uses) once for a username
+and prints what each returned, plus each route's recorded health.
 
     cd /home/mahshot/DuckLoaderBot
     /home/mahshot/venv/bin/python tools/ig_story_check.py <username> [<username> ...]
 
 Use an account that surely has a story right now (e.g. "instagram") as a
-control. Each username costs ~4 requests to Instagram; don't loop it.
+control. Each username costs ~5 requests to Instagram; don't loop it.
 """
 
 import os
 import re
 import sys
+import time
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,26 +23,6 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv()
 
 import platforms  # noqa: E402
-
-
-def _items(payload, user_id):
-    """Story items in any of the shapes these endpoints return."""
-    if not isinstance(payload, dict):
-        return None
-    reels = payload.get("reels") or {}
-    if isinstance(reels, dict) and reels:
-        reel = reels.get(str(user_id)) or next(iter(reels.values()))
-        return len((reel or {}).get("items") or [])
-    for key in ("reels_media", "items"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            if value and isinstance(value[0], dict) and "items" in value[0]:
-                return len(value[0].get("items") or [])
-            return len(value)
-    reel = payload.get("reel")
-    if isinstance(reel, dict):
-        return len(reel.get("items") or [])
-    return 0 if payload.get("status") == "ok" else None
 
 
 def check(ydl, username):
@@ -55,40 +35,17 @@ def check(ydl, username):
     except Exception as e:
         print("Profile page:", str(e)[:300])
 
-    try:
-        user_id = platforms._ig_resolve_user_id(ydl, username, profile_url)
-        print("Account id:", user_id)
-    except Exception as e:
-        print(f"Could not find the account id: {str(e)[:300]}")
-        return
-
-    # What the bot does first: the stories embedded in the story page.
-    try:
-        html = platforms._ig_page(ydl, f"https://www.instagram.com/stories/{urllib.parse.quote(username)}/")
-        reels = platforms._ig_reels_in_page(html)
-        print(f"  story page: {len(reels)} reel(s) embedded:")
-        for reel in reels[:8]:
-            owner_id, owner_name = platforms._ig_reel_owner(reel)
-            items = reel.get("items") or []
-            media = sum(1 for i in items if i.get("video_versions") or (i.get("image_versions2") or {}).get("candidates"))
-            mark = "  <- this page" if owner_name.lower() == username.lower() or owner_id == str(user_id) else ""
-            print(f"    {owner_name or owner_id}: {len(items)} stories ({media} with media){mark}")
-        if not reels:
-            print(f"    (none found; the page has video_versions={html.count('video_versions')}, "
-                  f"reels_media={'reels_media' in html})")
-    except Exception as e:
-        print(f"  story page: FAIL {str(e)[:160]}")
-
-    # The API fallback.
-    for label, url in (
-        ("web reels_media", f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={user_id}"),
-        ("app reels_media", f"https://i.instagram.com/api/v1/feed/reels_media/?reel_ids={user_id}"),
-    ):
+    ctx = {"url": f"https://www.instagram.com/stories/{username}/", "username": username, "reel_id": None,
+           "page_url": f"https://www.instagram.com/stories/{username}/"}
+    for name, route in platforms.IG_STORY_ROUTES.items():
         try:
-            payload = platforms._ig_api(ydl, url, f"https://www.instagram.com/stories/{username}/")
-            print(f"  {label:16} OK   status={payload.get('status')} stories={_items(payload, user_id)}")
+            outcome, reel = route(ydl, ctx)
+            count = len((reel or {}).get("items") or [])
+            print(f"  {name:12} {outcome:13} {f'{count} stories' if reel else ''}")
+        except platforms.IgRouteBroken as e:
+            print(f"  {name:12} {'BROKEN':13} {str(e)[:150]}")
         except Exception as e:
-            print(f"  {label:16} FAIL {str(e)[:160]}")
+            print(f"  {name:12} {'ERROR':13} {str(e)[:150]}")
 
 
 def main() -> None:
@@ -103,6 +60,16 @@ def main() -> None:
         print(f"Session: {label}")
         for username in usernames[:3]:
             check(ydl, username)
+
+    print("\nRoute health recorded by the bot (ig_story_routes.json):")
+    health = platforms.ig_story_route_health()
+    if not health:
+        print("  (nothing recorded yet)")
+    for name in platforms.IG_STORY_ROUTES:
+        state = health.get(name) or {}
+        paused = state.get("demoted_until", 0) > time.time()
+        print(f"  {name:12} ok={state.get('ok', 0)} broken={state.get('broken', 0)} streak={state.get('streak', 0)}"
+              f"{'  PAUSED' if paused else ''}  {state.get('last_error', '')[:80] if paused else ''}")
 
 
 if __name__ == "__main__":
