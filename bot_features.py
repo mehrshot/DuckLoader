@@ -944,6 +944,7 @@ TEXTS = {
             "✨ تقریباً تمومه...",
         ],
         'song_found': "🎵 پیدا شد: {song}\n\n{step}",
+        'song_found_caption': "🎵 از روی کپشن پست پیدا شد: {song}\n\n{step}",
         'song_fetch_steps': [
             "🔎 در حال پیدا کردن نسخه‌ی کامل آهنگ...",
             "⬇️ در حال دانلود آهنگ...",
@@ -1375,6 +1376,7 @@ TEXTS = {
             "✨ Almost done...",
         ],
         'song_found': "🎵 Found it: {song}\n\n{step}",
+        'song_found_caption': "🎵 Found from the post's caption: {song}\n\n{step}",
         'song_fetch_steps': [
             "🔎 Finding the full song...",
             "⬇️ Downloading the song...",
@@ -3545,6 +3547,7 @@ def register_features(bot):
         if song_button and not media_cache.get(f"songsrc:{post_id}"):
             media_cache[f"songsrc:{post_id}"] = {
                 "time": time.time(), "url": url, "file_id": items[0][1], "music": cached.get("music"),
+                "text": cached.get("post_text") or _post_text_from_caption(cached.get("caption")),
             }
         markup = _result_markup(
             t,
@@ -3701,6 +3704,12 @@ def register_features(bot):
             audio_source_cache[post_id] = url
 
         music = _music_of(metadata_source, platform)
+        post_text = "\n".join(
+            str(part) for part in (
+                metadata_source.get("title") if platform in ("youtube", "tiktok") else None,
+                metadata_source.get("description"),
+            ) if part
+        )[:2000]
         song_button = _song_button_allowed(
             platform, show_ui, len(valid_files) == 1 and platforms.media_kind(valid_files[0]) == "video",
         )
@@ -3951,6 +3960,7 @@ def register_features(bot):
                 "offer_audio": offer_audio_button,
                 "title": _recent_title(metadata_source, platform),
                 "music": music,
+                "post_text": post_text,
             }
 
         if chat_id_int > 0 and sent_refs and all(sent_refs):
@@ -3963,6 +3973,7 @@ def register_features(bot):
             # disk so the button still works after a restart.
             media_cache[f"songsrc:{post_id}"] = {
                 "time": time.time(), "url": url, "file_id": sent_refs[0][1], "music": music,
+                "text": post_text,
             }
 
         store.record_download(platform, chat_id_int)
@@ -5841,6 +5852,7 @@ def register_features(bot):
         _v2a_requests[token] = {
             "file_id": media.file_id,
             "file_unique_id": getattr(media, "file_unique_id", None) or media.file_id,
+            "caption": (message.caption or "")[:2000],
             "duration": duration,
             "title": _v2a_title(message, file_name, t),
             "user_id": user_id,
@@ -5879,6 +5891,7 @@ def register_features(bot):
             bot.answer_callback_query(call.id)
             _find_and_send_song(chat_id_int, user_id, request["message_id"], {
                 "key": "tg:" + str(request["file_unique_id"]), "file_id": request["file_id"], "url": None, "music": None,
+                "text": request.get("caption"),
             }, t)
             return
 
@@ -6039,6 +6052,11 @@ def register_features(bot):
         artist = ", ".join(a for a in artists if a) if isinstance(artists, list) else str(metadata.get("artist") or "")
         return {"title": title, "artist": artist.strip()}
 
+    def _post_text_from_caption(caption):
+        """The post's own text inside a caption the bot built ("📝 ...")."""
+        text = (caption or "").split("📝 ", 1)
+        return text[1].rsplit(BOT_SIGNATURE, 1)[0].strip() if len(text) == 2 else ""
+
     def _song_label(song):
         return f"{song['artist']} - {song['title']}" if song.get("artist") else song["title"]
 
@@ -6079,7 +6097,8 @@ def register_features(bot):
                 logger.warning("Cached song re-send failed; downloading again | %s", file_key, exc_info=True)
                 media_cache.pop(file_key, None)
 
-        steps = [t["song_found"].format(song=label, step=step) for step in t["song_fetch_steps"]]
+        template = t["song_found_caption"] if song.get("engine") == "caption" else t["song_found"]
+        steps = [template.format(song=label, step=step) for step in t["song_fetch_steps"]]
         edit(steps[0])
         files = []
         try:
@@ -6164,6 +6183,11 @@ def register_features(bot):
                     try:
                         with _StatusCycler(edit, steps):
                             song = song_finder.recognize(_song_source_file(source, cleanup))
+                            if not song and source.get("text"):
+                                # Shazam only knows recordings: someone singing
+                                # the song isn't recognized, but the caption
+                                # often names it.
+                                song = song_finder.from_caption(source["text"])
                     finally:
                         platforms.remove_download_files(cleanup)
                 media_cache[id_key] = {"time": time.time(), "song": song}
@@ -6220,6 +6244,7 @@ def register_features(bot):
         bot.answer_callback_query(call.id)
         _find_and_send_song(chat_id_int, user_id, call.message.message_id, {
             "key": post_id, "file_id": source.get("file_id"), "url": source.get("url"), "music": source.get("music"),
+            "text": source.get("text"),
         }, t)
 
     @bot.message_handler(func=lambda msg: bool(msg.text) and platforms.detect_platform(msg.text) is not None)

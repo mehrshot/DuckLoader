@@ -322,6 +322,7 @@ Videos downloaded from Instagram, TikTok and YouTube (private chats) get a **�
 
 1. uses the song the post itself names, when there is one (Reels with music from Instagram's library, TikTok/YouTube music info), so nothing needs to be recognized;
 2. otherwise cuts up to three 12-second samples of the sound and asks Shazam (the `shazamio` library, free) and, if configured, ACRCloud;
+   if nothing is recognized (Shazam only knows recordings, so someone *singing* a song isn't), the post's caption is checked for the song's name ("کاور آهنگ X از Y", "cover of X by Y", "🎵 Y - X", hashtags) and looked up on YouTube Music; a result is only used when it matches what the caption says;
 3. downloads the full track with the same matcher Spotify links use, and sends it with its name and cover.
 
 The answer for each video and the song file are cached (`media_cache.db` and the cache channel), so a trending song is recognized and downloaded once. Recognitions that call Shazam/ACRCloud are capped per user per day (`SONG_DAILY_LIMIT`, default 20; the owner is exempt). The owner can turn the feature off in the admin panel (General settings → 🎵 Song in this video) or with `/toggle song_finder`. `tools/find_song.py <file>` runs the recognizer on a file to check it works on the server.

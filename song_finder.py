@@ -19,8 +19,10 @@ import hmac
 import json
 import logging
 import os
+import re
 import subprocess
 import time
+import unicodedata
 
 import requests
 
@@ -185,6 +187,158 @@ def recognize(media_path):
         return None
     finally:
         platforms._remove_tree(job_dir)
+
+
+# --- the song named in the post's caption --------------------------------
+#
+# Shazam matches recordings, so someone singing a song themselves is never
+# recognized. Such posts often name the song in the caption ("کاور آهنگ X
+# از Y", "cover of X by Y", "🎵 Y - X", hashtags). Candidates found there are
+# searched on YouTube Music; a result is only accepted when it fits what the
+# caption said, so a vague caption gives no answer rather than a wrong song.
+
+_GENERIC_TAGS = {
+    "cover", "covers", "coversong", "singing", "singer", "sing", "music", "song", "songs", "musician",
+    "reels", "reel", "explore", "explorepage", "fyp", "foryou", "viral", "trending", "instagram", "live",
+    "acoustic", "guitar", "piano", "vocal", "vocals", "karaoke", "iran", "tehran", "persian", "persianmusic",
+    "کاور", "موسیقی", "موزیک", "آهنگ", "اهنگ", "خوانندگی", "خواننده", "اکسپلور", "ترند", "گیتار", "پیانو",
+    "صدا", "آواز", "اجرا", "لایو", "ایران", "تهران",
+}
+
+_NAME = r"[^\n#«»\"“”'|،,.!؟?:]{2,60}"
+_CAPTION_PATTERNS = [
+    # Persian
+    rf"کاور\s*(?:آهنگ|ترانه|موزیک)?\s*[«\"“']?(?P<title>{_NAME}?)[»\"”']?\s+(?:از|اثر|با\s*صدای)\s+(?P<artist>{_NAME})",
+    rf"(?:آهنگ|ترانه)\s*[«\"“']?(?P<title>{_NAME}?)[»\"”']?\s+(?:از|اثر)\s+(?P<artist>{_NAME})",
+    rf"[«\"“](?P<title>{_NAME})[»\"”]\s*(?:از|اثر)\s+(?P<artist>{_NAME})",
+    # English
+    rf"cover\s+of\s+[\"“']?(?P<title>{_NAME}?)[\"”']?\s+by\s+(?P<artist>{_NAME})",
+    rf"[\"“](?P<title>{_NAME})[\"”]\s+by\s+(?P<artist>{_NAME})",
+    rf"(?P<title>{_NAME}?)\s+by\s+(?P<artist>{_NAME}?)\s*\(?cover\)?",
+]
+_LABELED = r"(?:آهنگ|ترانه|موزیک|song|track|music)\s*[:：]\s*(?P<q>[^\n#]{3,80})"
+_DASHED = r"^[\W_]*(?P<a>[^\n#\-–—|]{2,50}?)\s+[-–—|]\s+(?P<b>[^\n#\-–—|]{2,60}?)[\W_]*$"
+
+
+def _clean(text):
+    text = (text or "").replace("ي", "ی").replace("ك", "ک").replace("‌", " ")
+    text = "".join(ch for ch in text if not unicodedata.category(ch).startswith(("S", "C")) or ch == "\n")
+    return re.sub(r"[ \t]+", " ", text).strip(" -–—|:.,!،؟?")
+
+
+def _is_persian(text):
+    return bool(re.search(r"[؀-ۿ]", text or ""))
+
+
+# Where an artist's name ends and the rest of the sentence starts:
+# "از ابی رو خوندم", "by Adele hope you like it".
+_ARTIST_STOP = re.compile(
+    r"\s(?:رو|را|که|و|با|برای|توی|تو|خوندم|خوندیم|اجرا|امیدوارم|hope|i|im|i'm|lol|for|on|in|at|with|and|from|my|cover|covered)(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def _artist_part(text):
+    artist = _ARTIST_STOP.split(" " + _clean(text) + " ", maxsplit=1)[0].strip()
+    return " ".join(artist.split()[:4])
+
+
+def _caption_candidates(text):
+    """[(title or None, artist or None, query, strong)] from a caption."""
+    text = text or ""
+    found = []
+    for line in text.splitlines():
+        for pattern in _CAPTION_PATTERNS:
+            for m in re.finditer(pattern, line, re.IGNORECASE):
+                title, artist = _clean(m.group("title")), _artist_part(m.group("artist"))
+                if len(title) >= 2 and len(artist) >= 2:
+                    found.append((title, artist, f"{artist} {title}", True))
+    for m in re.finditer(_LABELED, text, re.IGNORECASE):
+        query = _clean(m.group("q"))
+        if query:
+            found.append((None, None, query, False))
+    for m in re.finditer(_DASHED, text, re.MULTILINE):
+        a, b = _clean(m.group("a")), _clean(m.group("b"))
+        if a and b:
+            found.append((None, None, f"{a} {b}", False))
+    tags = [t.replace("_", " ") for t in re.findall(r"#([^\s#]+)", text)]
+    tags = [t for t in tags if platforms._normalize_text(t).replace(" ", "") not in _GENERIC_TAGS and len(t) > 2]
+    if tags:
+        found.append((None, None, " ".join(tags[:4]), False))
+    unique, seen = [], set()
+    for item in found:
+        key = platforms._normalize_text(item[2])
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique[:4]
+
+
+def _fits(result, title, artist, caption_tokens):
+    """Whether a YouTube Music result is the song the caption talks about."""
+    result_title = platforms._normalize_text(result.get("title") or "").split()
+    result_artists = [platforms._normalize_text(a.get("name") or "").split() for a in result.get("artists") or []]
+    if not result_title or not result_artists:
+        return False
+
+    if title and artist:
+        # What can be compared must match what the caption named: the title
+        # both ways ("Perfect" is not "Perfect Strangers") and the artist.
+        # Different scripts (caption "شادمهر عقیلی", result "Shadmehr
+        # Aghili") can't be compared; a caption that clearly names both the
+        # song and the artist is trusted there.
+        result_artist_raw = " ".join(a.get("name") or "" for a in result.get("artists") or [])
+        title_comparable = _is_persian(title) == _is_persian(result.get("title") or "")
+        artist_comparable = _is_persian(artist) == _is_persian(result_artist_raw)
+        if title_comparable:
+            wanted = platforms._core_title(title).split()
+            got = platforms._core_title(result.get("title") or "").split()
+            if min(platforms._token_coverage(wanted, got), platforms._token_coverage(got, wanted)) < 0.6:
+                return False
+        if artist_comparable:
+            wanted_artist = platforms._normalize_text(artist).split()
+            if not any(platforms._token_coverage(wanted_artist, tokens) >= 0.6 or platforms._token_coverage(tokens, wanted_artist) >= 0.6
+                       for tokens in result_artists if tokens):
+                return False
+        return True
+
+    # A vague hint (hashtags, a "X - Y" line): both the title and an artist of
+    # the result must appear in the caption itself.
+    return (
+        platforms._token_coverage(result_title, caption_tokens) >= 0.8
+        and any(platforms._token_coverage(tokens, caption_tokens) >= 0.6 for tokens in result_artists if tokens)
+    )
+
+
+def from_caption(text):
+    """The song a caption names, checked against YouTube Music, or None."""
+    candidates = _caption_candidates(text)
+    if not candidates or not platforms._ytmusic_available():
+        return None
+    from ytmusicapi import YTMusic
+
+    caption_tokens = platforms._normalize_text(_clean(text).replace("_", " ")).split()
+    ytmusic = YTMusic()
+    for title, artist, query, strong in candidates:
+        try:
+            results = [r for r in ytmusic.search(query, filter="songs", limit=5) if r.get("videoId")][:5]
+        except Exception as e:
+            logger.warning("Caption song search failed | %s | %s", query, str(e)[:200])
+            continue
+        for result in results[: 3 if strong else 5]:
+            if _fits(result, title if strong else None, artist if strong else None, caption_tokens):
+                thumbnails = result.get("thumbnails") or []
+                song = {
+                    "title": result["title"].strip(),
+                    "artist": ", ".join(a["name"] for a in result.get("artists") or [] if a.get("name")),
+                    "album": (result.get("album") or {}).get("name"),
+                    "cover_url": thumbnails[-1]["url"] if thumbnails else None,
+                    "duration_ms": (result.get("duration_seconds") or 0) * 1000 or None,
+                    "engine": "caption",
+                }
+                logger.info("Song found from the caption (%s): %s - %s", query, song["artist"], song["title"])
+                return song
+    return None
 
 
 def as_track(song):
