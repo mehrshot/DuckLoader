@@ -27,6 +27,7 @@ TOGGLE_KEYS = {
     "ad_requests_button",
     "sponsor_channel_gate",
     "video_to_audio",
+    "song_finder",
 }
 
 TOGGLE_LABELS = {
@@ -34,6 +35,7 @@ TOGGLE_LABELS = {
     "ad_requests_button": "toggle_ad_requests_button",
     "sponsor_channel_gate": "toggle_sponsor_channel_gate",
     "video_to_audio": "toggle_video_to_audio",
+    "song_finder": "toggle_song_finder",
 }
 # user_id -> which text-input action a /settings panel button is waiting on
 _pending_action = {}

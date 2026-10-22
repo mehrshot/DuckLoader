@@ -1751,6 +1751,22 @@ def _ig_views_in(media) -> int | None:
     return None
 
 
+def _ig_music_in(media):
+    """The song a Reel uses from Instagram's music library, as Instagram
+    reports it ({"title", "artist"}), {"original": True} for the creator's
+    own sound, or None when the media info says nothing."""
+    if not isinstance(media, dict):
+        return None
+    clips = media.get("clips_metadata") or {}
+    asset = ((clips.get("music_info") or {}).get("music_asset_info")) or {}
+    title = (asset.get("title") or "").strip()
+    if title:
+        return {"title": title, "artist": (asset.get("display_artist") or "").strip()}
+    if clips.get("original_sound_info"):
+        return {"original": True}
+    return None
+
+
 def _patch_ytdlp_instagram_views() -> None:
     """Makes yt-dlp's Instagram extractor fill view_count from the play
     counts above (no extra request: they are in the media info it already
@@ -1772,6 +1788,9 @@ def _patch_ytdlp_instagram_views() -> None:
             views = _ig_views_in(media)
             if views and isinstance(result, dict) and not result.get("view_count"):
                 result["view_count"] = views
+            music = _ig_music_in(media)
+            if music and isinstance(result, dict):
+                result["duck_music"] = music
         except Exception:
             pass
         return result

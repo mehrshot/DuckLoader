@@ -39,6 +39,7 @@ import ads
 import campaigns
 import estimator
 import media_store
+import song_finder
 import platforms
 import store
 
@@ -712,6 +713,8 @@ TEXTS = {
             "کیفیت یوتیوب رو فقط کسی انتخاب می‌کنه که لینک رو فرستاده.\n\n"
             "🎧 تبدیل ویدیو به صدا (جدید)\n"
             "هر ویدیویی رو اینجا بفرست یا فوروارد کن تا صداش رو به‌صورت فایل صوتی یا ویس برات جدا کنم.\n\n"
+            "🎶 آهنگ این ویدیو (جدید)\n"
+            "زیر ویدیوهای اینستاگرام، تیک‌تاک و یوتیوب دکمه‌ی «🎶 آهنگ این ویدیو» رو بزن تا آهنگش رو پیدا کنم و فایل کاملش رو بفرستم.\n\n"
             "⚙️ /settings — زبان و کیفیت اینستاگرام\n"
             "💬 /feedback — پیشنهاد یا گزارش مشکل"
         ),
@@ -931,6 +934,27 @@ TEXTS = {
         'v2a_too_big_server': "⚠️ فعلاً فقط ویدیوهای تا ۲۰ مگ رو می‌تونم تبدیل کنم.",
         'v2a_no_audio': "🔇 این ویدیو صدا نداره.",
         'v2a_failed': "❌ تبدیل این ویدیو انجام نشد. یه بار دیگه امتحان کن.",
+        'v2a_song_btn': "🎶 آهنگش چیه؟",
+        'toggle_song_finder': "🎵 پیدا کردن آهنگ ویدیو",
+        'song_btn': "🎶 آهنگ این ویدیو",
+        'song_steps': [
+            "🎧 دارم به ویدیو گوش می‌دم...",
+            "🔎 در حال شناسایی آهنگ...",
+            "🎼 در حال مقایسه با میلیون‌ها آهنگ...",
+            "✨ تقریباً تمومه...",
+        ],
+        'song_found': "🎵 پیدا شد: {song}\n\n{step}",
+        'song_fetch_steps': [
+            "🔎 در حال پیدا کردن نسخه‌ی کامل آهنگ...",
+            "⬇️ در حال دانلود آهنگ...",
+            "🏷 در حال آماده کردن فایل...",
+        ],
+        'song_not_found': "🎵 آهنگی توی این ویدیو پیدا نکردم.\n\nشاید صدای خود ویدیو باشه، یا آهنگ زیر صدای حرف زدن گم شده.",
+        'song_found_no_file': "🎵 آهنگ این ویدیو: {song}\n\nولی نتونستم فایل کاملش رو پیدا کنم.",
+        'song_limit': "⚠️ امروز به سقف {limit} بار شناسایی آهنگ رسیدی. فردا دوباره امتحان کن.",
+        'song_expired': "⚠️ این دکمه دیگه معتبر نیست؛ لینک رو دوباره بفرست.",
+        'song_disabled': "⚠️ پیدا کردن آهنگ فعلاً غیرفعاله.",
+        'song_failed': "❌ شناسایی آهنگ انجام نشد. یه بار دیگه امتحان کن.",
         'progress_converting': "🎧 در حال جدا کردن صدا",
         'adm_title': "🛠 **پنل مدیریت**",
         'adm_platforms': "🔒 پلتفرم‌ها",
@@ -1121,6 +1145,8 @@ TEXTS = {
             "Only the person who sent a YouTube link can choose its quality.\n\n"
             "🎧 Video to audio (new)\n"
             "Send or forward any video here and I'll extract its sound as an audio file or a voice message.\n\n"
+            "🎶 Song in this video (new)\n"
+            "Under Instagram, TikTok and YouTube videos, tap \"🎶 Song in this video\" and I'll find the song and send you the full track.\n\n"
             "⚙️ /settings — language and Instagram quality\n"
             "💬 /feedback — suggestions and problem reports"
         ),
@@ -1339,6 +1365,27 @@ TEXTS = {
         'v2a_too_big_server': "⚠️ For now I can only convert videos up to 20 MB.",
         'v2a_no_audio': "🔇 This video has no sound.",
         'v2a_failed': "❌ Couldn't convert this video. Please try again.",
+        'v2a_song_btn': "🎶 What's the song?",
+        'toggle_song_finder': "🎵 Song in this video",
+        'song_btn': "🎶 Song in this video",
+        'song_steps': [
+            "🎧 Listening to the video...",
+            "🔎 Recognizing the song...",
+            "🎼 Comparing with millions of songs...",
+            "✨ Almost done...",
+        ],
+        'song_found': "🎵 Found it: {song}\n\n{step}",
+        'song_fetch_steps': [
+            "🔎 Finding the full song...",
+            "⬇️ Downloading the song...",
+            "🏷 Preparing the file...",
+        ],
+        'song_not_found': "🎵 I couldn't find a song in this video.\n\nIt may be the video's own sound, or the music is buried under someone talking.",
+        'song_found_no_file': "🎵 The song in this video: {song}\n\nBut I couldn't find the full song file.",
+        'song_limit': "⚠️ You've reached today's limit of {limit} song searches. Try again tomorrow.",
+        'song_expired': "⚠️ This button has expired; send the link again.",
+        'song_disabled': "⚠️ Song search is turned off for now.",
+        'song_failed': "❌ Couldn't recognize the song. Please try again.",
         'progress_converting': "🎧 Extracting the audio",
         'adm_title': "🛠 **Admin Panel**",
         'adm_platforms': "🔒 Platforms",
@@ -3404,9 +3451,17 @@ def register_features(bot):
         finally:
             platforms.remove_download_files(files)
 
-    def _result_markup(t, url, post_id, has_thumb, offer_audio_button, show_ui, single_video):
+    def _result_markup(t, url, post_id, has_thumb, offer_audio_button, show_ui, single_video, song=False):
         if show_ui:
             markup = InlineKeyboardMarkup()
+
+            if song:
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t["song_btn"],
+                        callback_data=f"{SONG_PREFIX}{post_id}",
+                    )
+                )
 
             markup.add(
                 InlineKeyboardButton(
@@ -3486,6 +3541,11 @@ def register_features(bot):
 
         items = cached["items"]
         caption = cached["caption"] if show_ui else BOT_SIGNATURE
+        song_button = _song_button_allowed(platform, show_ui, len(items) == 1 and items[0][0] == "video")
+        if song_button and not media_cache.get(f"songsrc:{post_id}"):
+            media_cache[f"songsrc:{post_id}"] = {
+                "time": time.time(), "url": url, "file_id": items[0][1], "music": cached.get("music"),
+            }
         markup = _result_markup(
             t,
             url,
@@ -3494,6 +3554,7 @@ def register_features(bot):
             cached.get("offer_audio"),
             show_ui,
             len(items) == 1 and items[0][0] == "video",
+            song=song_button,
         )
 
         if len(items) == 1:
@@ -3639,6 +3700,10 @@ def register_features(bot):
         if offer_audio_button:
             audio_source_cache[post_id] = url
 
+        music = _music_of(metadata_source, platform)
+        song_button = _song_button_allowed(
+            platform, show_ui, len(valid_files) == 1 and platforms.media_kind(valid_files[0]) == "video",
+        )
         markup = _result_markup(
             t,
             url,
@@ -3647,6 +3712,7 @@ def register_features(bot):
             offer_audio_button,
             show_ui,
             len(valid_files) == 1 and platforms.media_kind(valid_files[0]) == "video",
+            song=song_button,
         )
 
         sent_refs = []
@@ -3884,12 +3950,20 @@ def register_features(bot):
                 "thumb_url": thumb_url,
                 "offer_audio": offer_audio_button,
                 "title": _recent_title(metadata_source, platform),
+                "music": music,
             }
 
         if chat_id_int > 0 and sent_refs and all(sent_refs):
             store.add_recent(chat_id_int, cache_key or url, _recent_title(metadata_source, platform), sent_refs)
 
         _archive_to_cache_channel(cache_key, chat_id_int, [m.message_id for m in sent_messages if m])
+
+        if song_button and sent_refs and sent_refs[0]:
+            # What the "🎵 Song in this video" button needs later, kept on
+            # disk so the button still works after a restart.
+            media_cache[f"songsrc:{post_id}"] = {
+                "time": time.time(), "url": url, "file_id": sent_refs[0][1], "music": music,
+            }
 
         store.record_download(platform, chat_id_int)
 
@@ -5766,6 +5840,7 @@ def register_features(bot):
         token = secrets.token_urlsafe(6)
         _v2a_requests[token] = {
             "file_id": media.file_id,
+            "file_unique_id": getattr(media, "file_unique_id", None) or media.file_id,
             "duration": duration,
             "title": _v2a_title(message, file_name, t),
             "user_id": user_id,
@@ -5777,6 +5852,8 @@ def register_features(bot):
         if duration and duration <= V2A_VOICE_MAX_SECONDS:
             buttons.append(InlineKeyboardButton(t["v2a_voice_btn"], callback_data=f"{V2A_PREFIX}v_{token}"))
         markup.add(*buttons)
+        if flags.get("song_finder", True) and song_finder.available():
+            markup.add(InlineKeyboardButton(t["v2a_song_btn"], callback_data=f"{V2A_PREFIX}s_{token}"))
 
         bot.reply_to(message, t["v2a_prompt"], reply_markup=markup)
 
@@ -5790,6 +5867,19 @@ def register_features(bot):
 
         if not request or request["user_id"] != user_id:
             bot.answer_callback_query(call.id, t["v2a_expired"], show_alert=True)
+            return
+
+        if kind == "s":
+            if not flags.get("song_finder", True):
+                bot.answer_callback_query(call.id, t["song_disabled"], show_alert=True)
+                return
+            if not _check_sponsor_channel_gate(chat_id_int, user_id, t):
+                bot.answer_callback_query(call.id)
+                return
+            bot.answer_callback_query(call.id)
+            _find_and_send_song(chat_id_int, user_id, request["message_id"], {
+                "key": "tg:" + str(request["file_unique_id"]), "file_id": request["file_id"], "url": None, "music": None,
+            }, t)
             return
 
         if not flags.get("video_to_audio", True):
@@ -5910,6 +6000,227 @@ def register_features(bot):
             job.close()
             platforms.remove_download_files(cleanup)
             slot.release()
+
+    # ------------------------------------------------------------------
+    # "🎵 Song in this video": which song plays in a video, and the full
+    # track. Reels that use Instagram's music library (and TikTok / YouTube
+    # videos with music info) already name the song; otherwise a few
+    # seconds of sound go to Shazam (song_finder.py). The full song comes
+    # from the same matcher as Spotify links. Both the answer for each
+    # video and the song file are cached, so a trending song is found and
+    # downloaded once.
+    # ------------------------------------------------------------------
+
+    SONG_PREFIX = "song_"
+    SONG_PLATFORMS = {"instagram", "tiktok", "youtube"}
+    SONG_DAILY_LIMIT = int(os.environ.get("SONG_DAILY_LIMIT", "20"))
+    SONG_ID_TTL = 30 * 86400
+    _song_usage = {}
+    _song_running = set()
+    _ORIGINAL_SOUND_RE = re.compile(r"^(original sound|original audio|son original|sonido original|оригинальный звук|صدای اصلی)", re.IGNORECASE)
+
+    def _song_button_allowed(platform, show_ui, single_video):
+        return bool(
+            show_ui and single_video and platform in SONG_PLATFORMS
+            and flags.get("song_finder", True) and song_finder.available()
+        )
+
+    def _music_of(metadata, platform):
+        """What the post itself says about its song: {"title", "artist"},
+        {"original": True} for the creator's own sound, or None."""
+        if platform == "instagram":
+            return metadata.get("duck_music")
+        title = str(metadata.get("track") or "").strip()
+        if not title:
+            return None
+        if _ORIGINAL_SOUND_RE.match(title):
+            return {"original": True}
+        artists = metadata.get("artists")
+        artist = ", ".join(a for a in artists if a) if isinstance(artists, list) else str(metadata.get("artist") or "")
+        return {"title": title, "artist": artist.strip()}
+
+    def _song_label(song):
+        return f"{song['artist']} - {song['title']}" if song.get("artist") else song["title"]
+
+    def _song_file_key(song):
+        return "songfile:" + platforms._normalize_text(song.get("artist", "")) + "|" + platforms._normalize_text(song["title"])
+
+    def _song_source_file(source, cleanup):
+        """A local copy of the video's sound: the video itself by file_id, or
+        (if Telegram won't hand it over, e.g. > 20 MB without local mode)
+        its audio downloaded again from the link."""
+        if source.get("file_id"):
+            try:
+                path, _ = _fetch_user_file(source["file_id"])
+                cleanup.append(path)
+                return path
+            except Exception as e:
+                if not source.get("url"):
+                    raise
+                logger.info("Song finder: video not available by file_id (%s); downloading its audio", str(e)[:200])
+        _, _, files, _ = platforms.download_direct(source["url"], quality="audio")
+        cleanup.extend(files)
+        return files[0]
+
+    def _send_song(chat_id, reply_to_id, song, t, edit, status_id):
+        """Sends the full song (from the cache when it was sent before).
+        Returns False if it was recognized but no file could be found."""
+        label = _song_label(song)
+        caption = f"🎵 {label}\n\n{BOT_SIGNATURE}"
+        file_key = _song_file_key(song)
+
+        cached = media_cache.get(file_key)
+        if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+            try:
+                bot.send_audio(chat_id, cached["items"][0][1], caption=caption, reply_to_message_id=reply_to_id)
+                _delete_quietly(chat_id, status_id)
+                return True
+            except Exception:
+                logger.warning("Cached song re-send failed; downloading again | %s", file_key, exc_info=True)
+                media_cache.pop(file_key, None)
+
+        steps = [t["song_found"].format(song=label, step=step) for step in t["song_fetch_steps"]]
+        edit(steps[0])
+        files = []
+        try:
+            with _StatusCycler(edit, steps, interval=4):
+                path = platforms.download_matching_audio(song_finder.as_track(song))
+            files.append(path)
+            cover = platforms.make_thumbnail(song["cover_url"]) if song.get("cover_url") else None
+            files.append(cover)
+            with open(path, "rb") as audio_file:
+                thumb_file = open(cover, "rb") if cover else None
+                try:
+                    sent = bot.send_audio(
+                        chat_id, audio_file,
+                        title=song["title"], performer=song.get("artist") or None,
+                        thumbnail=thumb_file, caption=caption,
+                        reply_to_message_id=reply_to_id, timeout=600,
+                    )
+                finally:
+                    if thumb_file:
+                        thumb_file.close()
+        except Exception as e:
+            logger.warning("Song recognized but not downloaded | %s | %s", label, str(e)[:300])
+            edit(t["song_found_no_file"].format(song=label))
+            return False
+        finally:
+            platforms.remove_download_files(files)
+
+        ref = _file_ref(sent)
+        if ref:
+            media_cache[file_key] = {
+                "time": time.time(), "items": [ref], "caption": caption,
+                "post_id": f"song{int(time.time() * 1000)}", "offer_audio": False, "title": label,
+            }
+            if chat_id > 0:
+                store.add_recent(chat_id, file_key, label, [ref])
+        _archive_to_cache_channel(file_key if ref else None, chat_id, [sent.message_id])
+        _delete_quietly(chat_id, status_id)
+        return True
+
+    def _find_and_send_song(chat_id, user_id, reply_to_id, source, t):
+        """source: {"key": per-video cache key, "file_id", "url", "music"}."""
+        run_key = (user_id, source["key"])
+        if run_key in _song_running:
+            return
+        _song_running.add(run_key)
+        status = None
+
+        def edit(text):
+            if status is None:
+                return
+            try:
+                bot.edit_message_text(text, chat_id, status.message_id)
+            except Exception:
+                pass
+
+        slot = None
+        try:
+            steps = t["song_steps"]
+            status = bot.send_message(chat_id, steps[0], reply_to_message_id=reply_to_id)
+
+            id_key = f"songid:{source['key']}"
+            known = media_cache.get(id_key)
+            if known and time.time() - known.get("time", 0) < SONG_ID_TTL:
+                song = known.get("song")
+            else:
+                music = source.get("music") or {}
+                if music.get("title"):
+                    song = {"title": music["title"], "artist": music.get("artist", ""), "engine": "post"}
+                else:
+                    day = store.iran_time("%Y-%m-%d")
+                    used = _song_usage.get((user_id, day), 0)
+                    if used >= SONG_DAILY_LIMIT and not admin.is_owner(user_id):
+                        edit(t["song_limit"].format(limit=SONG_DAILY_LIMIT))
+                        return
+                    _song_usage[(user_id, day)] = used + 1
+
+                    slot = _acquire_download_slot(bot, chat_id, status, t, show_ui=True, platform="song")
+                    if slot is None:
+                        edit(t["server_busy"])
+                        return
+                    cleanup = []
+                    try:
+                        with _StatusCycler(edit, steps):
+                            song = song_finder.recognize(_song_source_file(source, cleanup))
+                    finally:
+                        platforms.remove_download_files(cleanup)
+                media_cache[id_key] = {"time": time.time(), "song": song}
+
+            if not song:
+                edit(t["song_not_found"])
+                return
+
+            if slot is None:
+                slot = _acquire_download_slot(bot, chat_id, status, t, show_ui=True, platform="song")
+                if slot is None:
+                    edit(t["server_busy"])
+                    return
+
+            if _send_song(chat_id, reply_to_id, song, t, edit, status.message_id):
+                store.record_download("song_finder", user_id)
+                _maybe_send_ad(chat_id)
+
+        except platforms.NoAudioError:
+            edit(t["v2a_no_audio"])
+        except Exception as e:
+            store.record_error(platform="song_finder", url=source.get("url") or "", user_id=user_id, error=str(e))
+            logger.exception("Song finder failed")
+            edit(t["song_failed"])
+        finally:
+            if slot is not None:
+                slot.release()
+            _song_running.discard(run_key)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(SONG_PREFIX))
+    def handle_song_button(call):
+        post_id = call.data[len(SONG_PREFIX):]
+        chat_id_int = call.message.chat.id
+        user_id = call.from_user.id
+        t = _texts_for(chat_id_int)
+
+        if store.is_banned(user_id):
+            bot.answer_callback_query(call.id)
+            return
+
+        if not flags.get("song_finder", True):
+            bot.answer_callback_query(call.id, t["song_disabled"], show_alert=True)
+            return
+
+        source = media_cache.get(f"songsrc:{post_id}")
+        if not source:
+            bot.answer_callback_query(call.id, t["song_expired"], show_alert=True)
+            return
+
+        if not _check_sponsor_channel_gate(chat_id_int, user_id, t):
+            bot.answer_callback_query(call.id)
+            return
+
+        bot.answer_callback_query(call.id)
+        _find_and_send_song(chat_id_int, user_id, call.message.message_id, {
+            "key": post_id, "file_id": source.get("file_id"), "url": source.get("url"), "music": source.get("music"),
+        }, t)
 
     @bot.message_handler(func=lambda msg: bool(msg.text) and platforms.detect_platform(msg.text) is not None)
     def handle_media_link(message):

@@ -1,12 +1,13 @@
 """
-Shows the like / comment / view numbers Instagram returns for a post, using
-the bot's own Instagram session (one request), and the view count the bot
-will put in the caption.
+Shows what Instagram returns for a post, using the bot's own Instagram
+session (one request): the like / comment / view numbers, the song a Reel
+uses (if Instagram names it), and what the bot will show for them.
 
     cd /home/mahshot/DuckLoaderBot
     /home/mahshot/venv/bin/python tools/ig_counts.py "https://www.instagram.com/reel/XXXX/"
 """
 
+import json
 import os
 import re
 import sys
@@ -43,6 +44,18 @@ def main() -> None:
     for key, value in sorted(counts.items()):
         print(f"  {key}: {value}")
     print(f"View count the bot will show: {platforms._ig_views_in(item) or 0}")
+
+    clips = item.get("clips_metadata") or {}
+    music = {
+        "audio_type": clips.get("audio_type"),
+        "music_asset_info": {
+            k: v for k, v in (((clips.get("music_info") or {}).get("music_asset_info")) or {}).items()
+            if k in ("title", "display_artist", "duration_in_ms")
+        },
+        "has_original_sound_info": bool(clips.get("original_sound_info")),
+    }
+    print("Music info from Instagram:", json.dumps(music, ensure_ascii=False))
+    print("Song the bot will use without recognition:", platforms._ig_music_in(item))
 
 
 if __name__ == "__main__":

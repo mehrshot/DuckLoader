@@ -55,6 +55,7 @@ DEFAULT_FLAGS = {
     "ad_requests_button": True,
     "sponsor_channel_gate": True,
     "video_to_audio": True,
+    "song_finder": True,
 }
 
 

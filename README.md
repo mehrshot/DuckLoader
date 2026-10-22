@@ -277,6 +277,8 @@ ROTATING_PROXIES=socks5://127.0.0.1:9050,socks5://127.0.0.1:9051
 | `MAX_CONCURRENT_DOWNLOADS` | No | Downloads running at once, bot-wide (default 4) |
 | `INSTAGRAM_MAX_CONCURRENT` | No | Instagram downloads running at once (default 3) |
 | `MAX_QUEUE_WAITING` | No | Requests allowed to wait in the queue (default 40) |
+| `SONG_DAILY_LIMIT` | No | Song recognitions (Shazam/ACRCloud calls) per user per day (default 20) |
+| `ACRCLOUD_HOST` / `ACRCLOUD_ACCESS_KEY` / `ACRCLOUD_ACCESS_SECRET` | No | Optional second song recognizer (ACRCloud identify project), asked when Shazam finds nothing |
 | `MEDIA_CACHE_TTL_HOURS` | No | How long an already-delivered link is re-sent from the cache instead of downloaded again (default 720 = 30 days; the caption's likes/views are from the first download) |
 | `SPOTIFY_MAX_TRACKS` | No | Max tracks fetched from one album/playlist link (default 50) |
 | `MAX_PLAYLIST_ENTRIES` | No | Max items from one link, e.g. a highlight or SoundCloud set (default 30) |
@@ -313,6 +315,16 @@ Setup: in @BotFather enable `/setinline` and set `/setinlinefeedback` to 100%; c
 A video sent or forwarded to the bot in a private chat (also round video notes and videos sent as files) gets a **🎧 Audio file** button, and **🎙 Voice message** for clips up to 10 minutes. The audio file is an `.m4a` that keeps the original sound track untouched when it is AAC/MP3 (almost always), so even a large video takes only seconds; the cover is a frame of the video. It uses the same download queue, progress bar and rate limit as downloads. The owner can turn it off in the admin panel (General settings → 🎧 Video to audio) or with `/toggle video_to_audio`.
 
 Telegram lets bots receive files of at most 20 MB unless the local Bot API server runs in `--local` mode. `tools/enable_local_bot_api.sh` switches the Docker container to local mode: it copies its data to `/home/mahshot/telegram-bot-api` (set `LOCAL_BOT_API_DIR` if you use another folder), re-creates the container with the same settings plus `TELEGRAM_LOCAL=1`, keeps the old one for rollback, and installs a cron job that deletes received videos after an hour. Inputs are capped at `VIDEO_TO_AUDIO_MAX_MB` (default 1024).
+
+### Song in this video
+
+Videos downloaded from Instagram, TikTok and YouTube (private chats) get a **🎶 Song in this video** button, and videos sent to the bot get **🎶 What's the song?** next to the video-to-audio buttons. Tapping it:
+
+1. uses the song the post itself names, when there is one (Reels with music from Instagram's library, TikTok/YouTube music info), so nothing needs to be recognized;
+2. otherwise cuts up to three 12-second samples of the sound and asks Shazam (the `shazamio` library, free) and, if configured, ACRCloud;
+3. downloads the full track with the same matcher Spotify links use, and sends it with its name and cover.
+
+The answer for each video and the song file are cached (`media_cache.db` and the cache channel), so a trending song is recognized and downloaded once. Recognitions that call Shazam/ACRCloud are capped per user per day (`SONG_DAILY_LIMIT`, default 20; the owner is exempt). The owner can turn the feature off in the admin panel (General settings → 🎵 Song in this video) or with `/toggle song_finder`. `tools/find_song.py <file>` runs the recognizer on a file to check it works on the server.
 
 ### Campaign links
 
