@@ -1606,6 +1606,109 @@ def _ig_api(ydl, url: str, referer: str, data: bytes | None = None) -> dict:
         raise Exception("Instagram returned an unexpected (non-JSON) response; login required?")
 
 
+def _ig_reels_in(obj, depth=0):
+    """Story reels (dicts with "items") inside a decoded JSON value, in the
+    shapes Instagram uses: {"reels_media": [...]}, {"edges": [{"node": reel}]},
+    {"reels": {id: reel}} or a reel itself."""
+    if depth > 4:
+        return []
+    if isinstance(obj, list):
+        return [reel for value in obj for reel in _ig_reels_in(value, depth + 1)]
+    if not isinstance(obj, dict):
+        return []
+    if isinstance(obj.get("items"), list) and (obj.get("user") or obj.get("id")):
+        return [obj]
+    found = []
+    for key in ("reels_media", "edges", "reels", "node", "data"):
+        value = obj.get(key)
+        if isinstance(value, dict) and key == "reels":
+            value = list(value.values())
+        if value is not None:
+            found += _ig_reels_in(value, depth + 1)
+    return found
+
+
+def _ig_reels_in_page(html: str) -> list:
+    """Every story reel embedded in a logged-in Instagram story page."""
+    decoder = json.JSONDecoder()
+    reels, seen = [], set()
+    for text in (html, html.replace('\\"', '"')):
+        for key in ("xdt_api__v1__feed__reels_media__connection", "xdt_api__v1__feed__reels_media", "reels_media"):
+            for match in itertools.islice(re.finditer(rf'"{key}"\s*:\s*', text), 50):
+                try:
+                    obj, _ = decoder.raw_decode(text, match.end())
+                except ValueError:
+                    continue
+                if key == "reels_media":
+                    obj = {"reels_media": obj}
+                for reel in _ig_reels_in(obj):
+                    reel_key = str(reel.get("id") or reel.get("pk") or id(reel))
+                    if reel_key not in seen:
+                        seen.add(reel_key)
+                        reels.append(reel)
+        if reels:
+            break
+    return reels
+
+
+def _ig_reel_owner(reel) -> tuple:
+    user = reel.get("user") or {}
+    return str(reel.get("id") or reel.get("pk") or ""), str(user.get("username") or "")
+
+
+def _ig_story_reel_from_page(ydl, page_url, username, reel_id):
+    """The wanted user's (or highlight's) reel from the story page, or None.
+    The page also carries other accounts' stories (the viewer's tray), so
+    only the one matching the username / highlight id is taken."""
+    try:
+        html = _ig_page(ydl, page_url)
+    except Exception as e:
+        if "429" in str(e) or "login required" in str(e):
+            raise
+        logger.info("Story page could not be loaded (%s); trying the API", str(e)[:200])
+        return None
+
+    reels = _ig_reels_in_page(html)
+    target = None
+    for reel in reels:
+        owner_id, owner_name = _ig_reel_owner(reel)
+        if (reel_id and owner_id == reel_id) or (not reel_id and owner_name.lower() == username.lower()):
+            target = reel
+            break
+    logger.info(
+        "Story page: %d reel(s) [%s]; %s %s",
+        len(reels), ", ".join(f"{n or i}:{len(r.get('items') or [])}" for r in reels[:6] for i, n in [_ig_reel_owner(r)]),
+        "found" if target else "no reel for", reel_id or username,
+    )
+    if target is None and not reel_id:
+        user_id = _ig_find_user_id(html, username)
+        if user_id:
+            _ig_remember_user_id(username, user_id)
+    return target if target and target.get("items") else None
+
+
+def _ig_story_reel_from_api(ydl, reel_id, referer):
+    """Fallback: the feed API, web first, then the app host (the web one has
+    been answering HTTP 500 since Oct 2026)."""
+    quoted = urllib.parse.quote(reel_id)
+    last_error = None
+    for host in ("www.instagram.com", "i.instagram.com"):
+        try:
+            payload = _ig_api(ydl, f"https://{host}/api/v1/feed/reels_media/?reel_ids={quoted}", referer)
+        except Exception as e:
+            if not re.match(r"HTTP Error 5\d\d", str(e)):
+                raise
+            logger.info("Story feed on %s answered %s", host, str(e)[:200])
+            last_error = e
+            continue
+        reels = payload.get("reels") or {}
+        reel = reels.get(reel_id) or next(iter(reels.values()), None)
+        if not reel:
+            reel = next(iter(payload.get("reels_media") or []), None)
+        return reel
+    raise last_error
+
+
 def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
     """Fetches story / highlight items straight from Instagram's web API.
     Unlike yt-dlp's story extractor this also returns *photo* stories, and
@@ -1630,29 +1733,20 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
                 if not _ig_logged_in(ydl):
                     raise Exception(f"Instagram login required ({label} has no session cookie).")
 
-                # The reel feed, like Instagram's own web app. (media/<pk>/info
-                # answers 400 for story items, so it is not tried.)
+                # The story page first: since Oct 2026 Instagram's web app
+                # gets stories from the data embedded in that page, and the
+                # old feed API answers HTTP 500. The API stays as a fallback.
                 if username.lower() == "highlights":
                     reel_id = f"highlight:{path_id}"
+                    page_url = f"https://www.instagram.com/stories/highlights/{path_id}/"
                 else:
-                    reel_id = _ig_resolve_user_id(ydl, username, url)
-
-                feed_url = f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={urllib.parse.quote(reel_id)}"
-                try:
-                    payload = _ig_api(ydl, feed_url, url)
-                except Exception as e:
-                    if not re.match(r"HTTP Error 5\d\d", str(e)):
-                        raise
-                    # Instagram's own server error: usually gone a moment later.
-                    logger.info("Story feed answered %s for %s; retrying once", str(e)[:200], reel_id)
-                    time.sleep(2)
-                    payload = _ig_api(ydl, feed_url, url)
-                reels = payload.get("reels") or {}
-                reel = reels.get(reel_id) or next(iter(reels.values()), None)
-                if not reel:
-                    for item in payload.get("reels_media") or []:
-                        reel = item
-                        break
+                    reel_id = None
+                    page_url = url
+                reel = _ig_story_reel_from_page(ydl, page_url, username, reel_id)
+                if reel is None:
+                    if reel_id is None:
+                        reel_id = _ig_resolve_user_id(ydl, username, url)
+                    reel = _ig_story_reel_from_api(ydl, reel_id, url)
                 if not reel:
                     raise Exception("This story is no longer available (you need to log in to access this content?).")
 
