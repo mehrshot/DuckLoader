@@ -25,6 +25,7 @@ downloads/
 
 # Runtime data
 *.json
+*.jsonl
 
 # Backups
 *.backup
@@ -40,7 +41,7 @@ downloads/
 .vscode/
 .idea/
 .DS_Store
-Thumbs.dbinstagram_cookies.txt
+Thumbs.db
 
 # Media cache index (SQLite)
 *.db
