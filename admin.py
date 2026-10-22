@@ -10,6 +10,7 @@ reintroduce (e.g. if an import ever moves above load_dotenv() again). Reading
 fresh every call makes correctness independent of import order entirely.
 """
 
+import copy
 import logging
 import os
 import re
@@ -469,14 +470,16 @@ def _broadcast_report(t, sent, failed, reasons) -> str:
 
 
 def _command_text_and_entities(message):
-    """The text after "/broadcast " with its formatting (entity offsets are
-    in UTF-16 units and must be shifted past the command)."""
+    """The text after "/broadcast" with its formatting (entity offsets are
+    in UTF-16 units and must be shifted past the command). The command may
+    be followed by a space *or a new line* - splitting at the first space
+    used to cut a leading emoji off with the command."""
     full = message.text or ""
-    rest = full.partition(" ")[2]
-    text = rest.strip()
+    match = re.match(r"/\S+\s*", full)
+    start = match.end() if match else 0
+    text = full[start:].rstrip()
     if not text:
         return "", None
-    start = full.index(text, len(full) - len(rest))
     shift = len(full[:start].encode("utf-16-le")) // 2
     end = shift + len(text.encode("utf-16-le")) // 2
     entities = []
@@ -484,9 +487,24 @@ def _command_text_and_entities(message):
         first, last = max(entity.offset, shift), min(entity.offset + entity.length, end)
         if last <= first:
             continue
-        entity.offset, entity.length = first - shift, last - first
-        entities.append(entity)
+        shifted = copy.copy(entity)
+        shifted.offset, shifted.length = first - shift, last - first
+        entities.append(shifted)
     return text, entities or None
+
+
+def _ask_broadcast_confirm(bot, chat_id, source_message_id) -> None:
+    """Asks the owner before a broadcast; on "send", every user gets a copy
+    of message `source_message_id` in this chat."""
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton(
+            f"✅ ارسال برای {len(store.load_known_users())} کاربر",
+            callback_data=f"adm_bcast_go_{source_message_id}",
+        ),
+        InlineKeyboardButton("❌ لغو", callback_data="adm_bcast_cancel"),
+    )
+    bot.send_message(chat_id, "👆 کاربرها پیام رو دقیقاً همین‌شکلی می‌بینن. ارسال بشه؟", reply_markup=markup)
 
 
 def build_panel(t):
@@ -886,8 +904,10 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             bot.reply_to(message, t['broadcast_usage'])
             return
 
-        sent, failed, reasons = _broadcast(bot, text, entities=entities)
-        bot.reply_to(message, _broadcast_report(t, sent, failed, reasons))
+        # The preview is the bot's own message without "/broadcast"; that is
+        # what gets copied to everyone once confirmed.
+        preview = bot.send_message(message.chat.id, text, entities=entities)
+        _ask_broadcast_confirm(bot, message.chat.id, preview.message_id)
 
     @bot.message_handler(commands=["ban", "unban"])
     def ban_toggle(message):
@@ -1840,15 +1860,7 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             # Users get a copy of this very message: formatting, links,
             # photo/video and caption exactly as written. Preview first.
             bot.copy_message(message.chat.id, message.chat.id, message.message_id)
-            markup = InlineKeyboardMarkup(row_width=1)
-            markup.add(
-                InlineKeyboardButton(
-                    f"✅ ارسال برای {len(store.load_known_users())} کاربر",
-                    callback_data=f"adm_bcast_go_{message.message_id}",
-                ),
-                InlineKeyboardButton("❌ لغو", callback_data="adm_bcast_cancel"),
-            )
-            bot.send_message(message.chat.id, "👆 کاربرها پیام رو دقیقاً همین‌شکلی می‌بینن. ارسال بشه؟", reply_markup=markup)
+            _ask_broadcast_confirm(bot, message.chat.id, message.message_id)
             return
 
         # -----------------------------------------------------------
