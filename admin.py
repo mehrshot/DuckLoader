@@ -10,8 +10,10 @@ reintroduce (e.g. if an import ever moves above load_dotenv() again). Reading
 fresh every call makes correctness independent of import order entirely.
 """
 
+import logging
 import os
 import re
+import threading
 import time
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
@@ -22,12 +24,18 @@ import estimator
 import platforms
 import store
 
+logger = logging.getLogger(__name__)
+
+# Panel broadcasts in progress (by the owner's message id), against double taps.
+_broadcasts_running = set()
+
 TOGGLE_KEYS = {
     "auto_quality_fallback",
     "ad_requests_button",
     "sponsor_channel_gate",
     "video_to_audio",
     "song_finder",
+    "error_alerts",
 }
 
 TOGGLE_LABELS = {
@@ -36,6 +44,7 @@ TOGGLE_LABELS = {
     "sponsor_channel_gate": "toggle_sponsor_channel_gate",
     "video_to_audio": "toggle_video_to_audio",
     "song_finder": "toggle_song_finder",
+    "error_alerts": "toggle_error_alerts",
 }
 # user_id -> which text-input action a /settings panel button is waiting on
 _pending_action = {}
@@ -382,16 +391,38 @@ def _stats_text(t) -> str:
     return "\n".join(lines)
 
 
-def _broadcast(bot, text) -> tuple:
-    """Sends `text` to every known chat. Paced under Telegram's ~30 msg/s
-    limit, and a 429 "Too Many Requests" waits the time Telegram asks for
-    and retries instead of silently dropping that user."""
+def _failure_reason(error) -> str:
+    text = str(getattr(error, "description", "") or error).lower()
+    if "blocked by the user" in text:
+        return "blocked"
+    if "deactivated" in text:
+        return "deleted"
+    if "chat not found" in text or "user not found" in text:
+        return "not_found"
+    return "other"
+
+
+def _broadcast(bot, text=None, entities=None, from_chat_id=None, message_id=None):
+    """Sends a message to every known user and returns
+    (sent, failed, reasons). With from_chat_id/message_id the owner's own
+    message is copied - bold, monospace, links, a photo or video with its
+    caption, exactly as written; otherwise `text` with its `entities`.
+    Paced under Telegram's ~30 msg/s limit; a 429 waits as long as
+    Telegram asks and retries. Users who blocked the bot or deleted their
+    account are dropped from the list, so the next broadcast and the user
+    count are accurate."""
     sent, failed = 0, 0
+    reasons = {}
+    unreachable = []
+    other_examples = []
 
     for chat_id in list(store.load_known_users()):
         for _attempt in range(3):
             try:
-                bot.send_message(chat_id, text)
+                if message_id is not None:
+                    bot.copy_message(chat_id, from_chat_id, message_id)
+                else:
+                    bot.send_message(chat_id, text, entities=entities)
                 sent += 1
                 break
             except Exception as e:
@@ -400,14 +431,62 @@ def _broadcast(bot, text) -> tuple:
                 if getattr(e, "error_code", None) == 429 and retry_after:
                     time.sleep(int(retry_after) + 1)
                     continue
-                failed += 1  # blocked the bot, deleted account, left group...
+                failed += 1
+                reason = _failure_reason(e)
+                reasons[reason] = reasons.get(reason, 0) + 1
+                if reason in ("blocked", "deleted", "not_found"):
+                    unreachable.append(chat_id)
+                elif len(other_examples) < 3:
+                    other_examples.append(str(e)[:150])
                 break
         else:
             failed += 1
+            reasons["other"] = reasons.get("other", 0) + 1
 
         time.sleep(0.05)
 
-    return sent, failed
+    if other_examples:
+        logger.warning("Broadcast failures (other): %s", " | ".join(other_examples))
+    reasons["removed"] = store.remove_known_users(unreachable)
+    return sent, failed, reasons
+
+
+def _broadcast_report(t, sent, failed, reasons) -> str:
+    lines = [t["broadcast_done"].format(sent=sent, failed=failed)]
+    if failed:
+        labels = {
+            "blocked": "🚫 ربات رو بلاک کرده بودن",
+            "deleted": "👻 اکانتشون حذف شده بود",
+            "not_found": "❓ چت پیدا نشد",
+            "other": "⚠️ خطای دیگه (توی لاگ)",
+        }
+        lines.append("")
+        lines += [f"{label}: {reasons[key]}" for key, label in labels.items() if reasons.get(key)]
+        if reasons.get("removed"):
+            lines.append(f"\n🧹 {reasons['removed']} کاربر غیرقابل‌دسترس از فهرست پیام همگانی حذف شدن "
+                         "(اگه دوباره ربات رو استارت کنن، خودکار برمی‌گردن).")
+    return "\n".join(lines)
+
+
+def _command_text_and_entities(message):
+    """The text after "/broadcast " with its formatting (entity offsets are
+    in UTF-16 units and must be shifted past the command)."""
+    full = message.text or ""
+    rest = full.partition(" ")[2]
+    text = rest.strip()
+    if not text:
+        return "", None
+    start = full.index(text, len(full) - len(rest))
+    shift = len(full[:start].encode("utf-16-le")) // 2
+    end = shift + len(text.encode("utf-16-le")) // 2
+    entities = []
+    for entity in message.entities or []:
+        first, last = max(entity.offset, shift), min(entity.offset + entity.length, end)
+        if last <= first:
+            continue
+        entity.offset, entity.length = first - shift, last - first
+        entities.append(entity)
+    return text, entities or None
 
 
 def build_panel(t):
@@ -802,13 +881,13 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             bot.reply_to(message, t['not_owner'])
             return
 
-        text = message.text.partition(" ")[2].strip()
+        text, entities = _command_text_and_entities(message)
         if not text:
             bot.reply_to(message, t['broadcast_usage'])
             return
 
-        sent, failed = _broadcast(bot, text)
-        bot.reply_to(message, t['broadcast_done'].format(sent=sent, failed=failed))
+        sent, failed, reasons = _broadcast(bot, text, entities=entities)
+        bot.reply_to(message, _broadcast_report(t, sent, failed, reasons))
 
     @bot.message_handler(commands=["ban", "unban"])
     def ban_toggle(message):
@@ -1420,6 +1499,30 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
 
             edit_plain(campaigns.report_text(request), campaign_report_markup(request, t))
 
+        elif data.startswith("adm_bcast_go_"):
+            message_id = int(data.rsplit("_", 1)[1])
+            if message_id in _broadcasts_running:
+                bot.answer_callback_query(call.id, "⏳ در حال ارسال...")
+                return
+            _broadcasts_running.add(message_id)
+            edit_plain(f"⏳ در حال ارسال برای {len(store.load_known_users())} کاربر... (چند دقیقه طول می‌کشه)", None)
+
+            def run_broadcast():
+                try:
+                    sent, failed, reasons = _broadcast(bot, from_chat_id=chat_id_int, message_id=message_id)
+                    bot.send_message(chat_id_int, _broadcast_report(t, sent, failed, reasons))
+                except Exception:
+                    logger.exception("Broadcast failed")
+                    bot.send_message(chat_id_int, "❌ ارسال پیام همگانی وسط کار متوقف شد؛ لاگ رو چک کن.")
+                finally:
+                    _broadcasts_running.discard(message_id)
+
+            # Thousands of users take minutes: not on the handler thread.
+            threading.Thread(target=run_broadcast, daemon=True).start()
+
+        elif data == "adm_bcast_cancel":
+            edit_plain("❌ پیام همگانی لغو شد.", None)
+
         elif data == 'adm_menu_users':
             edit(
                 t["adm_users_title"],
@@ -1704,6 +1807,9 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
             "animation",
             "photo",
             "video",
+            "document",
+            "audio",
+            "voice",
         ],
     )
     def handle_admin_reply(message):
@@ -1725,6 +1831,24 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
 
         if action.startswith(("campbanner:", "camplink:")):
             _handle_campaign_input(bot, message, action, t)
+            return
+
+        if action == "broadcast":
+            if (message.text or "").startswith("/"):
+                bot.reply_to(message, t["adm_cancelled"])
+                return
+            # Users get a copy of this very message: formatting, links,
+            # photo/video and caption exactly as written. Preview first.
+            bot.copy_message(message.chat.id, message.chat.id, message.message_id)
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                InlineKeyboardButton(
+                    f"✅ ارسال برای {len(store.load_known_users())} کاربر",
+                    callback_data=f"adm_bcast_go_{message.message_id}",
+                ),
+                InlineKeyboardButton("❌ لغو", callback_data="adm_bcast_cancel"),
+            )
+            bot.send_message(message.chat.id, "👆 کاربرها پیام رو دقیقاً همین‌شکلی می‌بینن. ارسال بشه؟", reply_markup=markup)
             return
 
         # -----------------------------------------------------------
@@ -1933,12 +2057,4 @@ def register_admin(bot, flags: dict, texts_for, my_settings_view):
                 bot.reply_to(message, f"✅ معافیت {text} برداشته شد.")
 
         elif action == "broadcast":
-            sent, failed = _broadcast(bot, text)
-
-            bot.reply_to(
-                message,
-                t["broadcast_done"].format(
-                    sent=sent,
-                    failed=failed,
-                ),
-            )
+            pass  # handled above (copied with its formatting, after a preview)

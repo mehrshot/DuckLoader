@@ -56,6 +56,7 @@ DEFAULT_FLAGS = {
     "sponsor_channel_gate": True,
     "video_to_audio": True,
     "song_finder": True,
+    "error_alerts": True,
 }
 
 
@@ -481,6 +482,22 @@ def track_user(chat_id) -> None:
         _daily_bucket(stats)["new_users"] += 1
         _save(STATS_FILE, stats)
 
+def remove_known_users(user_ids) -> int:
+    """Drops users the bot can't reach any more (blocked it, deleted their
+    account). They come back on their own if they /start the bot again."""
+    drop = {str(u) for u in user_ids}
+    if not drop:
+        return 0
+    with _known_users_lock:
+        users = _known_users_locked()
+        kept = [u for u in users if str(u) not in drop]
+        removed = len(users) - len(kept)
+        if removed:
+            users[:] = kept
+            _save(USERS_FILE, users)
+        return removed
+
+
 # --- bans ---
 
 _banned_users_cache = None
@@ -795,6 +812,15 @@ def record_source(source: str) -> None:
         _save(STATS_FILE, stats)
 
 
+# Called with each recorded error (the event dict); bot_features uses it to
+# alert the owner right away.
+_error_listeners = []
+
+
+def add_error_listener(listener) -> None:
+    _error_listeners.append(listener)
+
+
 def record_error(
     *,
     platform: str = "unknown",
@@ -824,6 +850,12 @@ def record_error(
         "url": url,
         "error": str(error)[:4000],
     }
+
+    for listener in list(_error_listeners):
+        try:
+            listener(dict(event))
+        except Exception:
+            logging.getLogger(__name__).exception("Error listener failed")
 
     with _error_log_lock:
 

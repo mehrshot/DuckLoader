@@ -936,6 +936,7 @@ TEXTS = {
         'v2a_failed': "❌ تبدیل این ویدیو انجام نشد. یه بار دیگه امتحان کن.",
         'v2a_song_btn': "🎶 آهنگش چیه؟",
         'toggle_song_finder': "🎵 پیدا کردن آهنگ ویدیو",
+        'toggle_error_alerts': "🚨 هشدار فوری خطاها برای ادمین",
         'song_btn': "🎶 آهنگ این ویدیو",
         'song_steps': [
             "🎧 دارم به ویدیو گوش می‌دم...",
@@ -1368,6 +1369,7 @@ TEXTS = {
         'v2a_failed': "❌ Couldn't convert this video. Please try again.",
         'v2a_song_btn': "🎶 What's the song?",
         'toggle_song_finder': "🎵 Song in this video",
+        'toggle_error_alerts': "🚨 Instant error alerts to the owner",
         'song_btn': "🎶 Song in this video",
         'song_steps': [
             "🎧 Listening to the video...",
@@ -2677,6 +2679,93 @@ def register_features(bot):
     def _owner_id():
         return int(os.environ.get("OWNER_ID", "0") or "0")
 
+    # ------------------------------------------------------------------
+    # Instant error alerts: every recorded error that is not the user's
+    # own doing (a private, deleted or expired post...) is sent to the
+    # owner as it happens, instead of waiting in the error log. The same
+    # kind of error is reported at most once per ERROR_ALERT_REPEAT
+    # seconds (later ones are counted and mentioned in the next alert), and
+    # never more than ERROR_ALERT_HOURLY_CAP alerts an hour.
+    # ------------------------------------------------------------------
+
+    ERROR_ALERT_REPEAT = 30 * 60
+    ERROR_ALERT_HOURLY_CAP = 20
+    # The user's side, not the bot's: nothing to fix.
+    _EXPECTED_ERROR_KINDS = {
+        "ig_not_found", "ig_private", "ig_expired", "ig_restricted", "not_found",
+        "yt_private", "yt_age", "drm", "too_large", "spotify_not_found",
+    }
+    _alert_state = {"last": {}, "suppressed": {}, "sent": []}
+    _alert_lock = threading.Lock()
+
+    def _error_signature(event):
+        """Errors of the same kind share a signature: platform + kind +
+        the message without ids, numbers and URLs."""
+        platform = event.get("platform") or "unknown"
+        text = str(event.get("error") or "")
+        try:
+            kind = platforms.classify_error(platform, Exception(text))
+        except Exception:
+            kind = "unknown"
+        core = re.sub(r"https?://\S+|\d+|[A-Za-z0-9_-]{11,}", "#", text.split("\n")[0])[:120]
+        return kind, f"{platform}|{kind}|{core}"
+
+    def _on_error_recorded(event):
+        if not flags.get("error_alerts", True):
+            return
+        owner_id = _owner_id()
+        if not owner_id:
+            return
+        kind, signature = _error_signature(event)
+        if kind in _EXPECTED_ERROR_KINDS:
+            return
+
+        now = time.time()
+        with _alert_lock:
+            state = _alert_state
+            if now - state["last"].get(signature, 0) < ERROR_ALERT_REPEAT:
+                state["suppressed"][signature] = state["suppressed"].get(signature, 0) + 1
+                return
+            state["sent"] = [ts for ts in state["sent"] if now - ts < 3600]
+            if len(state["sent"]) >= ERROR_ALERT_HOURLY_CAP:
+                state["suppressed"][signature] = state["suppressed"].get(signature, 0) + 1
+                return
+            state["last"][signature] = now
+            state["sent"].append(now)
+            repeats = state["suppressed"].pop(signature, 0)
+
+        user_id = event.get("user_id")
+        try:
+            who = (
+                f"گروه {user_id}" if isinstance(user_id, int) and user_id < 0
+                else f"{user_id} (tg://user?id={user_id})"
+            )
+        except Exception:
+            who = str(user_id)
+        lines = [
+            "🚨 خطای جدید",
+            f"🕐 {event.get('time')}",
+            f"📦 پلتفرم: {event.get('platform')} | نوع: {kind}",
+            f"👤 کاربر: {who}",
+        ]
+        if event.get("url"):
+            lines.append(f"🔗 {event['url']}")
+        lines += ["", f"❌ {str(event.get('error') or '')[:700]}"]
+        if repeats:
+            lines += ["", f"🔁 {repeats} خطای مشابه دیگه از آخرین هشدار (بدون پیام جدا)"]
+        if event.get("url") and isinstance(user_id, int) and user_id > 0:
+            lines += ["", f"اگه مشکل رو حل کردی، برای فرستادن فایل به کاربر:\n/senddl {user_id} {event['url']}"]
+
+        def send():
+            try:
+                bot.send_message(owner_id, "\n".join(lines), disable_web_page_preview=True)
+            except Exception:
+                logger.warning("Could not send an error alert to the owner", exc_info=True)
+
+        threading.Thread(target=send, daemon=True).start()
+
+    store.add_error_listener(_on_error_recorded)
+
     def _feedback_kind_markup(t):
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
@@ -3923,6 +4012,8 @@ def register_features(bot):
                                 artist=entry_meta.get('artist') or entry_meta.get('uploader') or entry_meta.get('channel') or '',
                                 cover_url=entry_meta.get('thumbnail'),
                             )
+                        elif kind == "photo":
+                            filepath = platforms.fit_photo_for_telegram(filepath)
 
                         f = open(filepath, "rb")
                         open_files.append(f)

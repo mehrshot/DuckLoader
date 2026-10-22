@@ -30,6 +30,7 @@ import contextlib
 import difflib
 import itertools
 import json
+import math
 import logging
 import os
 import random
@@ -379,6 +380,58 @@ def cleanup_stray_downloads() -> None:
                 os.remove(path)
         except OSError:
             pass
+
+
+# Telegram refuses photos whose width + height exceeds 10000 or whose sides
+# differ more than 20x (PHOTO_INVALID_DIMENSIONS) - e.g. very long TikTok
+# photo slides. In an album that fails the whole send.
+_PHOTO_MAX_SIDES_SUM = 9900
+_PHOTO_MAX_RATIO = 19.5
+
+
+def fit_photo_for_telegram(path: str) -> str:
+    """Returns `path`, or a re-encoded JPEG next to it that Telegram accepts
+    as a photo (scaled down and/or padded with white). Never raises."""
+    ffmpeg_exe, ffprobe_exe = _ffmpeg_exe("ffmpeg"), _ffmpeg_exe("ffprobe")
+    if not ffmpeg_exe or not ffprobe_exe:
+        return path
+    try:
+        probe = subprocess.run(
+            [ffprobe_exe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+             "-print_format", "json", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        stream = (json.loads(probe.stdout or "{}").get("streams") or [{}])[0]
+        width, height = int(stream.get("width") or 0), int(stream.get("height") or 0)
+        if not width or not height:
+            return path
+        if width + height <= _PHOTO_MAX_SIDES_SUM + 100 and max(width, height) / min(width, height) <= 20:
+            return path
+
+        # The padding (for a too-thin photo) counts towards the size limit
+        # too, so scale for the padded shape.
+        long_side, short_side = max(width, height), min(width, height)
+        padded_short = max(short_side, long_side / _PHOTO_MAX_RATIO)
+        scale = min(1.0, _PHOTO_MAX_SIDES_SUM / (long_side + padded_short))
+        new_w, new_h = max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
+        target_short = int(math.ceil(padded_short * scale / 2)) * 2
+        if width >= height:
+            pad_w, pad_h = new_w, max(new_h, target_short)
+        else:
+            pad_w, pad_h = max(new_w, target_short), new_h
+        out_path = os.path.splitext(path)[0] + "_tg.jpg"
+        result = subprocess.run(
+            [ffmpeg_exe, "-y", "-v", "error", "-i", path, "-frames:v", "1",
+             "-vf", f"scale={new_w}:{new_h},pad={pad_w}:{pad_h}:(ow-iw)/2:(oh-ih)/2:color=white",
+             "-q:v", "3", out_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+            logger.info("Photo fitted for Telegram: %sx%s -> %sx%s | %s", width, height, pad_w, pad_h, path)
+            return out_path
+    except Exception:
+        logger.warning("Could not fit a photo for Telegram: %s", path, exc_info=True)
+    return path
 
 
 # Audio codecs an .m4a (MP4) file can carry as they are; anything else
