@@ -1170,6 +1170,7 @@ def _download_with_selector(
     format_sort: list | None = None,
     wanted_ids=None,
     noplaylist: bool | None = None,
+    extra_opts: dict | None = None,
 ):
     """
     Download media with yt-dlp into a fresh per-job folder.
@@ -1214,6 +1215,9 @@ def _download_with_selector(
         ]
     if progress_hook:
         ydl_opts["progress_hooks"] = [progress_hook]
+
+    if extra_opts:
+        ydl_opts.update(extra_opts)
 
     wanted_ids = {str(i) for i in wanted_ids} if wanted_ids else None
 
@@ -1296,7 +1300,7 @@ def _download_entries(ydl, url, job_dir, extract_audio, wanted_ids):
             path = _ensure_h264_mp4(path)
         _check_file_size(path, MIN_VALID_FILE_BYTES)
 
-        if extract_audio:
+        if extract_audio and not ydl.params.get("download_ranges"):
             expected = processed.get("duration") or raw_entry.get("duration")
             actual = _audio_duration(path)
             if expected and actual and expected - actual > 15 and actual < expected * 0.8:
@@ -2748,6 +2752,7 @@ def probe_youtube_qualities(url: str) -> dict:
         "id": info.get("id"),
         "title": info.get("title", ""),
         "thumbnail": info.get("thumbnail"),
+        "duration": duration,
         "options": options,
     }
 
@@ -2784,21 +2789,44 @@ def youtube_option_size(video_id: str, choice: str) -> int | None:
     return None
 
 
-def _youtube_download(url: str, selector: str, extract_audio: bool, progress_hook=None):
+def _youtube_download(url: str, selector: str, extract_audio: bool, progress_hook=None, extra_opts=None):
     """Public clients first (richest formats, no account risk), then the
     configured cookies. A "confirm you're not a bot" check skips straight to
     the authenticated attempts; a 403 moves on to the next client."""
-    return _download_with_selector(url, selector, extract_audio, progress_hook, plans=_youtube_download_plans())
+    return _download_with_selector(
+        url, selector, extract_audio, progress_hook, plans=_youtube_download_plans(), extra_opts=extra_opts,
+    )
 
 
-def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=None):
-    """Download one specific YouTube resolution (or the audio)."""
+# A YouTube section up to this long is cut exactly (keyframes forced at the
+# cut, i.e. re-encoded); longer ones start at the nearest keyframe, fast.
+YOUTUBE_EXACT_SECTION_SECONDS = 60
+
+
+def _section_opts(section, audio):
+    """yt-dlp options that download only (start, end) of a video - only
+    that part is fetched from YouTube, not the whole file."""
+    if not section:
+        return None
+    from yt_dlp.utils import download_range_func
+
+    start, end = float(section[0]), float(section[1])
+    return {
+        "download_ranges": download_range_func(None, [(start, end)]),
+        "force_keyframes_at_cuts": bool(audio or end - start <= YOUTUBE_EXACT_SECTION_SECONDS),
+    }
+
+
+def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=None, section=None):
+    """Download one specific YouTube resolution (or the audio); with
+    `section` = (start, end) seconds, only that part."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
         raise ValueError("Invalid YouTube video id.")
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     if height_or_audio == "audio":
-        return _youtube_download(url, "bestaudio[ext=m4a]/bestaudio/best", True, progress_hook)
+        return _youtube_download(url, "bestaudio[ext=m4a]/bestaudio/best", True, progress_hook,
+                                 extra_opts=_section_opts(section, True))
 
     height = int(height_or_audio)
     selector = (
@@ -2806,7 +2834,7 @@ def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=
         f"bestvideo[height<={height}]+bestaudio/"
         f"best[height<={height}]/best"
     )
-    return _youtube_download(url, selector, False, progress_hook)
+    return _youtube_download(url, selector, False, progress_hook, extra_opts=_section_opts(section, False))
 
 
 # ---------------------------------------------------------------------------

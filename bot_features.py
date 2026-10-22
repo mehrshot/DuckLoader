@@ -721,8 +721,9 @@ TEXTS = {
             "یه ویس از آهنگی که دور و برت پخش میشه ضبط کن و بفرست؛ آهنگ کامل رو برات پیدا می‌کنم.\n\n"
             "🔍 جستجوی آهنگ (جدید)\n"
             "اسم خواننده و آهنگ رو بنویس (مثلاً: شادمهر تنها ماندم) و از بین نتیجه‌ها انتخاب کن.\n\n"
-            "✂️ برش، گیف و رینگتون (جدید)\n"
-            "زیر ویدیوها دکمه‌ی «✂️ برش، گیف، رینگتون» رو بزن و بازه‌ی زمانی رو بفرست.\n\n"
+            "✂️ ابزار برش (جدید)\n"
+            "زیر ویدیوها دکمه‌ی «✂️ ابزار برش» رو بزن تا یه تیکه از ویدیو، گیف یا رینگتون بسازی. "
+            "برای یوتیوب هم کافیه قبل از انتخاب کیفیت بازه رو بفرستی تا فقط همون تیکه بیاد.\n\n"
             "⚙️ /settings — زبان و کیفیت اینستاگرام\n"
             "💬 /feedback — پیشنهاد یا گزارش مشکل"
         ),
@@ -960,13 +961,46 @@ TEXTS = {
         'search_none': "🔍 آهنگی با اسم «{query}» پیدا نکردم.\nاسم خواننده و آهنگ رو با هم بنویس؛ مثلاً: شادمهر تنها ماندم",
         'search_expired': "⚠️ این نتیجه‌ها دیگه معتبر نیستن؛ دوباره اسم آهنگ رو بفرست.",
         'search_slow_down': "⏳ خیلی پشت سر هم جستجو کردی؛ چند دقیقه دیگه دوباره امتحان کن.",
-        'tools_btn': "✂️ برش، گیف، رینگتون",
+        'tools_btn': "✂️ ابزار برش",
+        'btn_audio': "🎧 فایل صوتی",
+        'btn_cover': "🖼 کاور",
+        'btn_share': "📤 ارسال به دوستان",
+        'btn_original': "🔗 لینک اصلی",
+        'len_seconds': "{s} ثانیه",
+        'len_minutes': "{m} دقیقه و {s} ثانیه",
+        'len_minutes_only': "{m} دقیقه",
+        'yt_range_hint': "✂️ فقط یه تیکه‌ش رو می‌خوای؟ قبل از انتخاب کیفیت، بازه‌ش رو بفرست؛ مثلاً 1:20-2:05",
+        'yt_range_caption': "✂️ فقط این تیکه: {start} تا {end} ({length})",
+        'yt_range_set': "✅ باشه؛ فقط {start} تا {end} ({length}) برات فرستاده میشه.\nحالا کیفیت رو از بالا انتخاب کن 👆",
+        'yt_range_note': "✂️ {start} تا {end}",
+        'ring_ask_platform': "🔔 گوشیت آیفونه یا اندروید؟\nفایل رو مناسب گوشیت می‌سازم.",
+        'ring_iphone_btn': "📱 آیفون",
+        'ring_android_btn': "🤖 اندروید",
+        'ring_caption': "🔔 رینگتون آماده‌ست ({length})",
+        'ring_guide_btn': "📖 چطوری بذارمش روی زنگ؟",
+        'ring_pick_brand': "🤖 برند گوشیت چیه؟",
+        'ring_other_brand': "🔄 برند دیگه",
+        'ring_guide_iphone': (
+            "📱 گذاشتن به‌عنوان زنگ روی آیفون (iOS 26 و بالاتر):\n\n"
+            "1️⃣ روی همین فایل نگه دار ← Share (اشتراک‌گذاری) ← Save to Files\n"
+            "2️⃣ برنامه‌ی Files رو باز کن، روی فایل نگه دار ← Share ← Use as Ringtone\n"
+            "3️⃣ تمومه! زنگت عوض شد. بعداً هم از Settings ← Sounds & Haptics ← Ringtone پیداش می‌کنی.\n\n"
+            "📌 iOS 18 یا قدیمی‌تر: توی GarageBand یه پروژه‌ی جدید بساز و فایل رو از Files واردش کن، "
+            "بعد توی My Songs روی پروژه نگه دار ← Share ← Ringtone ← Export.\n\n"
+            "ℹ️ آیفون فقط زنگ‌های تا ۳۰ ثانیه رو قبول می‌کنه؛ این فایل هم همین‌قدره."
+        ),
+        'ring_guide_android': (
+            "🤖 گذاشتن به‌عنوان زنگ ({brand}):\n\n"
+            "1️⃣ ذخیره: روی ⋮ (سه نقطه) کنار همین فایل بزن ← Save to Music\n"
+            "2️⃣ تنظیم: {steps}\n\n"
+            "📌 اسم منوها بسته به نسخه‌ی گوشیت ممکنه کمی فرق کنه."
+        ),
         'tools_menu': "✂️ از این ویدیو چی بسازم؟",
         'tool_cut_btn': "✂️ برش ویدیو",
         'tool_gif_btn': "🎞 گیف",
         'tool_ring_btn': "🔔 رینگتون",
         'tool_cancel_btn': "❌ لغو",
-        'tool_ask_cut': "✂️ زمان شروع و پایان برش رو بفرست؛ مثلاً:\n0:15-0:45\n\n(حداکثر {limit} ثانیه)",
+        'tool_ask_cut': "✂️ زمان شروع و پایان برش رو بفرست؛ مثلاً:\n0:15-0:45",
         'tool_ask_gif': "🎞 بازه‌ی گیف رو بفرست؛ مثلاً:\n0:05-0:12\n\n(حداکثر {limit} ثانیه، بدون صدا)",
         'tool_ask_ring': "🔔 رینگتون از کجای ویدیو شروع بشه؟ مثلاً:\n0:40\n(۳۰ ثانیه از همون‌جا)\n\nیا یه بازه‌ی دقیق: 0:40-1:05 (حداکثر {limit} ثانیه)",
         'tool_cancelled': "❌ لغو شد.",
@@ -983,8 +1017,7 @@ TEXTS = {
         'tool_expired': "⚠️ این دکمه دیگه معتبر نیست؛ ویدیو یا لینک رو دوباره بفرست.",
         'tool_disabled': "⚠️ این قابلیت فعلاً غیرفعاله.",
         'tool_ring_title': "رینگتون",
-        'tool_ring_caption': "🔔 رینگتون ({range})\n🤖 اندروید: همین فایل رو به‌عنوان زنگ انتخاب کن.",
-        'tool_ring_iphone': "📱 نسخه‌ی آیفون (m4r): با GarageBand یا iTunes به‌عنوان رینگتون بذارش.",
+
         'song_btn': "🎶 آهنگ این ویدیو",
         'song_steps': [
             "🎧 دارم به ویدیو گوش می‌دم...",
@@ -1201,8 +1234,9 @@ TEXTS = {
             "Record a voice message of a song playing around you and I'll find the full track.\n\n"
             "🔍 Song search (new)\n"
             "Write the artist and the song (e.g. Adele Hello) and pick from the results.\n\n"
-            "✂️ Cut, GIF and ringtone (new)\n"
-            "Tap \"✂️ Cut, GIF, ringtone\" under a video and send the time range.\n\n"
+            "✂️ Cut tools (new)\n"
+            "Tap \"✂️ Cut tools\" under a video to make a clip, a GIF or a ringtone. "
+            "For YouTube, send a time range before picking the quality to get only that part.\n\n"
             "⚙️ /settings — language and Instagram quality\n"
             "💬 /feedback — suggestions and problem reports"
         ),
@@ -1439,13 +1473,46 @@ TEXTS = {
         'search_none': "🔍 I couldn't find a song called \"{query}\".\nWrite the artist and the song together, e.g.: Adele Hello",
         'search_expired': "⚠️ These results have expired; send the song name again.",
         'search_slow_down': "⏳ That's a lot of searches in a row; try again in a few minutes.",
-        'tools_btn': "✂️ Cut, GIF, ringtone",
+        'tools_btn': "✂️ Cut tools",
+        'btn_audio': "🎧 Audio",
+        'btn_cover': "🖼 Cover",
+        'btn_share': "📤 Share",
+        'btn_original': "🔗 Original",
+        'len_seconds': "{s} s",
+        'len_minutes': "{m} min {s} s",
+        'len_minutes_only': "{m} min",
+        'yt_range_hint': "✂️ Only need part of it? Before picking a quality, send the range, e.g. 1:20-2:05",
+        'yt_range_caption': "✂️ Only this part: {start} to {end} ({length})",
+        'yt_range_set': "✅ OK, you'll get only {start} to {end} ({length}).\nNow pick a quality above 👆",
+        'yt_range_note': "✂️ {start} to {end}",
+        'ring_ask_platform': "🔔 iPhone or Android?\nI'll make the right file for your phone.",
+        'ring_iphone_btn': "📱 iPhone",
+        'ring_android_btn': "🤖 Android",
+        'ring_caption': "🔔 Your ringtone is ready ({length})",
+        'ring_guide_btn': "📖 How do I set it as my ringtone?",
+        'ring_pick_brand': "🤖 Which phone brand?",
+        'ring_other_brand': "🔄 Another brand",
+        'ring_guide_iphone': (
+            "📱 Setting it as your ringtone on iPhone (iOS 26 and later):\n\n"
+            "1️⃣ Touch and hold this file → Share → Save to Files\n"
+            "2️⃣ Open the Files app, touch and hold the file → Share → Use as Ringtone\n"
+            "3️⃣ Done! It's also under Settings → Sounds & Haptics → Ringtone.\n\n"
+            "📌 iOS 18 or older: in GarageBand create a new project and import the file from Files, "
+            "then in My Songs touch and hold the project → Share → Ringtone → Export.\n\n"
+            "ℹ️ iPhone accepts ringtones of up to 30 seconds; this file fits."
+        ),
+        'ring_guide_android': (
+            "🤖 Setting it as your ringtone ({brand}):\n\n"
+            "1️⃣ Save it: tap ⋮ (three dots) next to this file → Save to Music\n"
+            "2️⃣ Set it: {steps}\n\n"
+            "📌 Menu names may differ a little depending on your phone's version."
+        ),
         'tools_menu': "✂️ What should I make from this video?",
         'tool_cut_btn': "✂️ Cut the video",
         'tool_gif_btn': "🎞 GIF",
         'tool_ring_btn': "🔔 Ringtone",
         'tool_cancel_btn': "❌ Cancel",
-        'tool_ask_cut': "✂️ Send the start and end of the cut, e.g.:\n0:15-0:45\n\n(up to {limit} seconds)",
+        'tool_ask_cut': "✂️ Send the start and end of the cut, e.g.:\n0:15-0:45",
         'tool_ask_gif': "🎞 Send the GIF's range, e.g.:\n0:05-0:12\n\n(up to {limit} seconds, no sound)",
         'tool_ask_ring': "🔔 Where in the video should the ringtone start? e.g.:\n0:40\n(30 seconds from there)\n\nor an exact range: 0:40-1:05 (up to {limit} seconds)",
         'tool_cancelled': "❌ Cancelled.",
@@ -1462,8 +1529,7 @@ TEXTS = {
         'tool_expired': "⚠️ This button has expired; send the video or link again.",
         'tool_disabled': "⚠️ This feature is turned off for now.",
         'tool_ring_title': "Ringtone",
-        'tool_ring_caption': "🔔 Ringtone ({range})\n🤖 Android: choose this file as your ringtone.",
-        'tool_ring_iphone': "📱 iPhone version (m4r): set it as a ringtone with GarageBand or iTunes.",
+
         'song_btn': "🎶 Song in this video",
         'song_steps': [
             "🎧 Listening to the video...",
@@ -3765,6 +3831,7 @@ def register_features(bot):
         t,
         show_ui=True,
         cache_key=None,
+        caption_note=None,
     ):
         """Builds the caption/buttons and sends the downloaded file(s) —
         one file directly, or a chunked media group for multi-item posts
@@ -3786,70 +3853,47 @@ def register_features(bot):
                 t,
                 show_ui=show_ui,
                 cache_key=cache_key,
+                caption_note=caption_note,
             )
         finally:
             platforms.remove_download_files(files)
 
     def _result_markup(t, url, post_id, has_thumb, offer_audio_button, show_ui, single_video, song=False, tools=False):
+        """Buttons under a result, in short pairs:
+            🎧 audio  | 🖼 cover      - more of this same file
+            🎶 song   | ✂️ cut tools  - things made from it
+            📤 share  | 🔗 original   - outward
+        A missing button leaves its partner full width."""
         if show_ui:
-            markup = InlineKeyboardMarkup()
-
-            if song:
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t["song_btn"],
-                        callback_data=f"{SONG_PREFIX}{post_id}",
-                    )
-                )
-
-            if tools:
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t["tools_btn"],
-                        callback_data=f"{TOOLS_PREFIX}{post_id}",
-                    )
-                )
-
-            markup.add(
-                InlineKeyboardButton(
-                    text=t['view_link'],
-                    url=url,
-                )
-            )
-
-            if has_thumb:
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t['dl_cover'],
-                        callback_data=f"thumb_{post_id}",
-                    )
-                )
-
+            rows = [[], [], []]
             if offer_audio_button:
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t['get_audio_btn'],
-                        callback_data=f"audio_{post_id}",
-                    )
-                )
-
+                rows[0].append(InlineKeyboardButton(text=t["btn_audio"], callback_data=f"audio_{post_id}"))
+            if has_thumb:
+                rows[0].append(InlineKeyboardButton(text=t["btn_cover"], callback_data=f"thumb_{post_id}"))
+            if song:
+                rows[1].append(InlineKeyboardButton(text=t["song_btn"], callback_data=f"{SONG_PREFIX}{post_id}"))
+            if tools:
+                rows[1].append(InlineKeyboardButton(text=t["tools_btn"], callback_data=f"{TOOLS_PREFIX}{post_id}"))
             # Opens the chat picker with "@DuckDownloader_Bot <link>" already
-            # typed: the file goes to a friend without leaving Telegram, and
-            # nobody has to remember the bot's username.
+            # typed: the file goes to a friend without leaving Telegram.
             if url and len(url) <= 240:
-                markup.add(
-                    InlineKeyboardButton(
-                        text=t['share_btn'],
-                        switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                            query=url,
-                            allow_user_chats=True,
-                            allow_bot_chats=False,
-                            allow_group_chats=True,
-                            allow_channel_chats=False,
-                        ),
-                    )
-                )
+                rows[2].append(InlineKeyboardButton(
+                    text=t["btn_share"],
+                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                        query=url,
+                        allow_user_chats=True,
+                        allow_bot_chats=False,
+                        allow_group_chats=True,
+                        allow_channel_chats=False,
+                    ),
+                ))
+            if url:
+                rows[2].append(InlineKeyboardButton(text=t["btn_original"], url=url))
 
+            markup = InlineKeyboardMarkup()
+            for row in rows:
+                if row:
+                    markup.row(*row)
             return markup
 
         if single_video:
@@ -3974,6 +4018,7 @@ def register_features(bot):
         t,
         show_ui=True,
         cache_key=None,
+        caption_note=None,
     ):
         # Only a real step down the quality ladder (auto_quality_fallback)
         # is worth a notice. This used to look up t['quality_best'], a key
@@ -4023,6 +4068,8 @@ def register_features(bot):
             metadata_source,
             url,
         )
+        if caption_note:
+            full_caption = f"{caption_note}\n{full_caption}"
 
         if show_ui:
             caption = full_caption
@@ -4747,6 +4794,8 @@ def register_features(bot):
                 pass
 
         caption = t["yt_choose_quality"].format(title=(probe.get("title") or "")[:200])
+        if show_ui:
+            caption = f"{caption}\n\n{t['yt_range_hint']}"
 
         if not show_ui:
             _yt_pick_context[(chat_id_int, requester_id, probe["id"])] = {
@@ -4767,9 +4816,10 @@ def register_features(bot):
 
         sent_with_thumbnail = False
 
+        picker = None
         if probe.get("thumbnail"):
             try:
-                bot.send_photo(
+                picker = bot.send_photo(
                     chat_id_int,
                     probe["thumbnail"],
                     caption=caption,
@@ -4784,12 +4834,20 @@ def register_features(bot):
                 )
 
         if not sent_with_thumbnail:
-            bot.send_message(
+            picker = bot.send_message(
                 chat_id_int,
                 caption,
                 reply_markup=markup,
                 reply_to_message_id=message.message_id,
             )
+
+        if show_ui and picker is not None:
+            # A time range sent after this picker means "only that part".
+            _yt_range_targets[(chat_id_int, requester_id)] = {
+                "video_id": probe["id"], "duration": probe.get("duration"), "probe": probe, "lang": lang,
+                "picker_id": picker.message_id, "is_photo": sent_with_thumbnail, "caption": caption,
+                "range": None, "time": time.time(),
+            }
 
     def _handle_start_payload(message, payload, t) -> bool:
         """Deep links: t.me/<bot>?start=gate | inline | yt_<id> | dl_<token>.
@@ -6642,8 +6700,53 @@ def register_features(bot):
 
     TOOLS_PREFIX = "tools_"
     TOOL_PREFIX = "tool_"
+    RING_GUIDE_PREFIX = "rguide_"
     TOOL_PENDING_TTL = 15 * 60
+    YT_RANGE_TTL = 30 * 60
     _tool_pending = {}
+    _yt_range_targets = {}
+
+    # (key, button label, steps in Persian, steps in English). Menu names
+    # are kept in English: that's how they read on most phones' settings.
+    RING_BRANDS = [
+        ("samsung", "Samsung",
+         "Settings ← Sounds and vibration ← Ringtone ← دکمه‌ی + بالای صفحه ← فایل رو انتخاب کن ← Done",
+         "Settings → Sounds and vibration → Ringtone → the + at the top → pick the file → Done"),
+        ("xiaomi", "Xiaomi / Redmi / POCO",
+         "Settings ← Sound & vibration ← Ringtone ← Choose local ringtone (از حافظه‌ی گوشی) ← فایل رو انتخاب کن",
+         "Settings → Sound & vibration → Ringtone → Choose local ringtone → pick the file"),
+        ("pixel", "Pixel / Motorola / Nokia",
+         "Settings ← Sound & vibration ← Phone ringtone ← My Sounds ← دکمه‌ی + ← فایل رو انتخاب کن",
+         "Settings → Sound & vibration → Phone ringtone → My Sounds → + → pick the file"),
+        ("huawei", "Huawei / Honor",
+         "Settings ← Sounds & vibration ← Ringtone ← Music on device ← فایل رو انتخاب کن",
+         "Settings → Sounds & vibration → Ringtone → Music on device → pick the file"),
+        ("oppo", "Oppo / Realme / OnePlus",
+         "Settings ← Sound & vibration ← Ringtone ← (اگه دو سیم‌کارته، سیم‌کارت رو انتخاب کن) ← From local files ← فایل رو انتخاب کن",
+         "Settings → Sound & vibration → Ringtone → (pick the SIM if there are two) → From local files → pick the file"),
+        ("vivo", "Vivo",
+         "Settings ← Sound & vibration ← Ringtone ← Local ringtone ← فایل رو انتخاب کن",
+         "Settings → Sound & vibration → Ringtone → Local ringtone → pick the file"),
+        ("other", "🤷 سایر / Other",
+         "Settings ← Sound ← Ringtone ← گزینه‌ای مثل «+» یا «از حافظه‌ی گوشی» ← فایل رو انتخاب کن",
+         "Settings → Sound → Ringtone → an option like \"+\" or \"From device storage\" → pick the file"),
+    ]
+
+    def _fmt_clock(seconds):
+        """A time for captions. "∶" (ratio sign) instead of ":" so Telegram
+        doesn't turn it into a seek mark on the video - meaningless on a
+        clip that was already cut."""
+        seconds = int(round(seconds))
+        hours, rest = divmod(seconds, 3600)
+        clock = f"{rest // 60:02d}∶{rest % 60:02d}" if hours else f"{rest // 60}∶{rest % 60:02d}"
+        return f"{hours}∶{clock}" if hours else clock
+
+    def _fmt_length(seconds, t):
+        seconds = int(round(seconds))
+        minutes, rest = divmod(seconds, 60)
+        if not minutes:
+            return t["len_seconds"].format(s=rest)
+        return t["len_minutes"].format(m=minutes, s=rest) if rest else t["len_minutes_only"].format(m=minutes)
 
     def _tools_button_allowed(show_ui, single_video):
         return bool(show_ui and single_video and flags.get("media_tools", True))
@@ -6701,7 +6804,7 @@ def register_features(bot):
             except Exception:
                 pass
             return
-        if tool not in media_tools.TOOLS or not media_cache.get(f"songsrc:{key}"):
+        if tool not in ("cut", "gif", "ring", "ringi", "ringa") or not media_cache.get(f"songsrc:{key}"):
             bot.answer_callback_query(call.id, t["tool_expired"], show_alert=True)
             return
         if not _check_sponsor_channel_gate(chat_id, user_id, t):
@@ -6709,12 +6812,28 @@ def register_features(bot):
             return
 
         bot.answer_callback_query(call.id)
+        if tool == "ring":
+            # The file depends on the phone: MP3 for Android, a 30 s M4A for
+            # iPhone. Ask first.
+            markup = InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                InlineKeyboardButton(t["ring_iphone_btn"], callback_data=f"{TOOL_PREFIX}ringi_{key}"),
+                InlineKeyboardButton(t["ring_android_btn"], callback_data=f"{TOOL_PREFIX}ringa_{key}"),
+            )
+            markup.add(InlineKeyboardButton(t["tool_cancel_btn"], callback_data=f"{TOOL_PREFIX}x_{key}"))
+            try:
+                bot.edit_message_text(t["ring_ask_platform"], chat_id, call.message.message_id, reply_markup=markup)
+            except Exception:
+                bot.send_message(chat_id, t["ring_ask_platform"], reply_markup=markup)
+            return
+
+        variant = {"ringi": "iphone", "ringa": "android"}.get(tool)
+        tool = "ring" if variant else tool
         _tool_pending[user_id] = {
-            "tool": tool, "key": key, "time": time.time(),
+            "tool": tool, "variant": variant, "key": key, "time": time.time(),
             "video_message_id": getattr(call.message.reply_to_message, "message_id", None),
         }
-        limit = {"cut": media_tools.MAX_CUT_SECONDS, "gif": media_tools.MAX_GIF_SECONDS,
-                 "ring": media_tools.MAX_RINGTONE_SECONDS}[tool]
+        limit = media_tools.limit_for(tool, variant)
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton(t["tool_cancel_btn"], callback_data=f"{TOOL_PREFIX}x_{key}"))
         try:
@@ -6741,7 +6860,7 @@ def register_features(bot):
             bot.reply_to(message, t["tool_cancelled"])
             return
         try:
-            start, end = media_tools.parse_range(message.text, pending["tool"])
+            start, end = media_tools.parse_range(message.text, pending["tool"], pending.get("variant"))
         except media_tools.RangeError as e:
             bot.reply_to(message, t[e.key].format(**e.values))
             return  # still waiting for a valid range
@@ -6754,9 +6873,10 @@ def register_features(bot):
         if _is_rate_limited(user_id):
             bot.reply_to(message, t["rate_limited"].format(limit=RATE_LIMIT_COUNT))
             return
-        _run_media_tool(chat_id, user_id, message.message_id, pending["tool"], source, start, end, t)
+        _run_media_tool(chat_id, user_id, message.message_id, pending["tool"], source, start, end, t,
+                        variant=pending.get("variant"))
 
-    def _run_media_tool(chat_id, user_id, reply_to_id, tool, source, start, end, t):
+    def _run_media_tool(chat_id, user_id, reply_to_id, tool, source, start, end, t, variant=None):
         steps = t["tool_steps"]
         status = bot.send_message(chat_id, steps[0], reply_to_message_id=reply_to_id)
 
@@ -6775,24 +6895,28 @@ def register_features(bot):
             with _StatusCycler(edit, steps, interval=3):
                 video = _tool_source_video(source, cleanup)
                 start, end = media_tools.fit_range(start, end, media_tools.duration_of(video))
-                outputs = media_tools.make(tool, video, start, end)
-            label = f"{_fmt_time(start)}-{_fmt_time(end)}"
+                outputs = [media_tools.make(tool, video, start, end, variant=variant)]
 
             if tool == "cut":
+                caption = f"✂️ {_fmt_clock(start)} تا {_fmt_clock(end)}" if t is TEXTS["fa"] else \
+                    f"✂️ {_fmt_clock(start)} to {_fmt_clock(end)}"
                 with open(outputs[0], "rb") as f:
-                    bot.send_video(chat_id, f, supports_streaming=True, caption=f"✂️ {label}\n\n{BOT_SIGNATURE}",
+                    bot.send_video(chat_id, f, supports_streaming=True, caption=f"{caption}\n\n{BOT_SIGNATURE}",
                                    reply_to_message_id=reply_to_id, timeout=600)
             elif tool == "gif":
                 with open(outputs[0], "rb") as f:
                     bot.send_animation(chat_id, f, caption=BOT_SIGNATURE, reply_to_message_id=reply_to_id, timeout=600)
             else:
+                guide = InlineKeyboardMarkup()
+                guide.add(InlineKeyboardButton(
+                    t["ring_guide_btn"],
+                    callback_data=f"{RING_GUIDE_PREFIX}{'i' if variant == 'iphone' else 'a'}",
+                ))
                 with open(outputs[0], "rb") as f:
                     bot.send_audio(chat_id, f, title=t["tool_ring_title"], performer="DuckLoader",
-                                   duration=int(end - start), caption=t["tool_ring_caption"].format(range=label),
-                                   reply_to_message_id=reply_to_id, timeout=600)
-                with open(outputs[1], "rb") as f:
-                    bot.send_document(chat_id, f, visible_file_name="ringtone.m4r",
-                                      caption=t["tool_ring_iphone"], timeout=600)
+                                   duration=int(end - start),
+                                   caption=t["ring_caption"].format(length=_fmt_length(end - start, t)),
+                                   reply_markup=guide, reply_to_message_id=reply_to_id, timeout=600)
 
             _delete_quietly(chat_id, status.message_id)
             store.record_download("media_tools", user_id)
@@ -6808,6 +6932,81 @@ def register_features(bot):
         finally:
             platforms.remove_download_files(cleanup + outputs)
             slot.release()
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(RING_GUIDE_PREFIX))
+    def handle_ring_guide(call):
+        """Under a ringtone: iPhone -> the guide in the caption; Android ->
+        pick the brand, then that brand's steps in the caption."""
+        choice = call.data[len(RING_GUIDE_PREFIX):]
+        chat_id, message_id = call.message.chat.id, call.message.message_id
+        t = _texts_for(chat_id)
+        fa = t is TEXTS["fa"]
+        bot.answer_callback_query(call.id)
+        try:
+            if choice == "i":
+                bot.edit_message_caption(t["ring_guide_iphone"], chat_id, message_id)
+            elif choice == "a":
+                markup = InlineKeyboardMarkup(row_width=2)
+                markup.add(*[
+                    InlineKeyboardButton(label, callback_data=f"{RING_GUIDE_PREFIX}b_{key}")
+                    for key, label, _, _ in RING_BRANDS
+                ])
+                bot.edit_message_caption(t["ring_pick_brand"], chat_id, message_id, reply_markup=markup)
+            elif choice.startswith("b_"):
+                brand = next((b for b in RING_BRANDS if b[0] == choice[2:]), RING_BRANDS[-1])
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton(t["ring_other_brand"], callback_data=f"{RING_GUIDE_PREFIX}a"))
+                bot.edit_message_caption(
+                    t["ring_guide_android"].format(brand=brand[1], steps=brand[2] if fa else brand[3]),
+                    chat_id, message_id, reply_markup=markup,
+                )
+        except Exception as e:
+            if "not modified" not in str(e):
+                logger.warning("Could not show the ringtone guide: %s", e)
+
+    def _yt_range_waiting(msg):
+        if msg.chat.type != "private" or not msg.text or not media_tools.looks_like_range(msg.text):
+            return False
+        target = _yt_range_targets.get((msg.chat.id, getattr(msg.from_user, "id", None)))
+        return bool(target) and time.time() - target["time"] < YT_RANGE_TTL
+
+    @bot.message_handler(func=_yt_range_waiting)
+    def handle_yt_range(message):
+        """A time range after a YouTube quality picker: only that part is
+        downloaded (whatever quality, video or audio, is picked next)."""
+        chat_id, user_id = message.chat.id, message.from_user.id
+        t = _texts_for(chat_id)
+        target = _yt_range_targets[(chat_id, user_id)]
+        try:
+            start, end = media_tools.parse_range(message.text, "range")
+            start, end = media_tools.fit_range(start, end, target.get("duration"))
+        except media_tools.RangeError as e:
+            bot.reply_to(message, t[e.key].format(**e.values))
+            return
+
+        target["range"] = (start, end)
+        target["time"] = time.time()
+        values = {"start": _fmt_clock(start), "end": _fmt_clock(end), "length": _fmt_length(end - start, t)}
+
+        # The picker shows the range, and sizes for just that part.
+        probe = dict(target["probe"])
+        if target.get("duration"):
+            fraction = (end - start) / target["duration"]
+            probe["options"] = [
+                dict(opt, size_bytes=int(opt["size_bytes"] * fraction)) if opt.get("size_bytes") else opt
+                for opt in probe.get("options") or []
+            ]
+        markup = _youtube_quality_markup(probe, target["lang"], user_id)
+        caption = target["caption"].replace(t["yt_range_hint"], t["yt_range_caption"].format(**values))
+        try:
+            if target["is_photo"]:
+                bot.edit_message_caption(caption, chat_id, target["picker_id"], reply_markup=markup)
+            else:
+                bot.edit_message_text(caption, chat_id, target["picker_id"], reply_markup=markup)
+        except Exception as e:
+            if "not modified" not in str(e):
+                logger.warning("Could not update the YouTube picker with the range: %s", e)
+        bot.reply_to(message, t["yt_range_set"].format(**values))
 
     @bot.message_handler(func=lambda msg: bool(msg.text) and platforms.detect_platform(msg.text) is not None)
     def handle_media_link(message):
@@ -7743,16 +7942,22 @@ def register_features(bot):
 
         group_lock = _group_lock(chat_id_int) if not show_ui else contextlib.nullcontext()
 
+        target = _yt_range_targets.get((chat_id_int, user_id)) if show_ui else None
+        section = target["range"] if target and target["video_id"] == video_id else None
+
         with group_lock:
             _download_youtube_choice(
                 chat_id_int, user_id, link_message_id, video_id, choice, t, show_ui,
                 picker_message_id=call.message.message_id if show_ui else None,
+                section=section,
             )
 
     def _download_youtube_choice(chat_id_int, user_id, link_message_id, video_id, choice, t, show_ui,
-                                 picker_message_id=None):
+                                 picker_message_id=None, section=None):
         source_url = f"https://www.youtube.com/watch?v={video_id}"
-        cache_key = platforms.media_cache_key(source_url, choice)
+        # Only a part of the video: it's downloaded alone and never cached
+        # as if it were the whole video.
+        cache_key = None if section else platforms.media_cache_key(source_url, choice)
 
         # The same video at the same quality was already sent somewhere:
         # re-send it by file_id (common when a video goes around groups).
@@ -7789,6 +7994,9 @@ def register_features(bot):
         # than an average over every YouTube video.
         timing_key = f"youtube:{'audio' if choice == 'audio' else 'video'}"
         option_size = platforms.youtube_option_size(video_id, choice)
+        target = _yt_range_targets.get((chat_id_int, user_id)) or {}
+        if section and option_size and target.get("duration"):
+            option_size = int(option_size * (section[1] - section[0]) / target["duration"])
         job = estimator.Job(
             estimator.job_key("youtube", source_url, choice),
             prior=duration_model.expected(timing_key, option_size),
@@ -7812,6 +8020,7 @@ def register_features(bot):
                 video_id,
                 choice,
                 ticker.hook,
+                section=section,
             )
 
             if show_ui:
@@ -7836,6 +8045,9 @@ def register_features(bot):
                 t,
                 show_ui=show_ui,
                 cache_key=cache_key,
+                caption_note=t["yt_range_note"].format(
+                    start=_fmt_clock(section[0]), end=_fmt_clock(section[1]),
+                ) if section else None,
             )
 
             ticker.stop()
