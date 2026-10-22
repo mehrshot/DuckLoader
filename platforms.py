@@ -180,6 +180,21 @@ class PreviewOnlyError(Exception):
     """The platform only served a short preview instead of the full track."""
 
 
+class DownloadCancelled(Exception):
+    """The user cancelled the download (raised from a progress hook)."""
+
+
+def is_cancelled(error) -> bool:
+    """yt-dlp may wrap what a progress hook raised; the text survives."""
+    return isinstance(error, DownloadCancelled) or "download cancelled by the user" in str(error).lower()
+
+
+def report_phase(progress_hook, phase: str) -> None:
+    """Tells the progress display which step runs now ("cutting", ...)."""
+    if progress_hook:
+        progress_hook({"status": "phase", "phase": phase})
+
+
 # A failure that says nothing about the link itself - ffmpeg dying midway,
 # a dropped connection, a platform's momentary 5xx - rarely happens twice in
 # a row, so the download runs once more after a short pause before the user
@@ -202,7 +217,7 @@ _PERMANENT_HINTS = (
 
 
 def is_transient_error(platform: str, error: Exception) -> bool:
-    if isinstance(error, (FileTooLargeError, UnsupportedLinkError, PreviewOnlyError, NoAudioError)):
+    if isinstance(error, (FileTooLargeError, UnsupportedLinkError, PreviewOnlyError, NoAudioError)) or is_cancelled(error):
         return False
     text = str(error).lower()
     if any(h in text for h in _PERMANENT_HINTS):
@@ -309,15 +324,22 @@ def _base_opts(**extra) -> dict:
 
 def extract_url(text: str) -> str | None:
     """The first supported platform URL in arbitrary text, with a scheme."""
-    if not text:
-        return None
-    match = _URL_RE.search(text)
-    if not match:
-        return None
-    url = match.group(0).rstrip(".,!?)]}>»«،؛")
-    if not re.match(r"https?://", url, re.IGNORECASE):
-        url = "https://" + url
-    return url
+    urls = extract_urls(text, 1)
+    return urls[0] if urls else None
+
+
+def extract_urls(text: str, limit: int = 5) -> list:
+    """The supported platform URLs in arbitrary text (each once, in order)."""
+    urls = []
+    for match in _URL_RE.finditer(text or ""):
+        url = match.group(0).rstrip(".,!?)]}>»«،؛")
+        if not re.match(r"https?://", url, re.IGNORECASE):
+            url = "https://" + url
+        if url not in urls:
+            urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
 
 
 def _host(url: str) -> str:
@@ -989,9 +1011,11 @@ def _run_plans(url: str, plans: list, attempt) -> object:
                 index, len(plans), plan["label"], time.monotonic() - started, url,
             )
             return result
-        except (FileTooLargeError, UnsupportedLinkError):
+        except (FileTooLargeError, UnsupportedLinkError, DownloadCancelled):
             raise
         except Exception as e:
+            if is_cancelled(e):
+                raise DownloadCancelled(str(e)) from e
             last_error = e
             elapsed = time.monotonic() - started
             if index < len(plans) and _is_retryable(url, e):
@@ -2157,7 +2181,7 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
                 return info, entries, filepaths
         except BaseException as e:
             _remove_tree(job_dir)
-            if not isinstance(e, Exception) or isinstance(e, FileTooLargeError):
+            if not isinstance(e, Exception) or isinstance(e, FileTooLargeError) or is_cancelled(e):
                 raise
             last_error = e
             logger.warning("Instagram story API attempt failed | %s | %s", label, str(e)[:300])
@@ -2189,6 +2213,8 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
             info, entries, files = _download_instagram_story_via_api(url, wanted_pk, progress_hook)
             return info, entries, files, tier
         except Exception as e:
+            if is_cancelled(e):
+                raise
             api_error = e
             logger.info("Instagram story API path failed, falling back to yt-dlp: %s", str(e)[:300])
             # A story that is gone, or a rate limit: yt-dlp can't help. When
@@ -2209,6 +2235,8 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
             noplaylist=bool(is_story and "/highlights/" not in url),
         )
     except Exception as e:
+        if is_cancelled(e):
+            raise
         error_text = str(e).lower()
         failure = api_error if api_error is not None and (
             "media info not found" in error_text or "login" in error_text
@@ -3024,6 +3052,7 @@ def _download_full_then_cut(url, selector, extract_audio, progress_hook, section
     )
     full = files[0]
     try:
+        report_phase(progress_hook, "cutting")
         start, end = media_tools.fit_range(float(section[0]), float(section[1]), media_tools.duration_of(full))
         if extract_audio:
             clip = _cut_audio_file(full, start, end)
@@ -3209,6 +3238,7 @@ def _download_youtube_section_direct(url, height, progress_hook, section):
         return None
     info, job_dir, (video_path, video_start), (audio_path, audio_start) = result
     try:
+        report_phase(progress_hook, "cutting")
         ffmpeg_exe = _ffmpeg_exe("ffmpeg")
         if not ffmpeg_exe:
             raise Exception("ffmpeg not found.")
@@ -3264,7 +3294,7 @@ def _download_youtube_quality(video_id: str, height_or_audio: str, progress_hook
         started = time.monotonic()
         try:
             result = _download_youtube_section_direct(url, int(height_or_audio), progress_hook, section)
-        except (FileTooLargeError, UnsupportedLinkError):
+        except (FileTooLargeError, UnsupportedLinkError, DownloadCancelled):
             raise
         except Exception as e:
             logger.warning("YouTube direct section failed | %s | %s", video_id, str(e)[:300])
@@ -3722,6 +3752,10 @@ def download_matching_audio(track: dict, progress_hook=None, sources=("ytmusic",
                     remove_download_files([fallback[1]])
                 raise
             except Exception as e:
+                if is_cancelled(e):
+                    if fallback:
+                        remove_download_files([fallback[1]])
+                    raise
                 last_error = e
                 logger.warning("Match candidate failed | %s | %s", cand["url"], str(e)[:300])
                 if (
@@ -3931,6 +3965,10 @@ def classify_error(platform: str, error: Exception) -> str:
 
     if "drm" in text or isinstance(error, PreviewOnlyError):
         return "drm"
+    # The platform's servers are down for a moment ("503 Service
+    # Unavailable" must not read as "this post is unavailable").
+    if any(h in text for h in ("http error 502", "http error 503", "http error 504", "service unavailable", "bad gateway")):
+        return "platform_unavailable"
     if platform == "instagram":
         if "instagram media not found or unavailable" in text:
             return "ig_not_found"

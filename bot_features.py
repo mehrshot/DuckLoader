@@ -332,7 +332,7 @@ def _acquire_download_slot(
     if show_ui and status_msg is not None:
         try:
             bot.edit_message_text(
-                t['queued'].format(position=position),
+                t['queued'].format(position=_digits(t, position)),
                 chat_id_int,
                 status_msg.message_id,
             )
@@ -436,20 +436,38 @@ class _DurationModel:
 duration_model = _DurationModel()
 
 
+_FA_DIGITS = str.maketrans("0123456789%", "۰۱۲۳۴۵۶۷۸۹٪")
+
+
+def _digits(t: dict, value) -> str:
+    """A number (or "42%") in the user's script: Persian digits in Persian."""
+    text = str(value)
+    return text.translate(_FA_DIGITS) if t is TEXTS.get("fa") else text
+
+
 def _format_eta(t: dict, seconds: float) -> str:
     seconds = int(math.ceil(seconds))
     if seconds < 60:
-        return t["eta_seconds"].format(n=seconds)
-    return t["eta_minutes"].format(m=seconds // 60, s=seconds % 60)
+        return t["eta_seconds"].format(n=_digits(t, seconds))
+    return t["eta_minutes"].format(m=_digits(t, seconds // 60), s=_digits(t, seconds % 60))
+
+
+CANCEL_PREFIX = "dlcancel_"
+_cancellable_tickers = _BoundedCache(max_items=2000)  # token -> (ticker, user_id)
 
 
 class _ProgressTicker:
     """Keeps the status message's bar moving on a timer, using the learned
     expected duration. Real yt-dlp byte progress can only push the bar
     forward, never back. It stays below 100% until the file is delivered,
-    then the status message is deleted as before."""
+    then the status message is deleted as before.
 
-    def __init__(self, bot, chat_id, status_msg, t, show_ui, expected_seconds, job=None):
+    The label follows what is really happening (fetching, cutting,
+    preparing, sending). With `cancel_user` the message carries a cancel
+    button until sending starts; a tap makes the next progress report
+    raise platforms.DownloadCancelled, which ends the download."""
+
+    def __init__(self, bot, chat_id, status_msg, t, show_ui, expected_seconds, job=None, cancel_user=None, note=None):
         self._job = job  # estimator.Job: re-estimates once the file size is known
         self._bot = bot
         self._chat_id = chat_id
@@ -459,13 +477,18 @@ class _ProgressTicker:
         self._expected = max(float(expected_seconds), 2.0)
         self._started = time.monotonic()
         self._phase = "downloading"
-        self._note = ""
+        self._note = note or ""
         self._real_fraction = 0.0
         self._shown_percent = 0
         self._last_text = None
         self._stop = threading.Event()
         self._thread = None
         self._lock = threading.Lock()
+        self.cancelled = False
+        self._cancel_token = None
+        if self.enabled and cancel_user is not None:
+            self._cancel_token = secrets.token_urlsafe(6)
+            _cancellable_tickers[self._cancel_token] = (self, cancel_user)
 
     def start(self):
         self._started = time.monotonic()
@@ -483,20 +506,55 @@ class _ProgressTicker:
         with self._lock:
             self._expected = max(float(seconds), 2.0)
 
-    def set_phase(self, phase):
+    def set_phase(self, phase, render=True):
         with self._lock:
+            changed = self._phase != phase
             self._phase = phase
-        self._render()
+        if changed and render:
+            self._render()
 
     def set_note(self, note):
         with self._lock:
             self._note = note or ""
         self._render()
 
+    def cancel(self) -> bool:
+        """The user's cancel tap. False if it's too late (already sending)."""
+        with self._lock:
+            if self._phase == "uploading" or self._stop.is_set():
+                return False
+            self.cancelled = True
+        return True
+
+    def check_cancelled(self):
+        if self.cancelled:
+            raise platforms.DownloadCancelled("Download cancelled by the user.")
+
+    def begin_upload(self):
+        """From here on the file is being sent: no more cancelling (a
+        cancel tapped just before still wins)."""
+        with self._lock:
+            if self.cancelled:
+                raise platforms.DownloadCancelled("Download cancelled by the user.")
+            self._phase = "uploading"
+        self._render()
+
     def hook(self, d):
-        """yt-dlp progress hook: real byte progress, if it's ahead of time."""
-        if d.get("status") != "downloading":
+        """Progress hook (yt-dlp's, and the bot's own steps): real byte
+        progress if it's ahead of time, and the current step."""
+        self.check_cancelled()
+        status = d.get("status")
+        if status == "phase":
+            self.set_phase(d.get("phase") or "processing", render=False)
             return
+        if status == "finished":
+            # The file is in; merging / converting / cutting comes next
+            # (and the next stream's download, if any, switches back).
+            self.set_phase("processing", render=False)
+            return
+        if status != "downloading":
+            return
+        self.set_phase("downloading", render=False)
         if self._job is not None:
             refined = self._job.on_size(d.get("total_bytes") or d.get("total_bytes_estimate"))
             if refined:
@@ -510,6 +568,8 @@ class _ProgressTicker:
 
     def stop(self):
         self._stop.set()
+        if self._cancel_token:
+            _cancellable_tickers.pop(self._cancel_token, None)
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=5)
@@ -528,7 +588,7 @@ class _ProgressTicker:
         return self._shown_percent
 
     def _render(self):
-        if not self.enabled or self._stop.is_set():
+        if not self.enabled or self._stop.is_set() or self.cancelled:
             return
         with self._lock:
             percent = self._percent()
@@ -537,16 +597,21 @@ class _ProgressTicker:
             text = self._t["progress_line"].format(
                 label=self._t[f"progress_{self._phase}"],
                 bar=_render_bar(f"{percent}%"),
-                percent=f"{percent}%",
+                percent=_digits(self._t, f"{percent}%"),
                 eta=eta,
             )
             if self._note:
                 text = f"{self._note}\n\n{text}"
-            if text == self._last_text:
+            markup = None
+            if self._cancel_token and self._phase != "uploading":
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton(self._t["dl_cancel_btn"], callback_data=CANCEL_PREFIX + self._cancel_token))
+            state = (text, bool(markup))
+            if state == self._last_text:
                 return
-            self._last_text = text
+            self._last_text = state
         try:
-            self._bot.edit_message_text(text, self._chat_id, self._status_msg.message_id)
+            self._bot.edit_message_text(text, self._chat_id, self._status_msg.message_id, reply_markup=markup)
         except Exception:
             pass  # a failed edit must never affect the download
 
@@ -602,16 +667,16 @@ def _files_size(paths) -> int:
 TEXTS = {
     'fa': {
         'welcome': (
-            "🦆 **به داکلودر خوش اومدی!**\n\n"
-            "کافیه لینکت رو بفرستی، "
-            "می‌رم پیداش می‌کنم و برات برمی‌گردونمش. ⚡\n\n"
-            "فعلا هم از اینستاگرام، یوتیوب، تیک تاک، اسپاتیفای و ساندکلاد "
-            "پشتیبانی می‌کنم.\n\n"
-            "زبان و کیفیت دلخواهت رو میتونی از /settings انتخاب کنی.\n\n"
-            "📖 راهنمای کامل و قابلیت‌های جدید: /help\n"
-            "💬 پیشنهاد یا مشکلی داشتی؟ از دکمه‌ی پایین صفحه یا /feedback برامون بفرست.\n\n"
-            "🦆 لینکتو بفرست تا شروع کنیم!"
-        ),        'init': "⏳ در حال برقراری ارتباط...",
+            "🦆 <b>داکلودر</b>\n"
+            "لینک بفرست، فایلش رو تحویل بگیر.\n"
+            "\n"
+            "📥 اینستاگرام، یوتیوب، تیک‌تاک، اسپاتیفای و ساندکلاد\n"
+            "🎵 اسم یا ویس یه آهنگ رو بفرست تا پیداش کنم\n"
+            "✂️ از هر ویدیو یه تیکه، گیف یا رینگتون بساز\n"
+            "\n"
+            "هر کدوم رو بزن تا ببینی چطوری کار می‌کنه 👇"
+        ),
+        'init': "⏳ در حال برقراری ارتباط...",
         'yt_probe_steps': [
             "🔎 در حال بررسی لینک یوتیوب...",
             "📡 در حال دریافت اطلاعات ویدیو از یوتیوب...",
@@ -643,6 +708,43 @@ TEXTS = {
         'fb_admin_reply_failed': "❌ ارسال پاسخ ممکن نشد: {error}",
         'fb_admin_recent_errors': "🧾 آخرین خطاهای این کاربر:",
         'progress_downloading': "🔄 در حال دریافت",
+        'tour_song': (
+            "🎵 <b>آهنگ</b>\n"
+            "\n"
+            "• اسم آهنگ رو بنویس (مثلاً <code>شادمهر تنها ماندم</code>) و از نتیجه‌ها انتخاب کن.\n"
+            "• آهنگی دور و برت پخش می‌شه؟ یه ویس ازش بفرست تا پیداش کنم.\n"
+            "• زیر ویدیوها «🎶 آهنگ این ویدیو» رو بزن.\n"
+            "• لینک ترک، آلبوم یا پلی‌لیست اسپاتیفای هم دانلود می‌شه."
+        ),
+        'tour_tools': (
+            "✂️ <b>ابزارها</b>\n"
+            "\n"
+            "• زیر هر ویدیو «✂️ ابزار برش» رو بزن: یه تیکه از ویدیو، گیف، یا رینگتون آیفون و اندروید.\n"
+            "• هر ویدیویی رو اینجا بفرست یا فوروارد کن تا صداش رو جدا کنم."
+        ),
+        'tour_anywhere': (
+            "💬 <b>توی هر چت و گروه</b>\n"
+            "\n"
+            "• توی هر چتی بنویس <code>@{bot} لینک</code> تا فایل همون‌جا ارسال بشه.\n"
+            "• فقط <code>@{bot}</code> رو بنویسی، دانلودهای اخیرت میاد.\n"
+            "• منو به گروهت اضافه کن؛ لینک‌های گروه رو خودم دانلود می‌کنم."
+        ),
+        'tour_dl_btn': "📥 دانلود",
+        'tour_song_btn': "🎵 آهنگ",
+        'tour_tools_btn': "✂️ ابزارها",
+        'tour_anywhere_btn': "💬 توی هر چت",
+        'tour_settings_btn': "⚙️ تنظیمات",
+        'tour_back_btn': "🔙 برگشت",
+        'progress_processing': "🎞 در حال آماده‌سازی",
+        'progress_cutting': "✂️ در حال برش",
+        'dl_cancel_btn': "❌ لغو",
+        'dl_cancelled': "❌ دانلود لغو شد.",
+        'dl_cancel_late': "📤 داره ارسال می‌شه؛ دیگه نمی‌شه لغوش کرد.",
+        'retry_btn': "🔄 دوباره امتحان کن",
+        'retry_expired': "⌛️ این دکمه منقضی شده؛ لینک رو دوباره بفرست.",
+        'multi_note': "🔗 لینک {i} از {total}",
+        'multi_summary': "📦 از {total} لینک، {ok} تا دانلود شد.",
+        'multi_limit': "ℹ️ از هر پیام فقط {n} لینک اول دانلود می‌شه.",
         'progress_uploading': "📤 در حال ارسال",
         'progress_almost': "چند لحظه‌ی دیگه",
         'eta_seconds': "{n} ثانیه",
@@ -699,33 +801,12 @@ TEXTS = {
         'inline_expired': "⌛️ این دکمه منقضی شده؛ لینک رو دوباره بفرست.",
         'inline_recent_desc': "دانلودهای اخیرت",
         'help': (
-            "📖 راهنمای داکلودر 🦆\n\n"
-            "📥 دانلود\n"
-            "لینک رو همین‌جا بفرست تا فایلش رو برات بیارم:\n"
-            "اینستاگرام (ریلز، پست، عکس، استوری و هایلایت)، یوتیوب، تیک‌تاک، ساندکلاد و اسپاتیفای.\n"
-            "برای یوتیوب، کیفیت رو خودت انتخاب می‌کنی.\n\n"
-            "💬 دانلود توی هر چتی (جدید)\n"
-            "توی چت با دوستات یا هر گروهی بنویس:\n"
-            "@{bot} لینک\n"
-            "فایل همون‌جا ارسال میشه، بدون اینکه از چت بیرون بیای. کیفیت یوتیوب رو هم همون‌جا انتخاب می‌کنی.\n"
-            "اگه فقط @{bot} رو بنویسی، دانلودهای اخیرت میاد تا دوباره بفرستیشون.\n"
-            "زیر هر فایلی که اینجا دانلود می‌کنی هم دکمه‌ی «📤 فرستادن برای دوستات» هست.\n\n"
-            "👥 داکلودر توی گروه (جدید)\n"
-            "منو به گروهت اضافه کن؛ هر لینکی که توی گروه فرستاده بشه، فایلش رو همون‌جا میارم. "
-            "کیفیت یوتیوب رو فقط کسی انتخاب می‌کنه که لینک رو فرستاده.\n\n"
-            "🎧 تبدیل ویدیو به صدا (جدید)\n"
-            "هر ویدیویی رو اینجا بفرست یا فوروارد کن تا صداش رو به‌صورت فایل صوتی یا ویس برات جدا کنم.\n\n"
-            "🎶 آهنگ این ویدیو (جدید)\n"
-            "زیر ویدیوهای اینستاگرام، تیک‌تاک و یوتیوب دکمه‌ی «🎶 آهنگ این ویدیو» رو بزن تا آهنگش رو پیدا کنم و فایل کاملش رو بفرستم.\n\n"
-            "🎙 شازم داخل تلگرام (جدید)\n"
-            "یه ویس از آهنگی که دور و برت پخش میشه ضبط کن و بفرست؛ آهنگ کامل رو برات پیدا می‌کنم.\n\n"
-            "🔍 جستجوی آهنگ (جدید)\n"
-            "اسم خواننده و آهنگ رو بنویس (مثلاً: شادمهر تنها ماندم) و از بین نتیجه‌ها انتخاب کن.\n\n"
-            "✂️ ابزار برش (جدید)\n"
-            "زیر ویدیوها دکمه‌ی «✂️ ابزار برش» رو بزن تا یه تیکه از ویدیو، گیف یا رینگتون بسازی. "
-            "برای یوتیوب هم کافیه قبل از انتخاب کیفیت بازه رو بفرستی تا فقط همون تیکه بیاد.\n\n"
-            "⚙️ /settings — زبان و کیفیت اینستاگرام\n"
-            "💬 /feedback — پیشنهاد یا گزارش مشکل"
+            "📥 <b>دانلود</b>\n"
+            "\n"
+            "• لینک رو همین‌جا بفرست؛ چند تا لینک توی یه پیام هم می‌شه.\n"
+            "• اینستاگرام: پست، ریلز، استوری و هایلایت.\n"
+            "• یوتیوب: کیفیت رو خودت انتخاب می‌کنی. فقط یه تیکه می‌خوای؟ قبل از انتخاب کیفیت بازه‌ش رو بفرست، مثلاً <code>1:20-2:05</code>\n"
+            "• زیر هر فایل: «🎵 دریافت صدا» و «🖼 دانلود کاور»."
         ),
         'help_try_inline_btn': "📤 امتحانش کن توی یه چت",
         'help_add_group_btn': "➕ اضافه کردن به گروه",
@@ -957,7 +1038,7 @@ TEXTS = {
         'song_not_found_voice': "🎵 آهنگی توی این ویس پیدا نکردم.\n\nنزدیک‌تر به منبع صدا، با سروصدای کمتر و حداقل ۱۰ ثانیه ضبط کن و دوباره بفرست.",
         'voice_too_short': "🎙 این ویس خیلی کوتاهه؛ حداقل ۵ ثانیه از آهنگ رو ضبط کن.",
         'search_searching': "🔍 در حال جستجوی «{query}»...",
-        'search_results': "🔍 نتیجه‌های «{query}»\nآهنگی که می‌خوای رو انتخاب کن 👇",
+        'search_results': "🎵 دنبال آهنگ «{query}» بودی؟ انتخابش کن 👇\n\nℹ️ برای دانلود از یه سایت، لینکش رو بفرست.",
         'search_none': "🔍 آهنگی با اسم «{query}» پیدا نکردم.\nاسم خواننده و آهنگ رو با هم بنویس؛ مثلاً: شادمهر تنها ماندم",
         'search_expired': "⚠️ این نتیجه‌ها دیگه معتبر نیستن؛ دوباره اسم آهنگ رو بفرست.",
         'search_slow_down': "⏳ خیلی پشت سر هم جستجو کردی؛ چند دقیقه دیگه دوباره امتحان کن.",
@@ -1116,16 +1197,16 @@ TEXTS = {
     },
     'en': {
         'welcome': (
-            "🦆 **Welcome to DuckLoader!**\n\n"
-            "I’m your little download duck. Send me a link and "
-            "I’ll waddle off, fetch it, and bring it back to you. ⚡\n\n"
-            "I support Instagram, TikTok, SoundCloud, Spotify, "
-            "and YouTube.\n\n"
-            "Choose your preferred quality in /settings.\n\n"
-            "📖 Full guide and new features: /help\n"
-            "💬 Got an idea or a problem? Use the button below or /feedback.\n\n"
-            "🦆 You bring the link. I’ll bring the media."
-        ),        'init': "⏳ Initializing connection...",
+            "🦆 <b>DuckLoader</b>\n"
+            "Send a link, get the file.\n"
+            "\n"
+            "📥 Instagram, YouTube, TikTok, Spotify and SoundCloud\n"
+            "🎵 Send a song's name or a voice clip of it and I'll find it\n"
+            "✂️ Make a clip, a GIF or a ringtone from any video\n"
+            "\n"
+            "Tap one to see how it works 👇"
+        ),
+        'init': "⏳ Initializing connection...",
         'yt_probe_steps': [
             "🔎 Checking the YouTube link...",
             "📡 Getting the video's details from YouTube...",
@@ -1157,6 +1238,43 @@ TEXTS = {
         'fb_admin_reply_failed': "❌ Couldn't send the reply: {error}",
         'fb_admin_recent_errors': "🧾 This user's latest errors:",
         'progress_downloading': "🔄 Fetching",
+        'tour_song': (
+            "🎵 <b>Songs</b>\n"
+            "\n"
+            "• Write the song's name (e.g. <code>Adele Hello</code>) and pick from the results.\n"
+            "• A song playing around you? Send a voice clip of it and I'll find it.\n"
+            '• Under videos, tap "🎶 Song in this video".\n'
+            "• Spotify track, album and playlist links work too."
+        ),
+        'tour_tools': (
+            "✂️ <b>Tools</b>\n"
+            "\n"
+            '• Under any video tap "✂️ Cut tools": a clip, a GIF, or an iPhone / Android ringtone.\n'
+            "• Send or forward any video here and I'll pull its sound out."
+        ),
+        'tour_anywhere': (
+            "💬 <b>In any chat or group</b>\n"
+            "\n"
+            "• In any chat type <code>@{bot} link</code> and the file is sent right there.\n"
+            "• Type just <code>@{bot}</code> to get your recent downloads.\n"
+            "• Add me to your group and I'll download the links sent there."
+        ),
+        'tour_dl_btn': "📥 Download",
+        'tour_song_btn': "🎵 Songs",
+        'tour_tools_btn': "✂️ Tools",
+        'tour_anywhere_btn': "💬 In any chat",
+        'tour_settings_btn': "⚙️ Settings",
+        'tour_back_btn': "🔙 Back",
+        'progress_processing': "🎞 Preparing",
+        'progress_cutting': "✂️ Cutting",
+        'dl_cancel_btn': "❌ Cancel",
+        'dl_cancelled': "❌ Download cancelled.",
+        'dl_cancel_late': "📤 It's already being sent; too late to cancel.",
+        'retry_btn': "🔄 Try again",
+        'retry_expired': "⌛️ This button has expired; send the link again.",
+        'multi_note': "🔗 Link {i} of {total}",
+        'multi_summary': "📦 {ok} of {total} links downloaded.",
+        'multi_limit': "ℹ️ Only the first {n} links of a message are downloaded.",
         'progress_uploading': "📤 Sending",
         'progress_almost': "a few more seconds",
         'eta_seconds': "{n}s",
@@ -1213,33 +1331,12 @@ TEXTS = {
         'inline_expired': "⌛️ This button has expired; please send the link again.",
         'inline_recent_desc': "Your recent downloads",
         'help': (
-            "📖 DuckLoader guide 🦆\n\n"
-            "📥 Downloading\n"
-            "Send a link here and I'll bring you the file:\n"
-            "Instagram (Reels, posts, photos, stories and highlights), YouTube, TikTok, SoundCloud and Spotify.\n"
-            "For YouTube you choose the quality.\n\n"
-            "💬 Download in any chat (new)\n"
-            "In a chat with friends or in any group, type:\n"
-            "@{bot} link\n"
-            "The file is sent right there — you never leave the chat. YouTube quality is chosen right there too.\n"
-            "Type just @{bot} to see your recent downloads and send them again.\n"
-            "Files you download here also have a \"📤 Send to your friends\" button.\n\n"
-            "👥 DuckLoader in groups (new)\n"
-            "Add me to your group and I'll bring the file for every link anyone sends. "
-            "Only the person who sent a YouTube link can choose its quality.\n\n"
-            "🎧 Video to audio (new)\n"
-            "Send or forward any video here and I'll extract its sound as an audio file or a voice message.\n\n"
-            "🎶 Song in this video (new)\n"
-            "Under Instagram, TikTok and YouTube videos, tap \"🎶 Song in this video\" and I'll find the song and send you the full track.\n\n"
-            "🎙 Shazam inside Telegram (new)\n"
-            "Record a voice message of a song playing around you and I'll find the full track.\n\n"
-            "🔍 Song search (new)\n"
-            "Write the artist and the song (e.g. Adele Hello) and pick from the results.\n\n"
-            "✂️ Cut tools (new)\n"
-            "Tap \"✂️ Cut tools\" under a video to make a clip, a GIF or a ringtone. "
-            "For YouTube, send a time range before picking the quality to get only that part.\n\n"
-            "⚙️ /settings — language and Instagram quality\n"
-            "💬 /feedback — suggestions and problem reports"
+            "📥 <b>Downloading</b>\n"
+            "\n"
+            "• Send the link here; several links in one message work too.\n"
+            "• Instagram: posts, reels, stories and highlights.\n"
+            "• YouTube: you pick the quality. Only want a part? Send the range before picking, e.g. <code>1:20-2:05</code>\n"
+            '• Under every file: "🎵 Get Audio" and "🖼 Download Cover".'
         ),
         'help_try_inline_btn': "📤 Try it in a chat",
         'help_add_group_btn': "➕ Add to a group",
@@ -1470,7 +1567,7 @@ TEXTS = {
         'song_not_found_voice': "🎵 I couldn't find a song in this voice message.\n\nRecord at least 10 seconds, closer to the music and with less noise, and send it again.",
         'voice_too_short': "🎙 This voice message is too short; record at least 5 seconds of the song.",
         'search_searching': "🔍 Searching for \"{query}\"...",
-        'search_results': "🔍 Results for \"{query}\"\nPick the song you want 👇",
+        'search_results': "🎵 Looking for the song \"{query}\"? Pick it 👇\n\nℹ️ To download from a site, send its link.",
         'search_none': "🔍 I couldn't find a song called \"{query}\".\nWrite the artist and the song together, e.g.: Adele Hello",
         'search_expired': "⚠️ These results have expired; send the song name again.",
         'search_slow_down': "⏳ That's a lot of searches in a row; try again in a few minutes.",
@@ -3510,6 +3607,7 @@ def register_features(bot):
         track_status=False,
         track_complete=False,
         show_ui=True,
+        reply_markup=None,
     ):
         if not show_ui:
             return None
@@ -3546,12 +3644,14 @@ def register_features(bot):
                 sent = bot.send_sticker(
                     chat_id_int,
                     file_id,
+                    reply_markup=reply_markup,
                 )
 
             elif media_type == "animation":
                 sent = bot.send_animation(
                     chat_id_int,
                     file_id,
+                    reply_markup=reply_markup,
                 )
 
             else:
@@ -4388,6 +4488,7 @@ def register_features(bot):
         t,
         status_msg,
         show_ui=True,
+        note=None,
     ):
         """
         Shared direct-download worker.
@@ -4417,11 +4518,21 @@ def register_features(bot):
 
         group_lock = _group_lock(chat_id_int) if chat_id_int < 0 else contextlib.nullcontext()
 
+        def with_status():
+            # No status message yet (a cached result was expected): make
+            # one now that there is a real download to show.
+            if show_ui and status_msg is None:
+                try:
+                    return bot.send_message(chat_id_int, t["init"], reply_to_message_id=reply_to_id)
+                except Exception:
+                    return None
+            return status_msg
+
         try:
             with group_lock:
                 if not cache_key:
                     return _download_and_send(
-                        chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, None,
+                        chat_id_int, reply_to_id, url, quality, t, with_status(), show_ui, platform, None, note,
                     )
 
                 with _cache_key_lock(cache_key):
@@ -4456,7 +4567,7 @@ def register_features(bot):
                             media_cache.pop(cache_key, None)
 
                     return _download_and_send(
-                        chat_id_int, reply_to_id, url, quality, t, status_msg, show_ui, platform, cache_key,
+                        chat_id_int, reply_to_id, url, quality, t, with_status(), show_ui, platform, cache_key, note,
                     )
         finally:
             _release_in_flight(in_flight_key)
@@ -4471,6 +4582,7 @@ def register_features(bot):
         show_ui,
         platform,
         cache_key,
+        note=None,
     ):
         timing_key = f"{platform}:{'audio' if quality == 'audio' else 'media'}"
 
@@ -4497,6 +4609,7 @@ def register_features(bot):
         )
         ticker = _ProgressTicker(
             bot, chat_id_int, status_msg, t, show_ui, job.initial, job=job,
+            cancel_user=chat_id_int if show_ui else None, note=note,
         ).start()
 
         _send_duck_reaction(
@@ -4526,7 +4639,7 @@ def register_features(bot):
                 allow_fallback=allow_fallback,
                 progress_hook=ticker.hook,
             )
-            ticker.set_phase("uploading")
+            ticker.begin_upload()
             delivered_bytes = _files_size(files)
             refined = job.fetched(delivered_bytes, items=len(files), media_seconds=(info or {}).get("duration"))
             if refined:
@@ -4590,7 +4703,7 @@ def register_features(bot):
             try:
                 bot.edit_message_text(
                     t["too_large"].format(
-                        size=str(e)
+                        size=_digits(t, str(e))
                     ),
                     chat_id_int,
                     status_msg.message_id,
@@ -4604,6 +4717,11 @@ def register_features(bot):
 
         except Exception as e:
             ticker.stop()
+
+            if platforms.is_cancelled(e):
+                _show_cancelled(chat_id_int, status_msg, t)
+                _set_reaction(chat_id_int, react_target, None)
+                return False, e
 
             if show_ui and status_msg is not None:
                 _send_duck_download_failed(
@@ -4642,6 +4760,10 @@ def register_features(bot):
                     ),
                     chat_id_int,
                     status_msg.message_id,
+                    reply_markup=_retry_markup(platform, e, t, {
+                        "kind": "direct", "user_id": chat_id_int, "reply_to_id": reply_to_id,
+                        "url": url, "quality": quality,
+                    }),
                 )
             except Exception:
                 pass
@@ -4770,6 +4892,9 @@ def register_features(bot):
                         _friendly_download_error("youtube", e, t),
                         chat_id_int,
                         status_msg.message_id,
+                        reply_markup=_retry_markup("youtube", e, t, {
+                            "kind": "link", "user_id": requester_id, "message": message, "url": url,
+                        }),
                     )
                 except Exception:
                     pass
@@ -4947,9 +5072,12 @@ def register_features(bot):
             message.chat.id
         )
 
+        # The welcome carries the tour's inline buttons, so the bottom
+        # keyboard (feedback, ads) rides on the duck sticker instead.
         _send_duck_reaction(
             message.chat.id,
             "start",
+            reply_markup=_main_reply_markup() if _is_private_chat(message.chat.type) and not is_new_user else None,
         )
 
         if is_new_user:
@@ -4957,41 +5085,64 @@ def register_features(bot):
                 message,
                 t["welcome"],
                 reply_markup=_start_language_markup(),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         else:
-            bot.reply_to(
-                message,
-                t["welcome"],
-                reply_markup=_main_reply_markup() if _is_private_chat(message.chat.type) else None,
-                parse_mode="Markdown",
-            )
+            text, markup = _tour_home(t)
+            bot.reply_to(message, text, reply_markup=markup, parse_mode="HTML")
 
     @bot.message_handler(
         commands=["help"]
     )
     def send_help(message):
-        chat_id = str(
-            message.chat.id
-        )
+        text, markup = _tour_home(_texts_for(message.chat.id))
+        bot.reply_to(message, text, reply_markup=markup, parse_mode="HTML")
 
-        t = _texts_for(
-            chat_id
-        )
+    # ------------------------------------------------------------------
+    # Welcome tour: the welcome lists what the bot does; each button shows
+    # how one part works, in a few lines, in the same message.
+    # ------------------------------------------------------------------
+    TOUR_PREFIX = "tour_"
+    _TOUR_PAGES = {"dl": "help", "song": "tour_song", "tools": "tour_tools", "anywhere": "tour_anywhere"}
 
+    def _tour_home(t):
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(*[
+            InlineKeyboardButton(t[f"tour_{page}_btn"], callback_data=f"{TOUR_PREFIX}{page}") for page in _TOUR_PAGES
+        ])
+        markup.add(InlineKeyboardButton(t["tour_settings_btn"], callback_data=f"{TOUR_PREFIX}settings"))
+        return t["welcome"], markup
+
+    def _tour_page(t, page):
         username = _bot_username()
         markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            _SwitchInlineButton(t["help_try_inline_btn"], switch_inline_query=""),
-            InlineKeyboardButton(t["help_add_group_btn"], url=f"https://t.me/{username}?startgroup=true"),
-        )
+        if page == "anywhere":
+            markup.add(
+                _SwitchInlineButton(t["help_try_inline_btn"], switch_inline_query=""),
+                InlineKeyboardButton(t["help_add_group_btn"], url=f"https://t.me/{username}?startgroup=true"),
+            )
+        markup.add(InlineKeyboardButton(t["tour_back_btn"], callback_data=f"{TOUR_PREFIX}home"))
+        return t[_TOUR_PAGES[page]].format(bot=username), markup
 
-        bot.reply_to(
-            message,
-            t["help"].format(bot=username),
-            reply_markup=markup,
-            disable_web_page_preview=True,
-        )
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(TOUR_PREFIX))
+    def handle_tour(call):
+        page = call.data[len(TOUR_PREFIX):]
+        t = _texts_for(call.message.chat.id)
+        bot.answer_callback_query(call.id)
+        if page == "settings":
+            fake = copy.copy(call.message)
+            fake.from_user = call.from_user
+            open_settings(fake)
+            return
+        if page != "home" and page not in _TOUR_PAGES:
+            return
+        text, markup = _tour_home(t) if page == "home" else _tour_page(t, page)
+        try:
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                  reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            if "not modified" not in str(e):
+                logger.warning("Could not show the tour page %s: %s", page, e)
     @bot.message_handler(commands=["whoami"])
     def whoami(message):
         bot.reply_to(message, f"🆔 `{message.from_user.id}`", parse_mode="Markdown")
@@ -6325,7 +6476,7 @@ def register_features(bot):
             return
 
         if _is_rate_limited(user_id):
-            bot.answer_callback_query(call.id, t["rate_limited"].format(limit=RATE_LIMIT_COUNT), show_alert=True)
+            bot.answer_callback_query(call.id, t["rate_limited"].format(limit=_digits(t, RATE_LIMIT_COUNT)), show_alert=True)
             return
 
         bot.answer_callback_query(call.id)
@@ -6873,7 +7024,7 @@ def register_features(bot):
             bot.reply_to(message, t["tool_expired"])
             return
         if _is_rate_limited(user_id):
-            bot.reply_to(message, t["rate_limited"].format(limit=RATE_LIMIT_COUNT))
+            bot.reply_to(message, t["rate_limited"].format(limit=_digits(t, RATE_LIMIT_COUNT)))
             return
         _run_media_tool(chat_id, user_id, message.message_id, pending["tool"], source, start, end, t,
                         variant=pending.get("variant"))
@@ -7042,21 +7193,49 @@ def register_features(bot):
         ):
             return
 
-        url = platforms.extract_url(
-            message.text
-        )
-
-        if not url:
+        urls = platforms.extract_urls(message.text, MAX_LINKS_PER_MESSAGE + 1)
+        if not urls:
             return
-
-        if "tiktok.com" in url.lower():
-            url = platforms.resolve_tiktok_url(
-                url
-            )
 
         if show_ui:
             _delete_previous_download_ducks(
                 chat_id_int
+            )
+
+        if len(urls) > MAX_LINKS_PER_MESSAGE:
+            urls = urls[:MAX_LINKS_PER_MESSAGE]
+            if show_ui:
+                bot.reply_to(message, t["multi_limit"].format(n=_digits(t, MAX_LINKS_PER_MESSAGE)))
+
+        if len(urls) == 1:
+            _handle_one_link(message, urls[0], t, user, show_ui)
+            return
+
+        # Several links: one after another, each with its own progress
+        # ("link 2 of 3"), and a summary only if some didn't make it.
+        done = 0
+        for index, url in enumerate(urls, start=1):
+            note = t["multi_note"].format(i=_digits(t, index), total=_digits(t, len(urls)))
+            try:
+                if _handle_one_link(message, url, t, user, show_ui, note=note):
+                    done += 1
+            except Exception:
+                logger.exception("Link %d of %d failed | %s", index, len(urls), url)
+        if show_ui and done < len(urls):
+            bot.reply_to(message, t["multi_summary"].format(ok=_digits(t, done), total=_digits(t, len(urls))))
+
+    MAX_LINKS_PER_MESSAGE = 5
+
+    def _handle_one_link(message, url, t, user, show_ui, note=None):
+        """One link of a message: YouTube gets the quality picker, Spotify
+        its own flow, everything else a direct download. True if it went
+        through (or the picker was shown)."""
+        chat_id_int = message.chat.id
+        user_id = message.from_user.id
+
+        if "tiktok.com" in url.lower():
+            url = platforms.resolve_tiktok_url(
+                url
             )
 
         platform = platforms.detect_platform(
@@ -7065,48 +7244,42 @@ def register_features(bot):
 
         if not flags.get(platform, True):
             bot.reply_to(message, t['not_launched'].format(platform=platforms.PLATFORM_NAMES[platform]))
-            return
+            return False
 
         # YouTube always gets the thumbnail+buttons quality picker — in
         # groups too, where only the person who sent the link can use it.
         if platform == "youtube":
-            _send_youtube_quality_picker(message, t, user['lang'], show_ui=show_ui,)
-            return
+            link_message = message
+            if platforms.extract_url(message.text) != url:  # one of several links
+                link_message = copy.copy(message)
+                link_message.text = url
+            _send_youtube_quality_picker(link_message, t, user['lang'], show_ui=show_ui,)
+            return True
 
         if _is_rate_limited(user_id):
-            bot.reply_to(message, t['rate_limited'].format(limit=RATE_LIMIT_COUNT))
-            return
-
-        status_msg = None
-        if show_ui:
-            status_msg = bot.reply_to(
-                message,
-                t['init'],
-            )
-            bot.send_chat_action(
-                chat_id_int,
-                'typing',
-            )
+            bot.reply_to(message, t['rate_limited'].format(limit=_digits(t, RATE_LIMIT_COUNT)))
+            return False
 
         if platform == "spotify":
             # A single track that was already delivered: send it again by
-            # file_id (albums and playlists aren't cached as a whole).
+            # file_id (albums and playlists aren't cached as a whole) -
+            # instantly, without a progress message.
             spotify_key = platforms.media_cache_key(url, "audio")
             cached = media_cache.get(spotify_key) if spotify_key else None
             if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
                 try:
                     _send_cached_result(chat_id_int, message.message_id, url, "spotify", cached, t, show_ui=show_ui)
-                    if status_msg is not None:
-                        try:
-                            bot.delete_message(chat_id_int, status_msg.message_id)
-                        except Exception:
-                            pass
                     if show_ui:
                         _maybe_send_ad(chat_id_int)
-                    return
+                    return True
                 except Exception:
                     logger.warning("Cached Spotify re-send failed; downloading again | %s", spotify_key, exc_info=True)
                     media_cache.pop(spotify_key, None)
+
+            status_msg = None
+            if show_ui:
+                status_msg = bot.reply_to(message, t['init'])
+                bot.send_chat_action(chat_id_int, 'typing')
 
             slot = _acquire_download_slot(
                 bot,
@@ -7118,12 +7291,14 @@ def register_features(bot):
             )
 
             if slot is None:
-                return
+                return False
 
             ticker = _ProgressTicker(
                 bot, chat_id_int, status_msg, t, show_ui,
                 estimator.estimate_total("spotify:track", prior=duration_model.expected("spotify:track")),
+                cancel_user=user_id, note=note,
             ).start()
+            spotify_ok = False
 
             _send_duck_reaction(
                 chat_id_int,
@@ -7141,7 +7316,7 @@ def register_features(bot):
                     # An album would be 20 files in a row in the group.
                     ticker.stop()
                     bot.reply_to(message, t["group_album_private"], reply_markup=_open_bot_markup(t))
-                    return
+                    return False
 
                 # An album takes about N tracks' worth of time.
                 ticker.set_expected(
@@ -7161,25 +7336,27 @@ def register_features(bot):
                         track_started = time.monotonic()
                         track_job = estimator.Job("spotify:track", prior=duration_model.expected("spotify:track"))
 
+                        ticker.check_cancelled()
                         ticker.set_phase("downloading")
                         if len(tracks) > 1:
-                            ticker.set_note(
-                                t['spotify_searching'].format(
-                                    i=i + 1,
-                                    total=len(tracks),
-                                    name=track_label,
-                                )
+                            searching = t['spotify_searching'].format(
+                                i=_digits(t, i + 1),
+                                total=_digits(t, len(tracks)),
+                                name=track_label,
                             )
+                            ticker.set_note(f"{note}\n{searching}" if note else searching)
 
                         # One track that can't be found must not abort the
                         # rest of an album or playlist.
                         try:
-                            filepath = platforms.download_spotify_track(track, None)
+                            filepath = platforms.download_spotify_track(track, ticker.hook)
                         except platforms.FileTooLargeError:
                             track_job.close()
                             raise
                         except Exception as track_error:
                             track_job.close()
+                            if platforms.is_cancelled(track_error):
+                                raise
                             last_track_error = track_error
                             failed_tracks.append(track_label)
                             logger.warning(
@@ -7193,7 +7370,7 @@ def register_features(bot):
                                           media_seconds=(track.get('duration_ms') or 0) / 1000 or None)
 
                         try:
-                            ticker.set_phase("uploading")
+                            ticker.begin_upload()
 
                             if show_ui:
                                 bot.send_chat_action(chat_id_int, 'upload_audio')
@@ -7282,6 +7459,7 @@ def register_features(bot):
                             pass
 
                 ticker.stop()
+                spotify_ok = True
 
                 if show_ui and status_msg is not None:
                     try:
@@ -7304,6 +7482,10 @@ def register_features(bot):
             except Exception as e:
                 ticker.stop()
 
+                if platforms.is_cancelled(e):
+                    _show_cancelled(chat_id_int, status_msg, t)
+                    return False
+
                 _send_duck_download_failed(
                     chat_id_int,
                     show_ui=show_ui,
@@ -7324,7 +7506,7 @@ def register_features(bot):
 
                 try:
                     if isinstance(e, platforms.FileTooLargeError):
-                        error_text = t["too_large"].format(size=str(e))
+                        error_text = t["too_large"].format(size=_digits(t, str(e)))
                     else:
                         error_text = _friendly_download_error("spotify", e, t)
 
@@ -7332,13 +7514,16 @@ def register_features(bot):
                         error_text,
                         chat_id_int,
                         status_msg.message_id,
+                        reply_markup=_retry_markup("spotify", e, t, {
+                            "kind": "link", "user_id": user_id, "message": message, "url": url,
+                        }),
                     )
                 except Exception:
                     pass
             finally:
                 ticker.stop()
                 slot.release()
-            return
+            return spotify_ok
 
         download_quality = (
             user.get(
@@ -7361,7 +7546,17 @@ def register_features(bot):
         ):
             download_quality = "480p"
 
-        _run_direct_download(
+        # Already sent before: it comes back by file_id in a moment, so no
+        # progress message for it (_run_direct_download makes one if the
+        # re-send fails and it has to download after all).
+        cache_key = platforms.media_cache_key(url, download_quality)
+        cached = media_cache.get(cache_key) if cache_key else None
+        status_msg = None
+        if show_ui and not (cached and time.time() - cached["time"] < MEDIA_CACHE_TTL):
+            status_msg = bot.reply_to(message, t['init'])
+            bot.send_chat_action(chat_id_int, 'typing')
+
+        ok, _ = _run_direct_download(
             chat_id_int,
             message.message_id,
             url,
@@ -7369,7 +7564,9 @@ def register_features(bot):
             t,
             status_msg,
             show_ui=show_ui,
+            note=note,
         )
+        return ok
 
     @bot.callback_query_handler(
         func=lambda call:
@@ -7761,7 +7958,7 @@ def register_features(bot):
             return
 
         if _is_rate_limited(user_id):
-            bot.answer_callback_query(call.id, t['rate_limited'].format(limit=RATE_LIMIT_COUNT), show_alert=True)
+            bot.answer_callback_query(call.id, t['rate_limited'].format(limit=_digits(t, RATE_LIMIT_COUNT)), show_alert=True)
             return
 
         bot.answer_callback_query(call.id)
@@ -7828,12 +8025,13 @@ def register_features(bot):
             selected_language
         ]
 
+        text, markup = _tour_home(t)
         bot.edit_message_text(
-            t["welcome"],
+            text,
             call.message.chat.id,
             call.message.message_id,
-            reply_markup=None,
-            parse_mode="Markdown",
+            reply_markup=markup,
+            parse_mode="HTML",
         )
 
         bot.answer_callback_query(
@@ -7925,7 +8123,7 @@ def register_features(bot):
         if _is_rate_limited(user_id):
             bot.answer_callback_query(
                 call.id,
-                t["rate_limited"].format(limit=RATE_LIMIT_COUNT),
+                t["rate_limited"].format(limit=_digits(t, RATE_LIMIT_COUNT)),
                 show_alert=True,
             )
             return
@@ -7948,6 +8146,93 @@ def register_features(bot):
 
     _yt_inflight = set()
     _yt_inflight_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # "Try again" under an error, and "cancel" under the progress
+    # ------------------------------------------------------------------
+    RETRY_PREFIX = "dlretry_"
+    # Errors a second try may fix. Private, deleted, too large, age-gated
+    # and the like get no button: trying again can't change them.
+    RETRYABLE_ERRORS = {
+        "download_failed", "youtube_failed", "tiktok_failed", "soundcloud_failed", "spotify_failed",
+        "instagram_failed", "platform_unavailable", "ig_login", "ig_story_login",
+    }
+    _retry_jobs = _BoundedCache(max_items=3000)
+
+    def _retry_markup(platform, error, t, job):
+        if platforms.is_cancelled(error) or platforms.classify_error(platform, error) not in RETRYABLE_ERRORS:
+            return None
+        token = secrets.token_urlsafe(6)
+        _retry_jobs[token] = job
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(t["retry_btn"], callback_data=RETRY_PREFIX + token))
+        return markup
+
+    def _show_cancelled(chat_id_int, status_msg, t):
+        if status_msg is None:
+            return
+        try:
+            bot.edit_message_text(t["dl_cancelled"], chat_id_int, status_msg.message_id, reply_markup=None)
+        except Exception:
+            pass  # already showing it (edited on the tap)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(RETRY_PREFIX))
+    def handle_retry(call):
+        chat_id = call.message.chat.id
+        user_id = call.from_user.id
+        t = _texts_for(chat_id)
+        job = _retry_jobs.get(call.data[len(RETRY_PREFIX):])
+        if not job or job["user_id"] != user_id or store.is_banned(user_id):
+            bot.answer_callback_query(call.id, t["retry_expired"], show_alert=True)
+            return
+        if _is_rate_limited(user_id):
+            bot.answer_callback_query(call.id, t["rate_limited"].format(limit=_digits(t, RATE_LIMIT_COUNT)), show_alert=True)
+            return
+        _retry_jobs.pop(call.data[len(RETRY_PREFIX):], None)
+        bot.answer_callback_query(call.id)
+
+        if job["kind"] == "direct":
+            # The error message becomes the progress message again.
+            try:
+                bot.edit_message_text(t["init"], chat_id, call.message.message_id, reply_markup=None)
+            except Exception:
+                pass
+            _run_direct_download(chat_id, job["reply_to_id"], job["url"], job["quality"], t, call.message, show_ui=True)
+        elif job["kind"] == "link":
+            _delete_quietly(chat_id, call.message.message_id)
+            _handle_one_link(job["message"], job["url"], t, store.get_user(user_settings, str(chat_id)), True)
+        elif job["kind"] == "yt":
+            inflight_key = (chat_id, user_id, job["video_id"], job["choice"])
+            with _yt_inflight_lock:
+                if inflight_key in _yt_inflight:
+                    return
+                _yt_inflight.add(inflight_key)
+            try:
+                _delete_quietly(chat_id, call.message.message_id)
+                _download_youtube_choice(
+                    chat_id, user_id, job["link_message_id"], job["video_id"], job["choice"], t, True,
+                    picker_message_id=job["picker_message_id"], section=job["section"],
+                )
+            finally:
+                with _yt_inflight_lock:
+                    _yt_inflight.discard(inflight_key)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(CANCEL_PREFIX))
+    def handle_download_cancel(call):
+        t = _texts_for(call.message.chat.id)
+        entry = _cancellable_tickers.get(call.data[len(CANCEL_PREFIX):])
+        if not entry or entry[1] != call.from_user.id:
+            bot.answer_callback_query(call.id)
+            return
+        if not entry[0].cancel():
+            bot.answer_callback_query(call.id, t["dl_cancel_late"], show_alert=True)
+            return
+        bot.answer_callback_query(call.id, t["dl_cancelled"])
+        # Shown right away; the download itself stops at its next step.
+        try:
+            bot.edit_message_text(t["dl_cancelled"], call.message.chat.id, call.message.message_id, reply_markup=None)
+        except Exception:
+            pass
 
     def _start_youtube_pick(call, chat_id_int, user_id, video_id, choice, t, show_ui):
         bot.answer_callback_query(call.id)
@@ -8031,6 +8316,7 @@ def register_features(bot):
         )
         ticker = _ProgressTicker(
             bot, chat_id_int, status_msg, t, show_ui, job.initial, job=job,
+            cancel_user=user_id if show_ui else None,
         ).start()
 
         _send_duck_reaction(
@@ -8050,10 +8336,10 @@ def register_features(bot):
                 section=section,
             )
 
+            ticker.begin_upload()
             if show_ui:
                 _finish_duck_download(chat_id_int)
 
-            ticker.set_phase("uploading")
             delivered_bytes = _files_size(files)
             refined = job.fetched(delivered_bytes, items=len(files), media_seconds=(info or {}).get("duration"))
             if refined:
@@ -8112,7 +8398,7 @@ def register_features(bot):
             if show_ui and status_msg is not None:
                 try:
                     bot.edit_message_text(
-                        t["too_large"].format(size=str(e)),
+                        t["too_large"].format(size=_digits(t, str(e))),
                         chat_id_int,
                         status_msg.message_id,
                     )
@@ -8121,6 +8407,12 @@ def register_features(bot):
 
         except Exception as e:
             ticker.stop()
+
+            if platforms.is_cancelled(e):
+                _show_cancelled(chat_id_int, status_msg, t)
+                _set_reaction(chat_id_int, link_message_id, None)
+                return
+
             _set_reaction(chat_id_int, link_message_id, "🤷")
 
             store.record_error(
@@ -8142,6 +8434,11 @@ def register_features(bot):
                         _friendly_download_error("youtube", e, t),
                         chat_id_int,
                         status_msg.message_id,
+                        reply_markup=_retry_markup("youtube", e, t, {
+                            "kind": "yt", "user_id": user_id, "video_id": video_id, "choice": choice,
+                            "section": section, "link_message_id": link_message_id,
+                            "picker_message_id": picker_message_id,
+                        }),
                     )
                 except Exception:
                     pass
@@ -8690,7 +8987,7 @@ def register_features(bot):
             return
 
         if _is_rate_limited(user_id):
-            _inline_fail(inline_message_id, t, t["rate_limited"].format(limit=RATE_LIMIT_COUNT))
+            _inline_fail(inline_message_id, t, t["rate_limited"].format(limit=_digits(t, RATE_LIMIT_COUNT)))
             return
 
         mode = data["mode"]
@@ -8789,7 +9086,7 @@ def register_features(bot):
                 logger.exception("Inline download failed | url=%s", url)
 
             if isinstance(e, platforms.FileTooLargeError):
-                _inline_fail(inline_message_id, t, t["too_large"].format(size=str(e)))
+                _inline_fail(inline_message_id, t, t["too_large"].format(size=_digits(t, str(e))))
             else:
                 _inline_fail(inline_message_id, t, _friendly_download_error(platform, e, t))
 
@@ -8887,7 +9184,7 @@ def register_features(bot):
             bot.answer_callback_query(call.id)
             return
         if _is_rate_limited(user_id):
-            bot.answer_callback_query(call.id, t["rate_limited"].format(limit=RATE_LIMIT_COUNT), show_alert=True)
+            bot.answer_callback_query(call.id, t["rate_limited"].format(limit=_digits(t, RATE_LIMIT_COUNT)), show_alert=True)
             return
         bot.answer_callback_query(call.id)
         _deliver_chosen_song(chat_id, user_id, call.message.message_id, entry["songs"][int(index)], t)
