@@ -726,7 +726,7 @@ TEXTS = {
         'cache_set_failed': "❌ نتونستم توی اون کانال پیام بفرستم. مطمئن شو ربات ادمین کانال باشه و اجازه‌ی ارسال پیام داشته باشه.\n\n{error}",
         'stats_groups': "گروه‌های فعال",
         'stats_inline': "ارسال‌های اینلاین",
-        'senddl_notice': "✅ مشکل لینک شما برطرف شد، فایلی که می‌خواستید در ادامه براتون ارسال می‌شه. 🦆",
+        'senddl_notice': "✅ مشکل لینکی که فرستاده بودید برطرف شد؛ فایلی که می‌خواستید بالا براتون ارسال شد. 🦆",
         'tiktok_blocked': "🌍 تیک‌تاک دسترسی به این ویدیو رو از منطقه‌ی سرور ربات بسته و فعلاً قابل دریافت نیست.",
         'tiktok_login': "🔞 تیک‌تاک این ویدیو رو فقط برای کاربران واردشده نمایش می‌ده (محدودیت سنی) و فعلاً قابل دریافت نیست.",
         'tiktok_photo_audio': "ℹ️ این پست تیک‌تاک عکسیه و صدای جداگانه‌ای برای دانلود نداره.",
@@ -1160,7 +1160,7 @@ TEXTS = {
         'cache_set_failed': "❌ I couldn't post in that channel. Make sure the bot is an admin there and allowed to post.\n\n{error}",
         'stats_groups': "Active groups",
         'stats_inline': "Inline sends",
-        'senddl_notice': "✅ The problem with your link has been fixed — the file you wanted is on its way. 🦆",
+        'senddl_notice': "✅ The problem with your link has been fixed — the file you wanted is right above. 🦆",
         'tiktok_blocked': "🌍 TikTok blocks this video in the bot server's region, so it can't be downloaded right now.",
         'tiktok_login': "🔞 TikTok only shows this video to logged-in users (age restriction), so it can't be downloaded right now.",
         'tiktok_photo_audio': "ℹ️ This TikTok post is a photo slideshow and has no separate audio to download.",
@@ -3059,31 +3059,52 @@ def register_features(bot):
 
     # Registered before handle_media_link: the command text contains links,
     # and handlers are matched in registration order.
+    # ------------------------------------------------------------------
+    # /senddl and the alert's "send to the user" button. The user hears
+    # nothing until the download has worked: it runs silently first (no
+    # status message, progress bar or error in their chat), the file is
+    # sent only if it succeeded, and the "your problem was fixed" notice
+    # comes after the file. If it still fails only the owner is told.
+    # ------------------------------------------------------------------
+
+    def _unreachable(error) -> bool:
+        text = str(error).lower()
+        return "blocked by the user" in text or "deactivated" in text or "chat not found" in text
+
     def _senddl_spotify(target_id, url, t):
-        """Spotify for /senddl: re-sent from the cache when the track was
-        already delivered, otherwise found and sent like a normal request."""
+        """(ok, detail) for a Spotify link: from the cache when the track was
+        delivered before, otherwise every track is downloaded first and the
+        files are sent only if all of them were found."""
         key = platforms.media_cache_key(url, "audio")
         cached = media_cache.get(key) if key else None
 
         if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
             try:
                 _send_cached_result(target_id, None, url, "spotify", cached, t, show_ui=True)
-                _maybe_send_ad(target_id)
-                return f"✅ {url} (from the cache)"
-            except Exception:
+                return True, "from the cache"
+            except Exception as e:
+                if _unreachable(e):
+                    return False, f"the user can't be reached: {str(e)[:200]}"
                 logger.warning("Cached Spotify re-send failed for /senddl | %s", key, exc_info=True)
                 media_cache.pop(key, None)
 
+        downloaded = []
         try:
             tracks = platforms.resolve_spotify_tracks(url)
             if not tracks:
-                raise Exception("Spotify returned no playable tracks for this link.")
-
+                return False, "still failing: Spotify returned no playable tracks for this link."
             for track in tracks:
-                filepath = platforms.download_spotify_track(track, None)
-                cover = None
                 try:
-                    cover = platforms.make_thumbnail(track.get("cover_url"))
+                    downloaded.append((track, platforms.download_spotify_track(track, None)))
+                except Exception as e:
+                    return False, (
+                        f"still failing: {track.get('artists')} - {track.get('name')}: {str(e)[:250]}"
+                        + (f" ({len(downloaded)}/{len(tracks)} tracks were found)" if len(tracks) > 1 else "")
+                    )
+
+            for track, filepath in downloaded:
+                cover = platforms.make_thumbnail(track.get("cover_url"))
+                try:
                     caption = f"💿 {track['album']}\n\n{BOT_SIGNATURE}" if track.get("album") else BOT_SIGNATURE
                     with open(filepath, "rb") as audio_file:
                         thumb_file = open(cover, "rb") if cover else None
@@ -3098,7 +3119,7 @@ def register_features(bot):
                             if thumb_file:
                                 thumb_file.close()
                 finally:
-                    platforms.remove_download_files([filepath, cover])
+                    platforms.remove_download_files([cover])
 
                 ref = _file_ref(sent)
                 if len(tracks) == 1 and key and ref:
@@ -3113,20 +3134,108 @@ def register_features(bot):
                     }
                 _archive_to_cache_channel(key if len(tracks) == 1 else None, target_id, [sent.message_id])
                 store.record_download("spotify", target_id)
-
-            _maybe_send_ad(target_id)
-            return f"✅ {url}"
+            return True, ""
         except Exception as e:
             logger.exception("Spotify /senddl failed | %s", url)
-            return f"❌ {url}\n{str(e)[:300]}"
+            if _unreachable(e):
+                return False, f"the user can't be reached: {str(e)[:200]}"
+            return False, f"downloaded, but sending failed: {str(e)[:250]}"
+        finally:
+            platforms.remove_download_files([path for _, path in downloaded])
+
+    def _senddl_one(target_id, url, target_user, t):
+        """(ok, detail) for one link: downloaded silently, sent only if the
+        download worked."""
+        platform = platforms.detect_platform(url)
+        if platform == "spotify":
+            return _senddl_spotify(target_id, url, t)
+        if "tiktok.com" in url.lower():
+            url = platforms.resolve_tiktok_url(url)
+
+        if platform == "instagram":
+            quality = "480p" if target_user.get("low_data_mode", False) else target_user.get("instagram_quality", "best")
+        else:
+            quality = target_user.get("quality", "best")
+        cache_key = platforms.media_cache_key(url, quality)
+
+        cached = media_cache.get(cache_key) if cache_key else None
+        if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
+            try:
+                _send_cached_result(target_id, None, url, platform, cached, t, show_ui=True)
+                return True, "from the cache"
+            except Exception as e:
+                if _unreachable(e):
+                    return False, f"the user can't be reached: {str(e)[:200]}"
+                logger.warning("Cached re-send failed for /senddl; downloading | %s", cache_key, exc_info=True)
+                media_cache.pop(cache_key, None)
+
+        slot = _acquire_download_slot(bot, target_id, None, t, show_ui=False, platform=platform)
+        if slot is None:
+            return False, "the download queue is full right now; try again in a minute."
+        files = []
+        try:
+            try:
+                info, entries, files, quality_used = platforms.download_direct(
+                    url, quality=quality, allow_fallback=flags.get("auto_quality_fallback", False),
+                )
+            except Exception as e:
+                platforms.remove_download_files(files)
+                return False, f"still failing: {str(e)[:300]}"
+
+            try:
+                _send_download_result(
+                    target_id, None, url, platform, quality, quality_used,
+                    info, entries, files, t, show_ui=True, cache_key=cache_key,
+                )
+            except Exception as e:
+                if _unreachable(e):
+                    return False, f"the user can't be reached: {str(e)[:200]}"
+                return False, f"downloaded, but sending failed: {str(e)[:250]}"
+            return True, ""
+        finally:
+            slot.release()
+
+    def _send_downloads_to_user(target_id, urls):
+        """Delivers each link to that user only if it downloads fine; the
+        "fixed" notice follows the files. Used by /senddl and the error
+        alert's button. Returns (report for the owner, all_succeeded)."""
+        target_user = store.get_user(user_settings, target_id)
+        target_t = TEXTS.get(target_user.get("lang"), TEXTS[store.DEFAULT_LANGUAGE])
+        results, delivered, unreachable = [], 0, 0
+
+        for url in urls:
+            try:
+                ok, detail = _senddl_one(target_id, url, target_user, target_t)
+            except Exception as e:
+                logger.exception("/senddl failed | %s", url)
+                ok, detail = False, f"still failing: {str(e)[:300]}"
+            delivered += ok
+            unreachable += (not ok) and detail.startswith("the user can't be reached")
+            results.append(f"✅ {url}" + (f" ({detail})" if ok and detail else "") if ok else f"❌ {url}\n{detail}")
+
+        if delivered:
+            try:
+                bot.send_message(target_id, target_t["senddl_notice"])
+            except Exception:
+                pass
+            _maybe_send_ad(target_id)
+
+        header = f"/senddl → {target_id}"
+        if not delivered and unreachable == len(urls):
+            header += "\n⚠️ کاربر در دسترس نیست (احتمالاً ربات رو بلاک کرده)؛ هیچ چیزی فرستاده نشد."
+        elif not delivered:
+            header += "\n⚠️ دانلود هنوز مشکل داره؛ هیچ چیزی برای کاربر فرستاده نشد."
+        elif delivered < len(urls):
+            header += f"\n⚠️ فقط {delivered} از {len(urls)} لینک برای کاربر فرستاده شد."
+        return header + "\n\n" + "\n\n".join(results), delivered == len(urls)
 
     @bot.message_handler(commands=["senddl"])
     def owner_send_download(message):
         """/senddl <user_id> <link> [<link> ...] — owner only.
 
-        Downloads each link and delivers it to that user exactly as a normal
-        download (caption, buttons, duck reactions, post-download ad), e.g.
-        to make up for requests that failed because of a bot bug."""
+        Delivers each link to that user as a normal download (caption,
+        buttons, post-download ad), e.g. to make up for requests that failed
+        because of a bot bug - but only once it downloads fine."""
         if not admin.is_owner(message.from_user.id):
             return
 
@@ -3150,57 +3259,13 @@ def register_features(bot):
             bot.reply_to(message, "❌ No supported link found.")
             return
 
+        progress = bot.reply_to(message, "⏳ اول دانلود رو امتحان می‌کنم؛ تا موفق نشه چیزی برای کاربر نمیره...")
         report, _ = _send_downloads_to_user(target_id, urls)
-        bot.reply_to(message, report, disable_web_page_preview=True)
-
-    def _send_downloads_to_user(target_id, urls):
-        """Downloads each link and delivers it to that user as a normal
-        download, after a "your problem was fixed" notice. Used by /senddl
-        and the error alert's button. Returns (report, all_succeeded)."""
-        target_user = store.get_user(user_settings, target_id)
-        target_t = TEXTS.get(target_user.get("lang"), TEXTS[store.DEFAULT_LANGUAGE])
-        results = []
-
         try:
-            bot.send_message(target_id, target_t["senddl_notice"])
-        except Exception as e:
-            # Usually "bot was blocked by the user" — nothing will reach them.
-            return f"❌ Could not message {target_id}: {str(e)[:300]}", False
-
-        for url in urls:
-            platform = platforms.detect_platform(url)
-
-            if platform == "spotify":
-                results.append(_senddl_spotify(target_id, url, target_t))
-                continue
-
-            if platform == "instagram":
-                quality = (
-                    "480p"
-                    if target_user.get("low_data_mode", False)
-                    else target_user.get("instagram_quality", "best")
-                )
-            else:
-                quality = target_user.get("quality", "best")
-
-            ok, error = _run_direct_download(
-                target_id,
-                None,
-                url,
-                quality,
-                target_t,
-                None,
-                show_ui=True,
-            )
-
-            results.append(
-                f"✅ {url}"
-                if ok
-                else f"❌ {url}\n{str(error)[:300]}"
-            )
-
-        report = f"/senddl → {target_id}\n\n" + "\n\n".join(results)
-        return report, all(r.startswith("✅") for r in results)
+            bot.delete_message(message.chat.id, progress.message_id)
+        except Exception:
+            pass
+        bot.reply_to(message, report, disable_web_page_preview=True)
 
     _senddl_running = set()
 
