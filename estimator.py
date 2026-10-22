@@ -332,6 +332,17 @@ class Job:
 
 # --- accuracy report ---
 
+def throughput(key, min_mb=20, window=50):
+    """Median MB/s of the fetch phase of recent `key` jobs bigger than
+    `min_mb` (how fast the server really downloads from a platform), or
+    None without enough data."""
+    with _lock:
+        _load_locked()
+        rows = _recent(lambda s: s.get("key") == key and s.get("fetch") and s.get("mb", 0) >= min_mb, window)
+    speeds = [s["mb"] / s["fetch"] for s in rows if s["fetch"] > 0]
+    return statistics.median(speeds) if len(speeds) >= 5 else None
+
+
 def accuracy(days=7, offset_days=0) -> dict:
     """Median error of the first estimate (what the user sees at the start)
     and of the refined one, plus the share within +-25%, for jobs that

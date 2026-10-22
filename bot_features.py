@@ -973,6 +973,7 @@ TEXTS = {
         'yt_range_caption': "✂️ فقط این تیکه: {start} تا {end} ({length})",
         'yt_range_set': "✅ باشه؛ فقط {start} تا {end} ({length}) برات فرستاده میشه.\nحالا کیفیت رو از بالا انتخاب کن 👆",
         'yt_range_note': "✂️ {start} تا {end}",
+        'yt_already_downloading': "⏳ همین الان داره دانلود میشه؛ یه کم صبر کن.",
         'ring_ask_platform': "🔔 گوشیت آیفونه یا اندروید؟\nفایل رو مناسب گوشیت می‌سازم.",
         'ring_iphone_btn': "📱 آیفون",
         'ring_android_btn': "🤖 اندروید",
@@ -1485,6 +1486,7 @@ TEXTS = {
         'yt_range_caption': "✂️ Only this part: {start} to {end} ({length})",
         'yt_range_set': "✅ OK, you'll get only {start} to {end} ({length}).\nNow pick a quality above 👆",
         'yt_range_note': "✂️ {start} to {end}",
+        'yt_already_downloading': "⏳ It's already downloading; hang on a moment.",
         'ring_ask_platform': "🔔 iPhone or Android?\nI'll make the right file for your phone.",
         'ring_iphone_btn': "📱 iPhone",
         'ring_android_btn': "🤖 Android",
@@ -7928,6 +7930,26 @@ def register_features(bot):
             )
             return
 
+        # A second tap while the first is still downloading would start a
+        # second, competing download of the same thing.
+        inflight_key = (chat_id_int, user_id, video_id, choice)
+        with _yt_inflight_lock:
+            busy = inflight_key in _yt_inflight
+            if not busy:
+                _yt_inflight.add(inflight_key)
+        if busy:
+            bot.answer_callback_query(call.id, t["yt_already_downloading"])
+            return
+        try:
+            _start_youtube_pick(call, chat_id_int, user_id, video_id, choice, t, show_ui)
+        finally:
+            with _yt_inflight_lock:
+                _yt_inflight.discard(inflight_key)
+
+    _yt_inflight = set()
+    _yt_inflight_lock = threading.Lock()
+
+    def _start_youtube_pick(call, chat_id_int, user_id, video_id, choice, t, show_ui):
         bot.answer_callback_query(call.id)
 
         link_message_id = None

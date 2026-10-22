@@ -1912,6 +1912,19 @@ def _ig_story_reel(ydl, url, username, path_id):
                 "This story isn't available: private account (the bot's Instagram account doesn't follow it)."
             )
         tried.append((name, outcome))
+    # The page route works (it found stories within the last day) and the
+    # API answered "ok" with nothing: the story was deleted, expired early
+    # or is for close friends only - not a broken route, and yt-dlp would
+    # only fail with a misleading "log in".
+    page_health = ig_story_route_health().get("page") or {}
+    if (
+        ("page", "inconclusive") in tried
+        and any(n.endswith("_api") and o == "inconclusive" for n, o in tried)
+        and time.time() - page_health.get("last_ok", 0) < 24 * 3600
+        and page_health.get("demoted_until", 0) <= time.time()
+    ):
+        logger.info("Story: no route has it while the page route is healthy; treating it as gone")
+        return None
     raise IgRouteBroken("no story route worked (" + ", ".join(f"{n}: {o}" for n, o in tried) + ")")
 
 
@@ -2827,15 +2840,33 @@ YOUTUBE_EXACT_SECTION_SECONDS = 60
 # (chunked, fast, with progress) and cutting it here is far quicker - as
 # long as the whole file is a reasonable size. Audio is small: always whole.
 YOUTUBE_SECTION_FULL_MAX_BYTES = int(os.environ.get("YOUTUBE_SECTION_FULL_MAX_MB", "500") or 500) * 1024 * 1024
+# ...and only if the whole file downloads within this many seconds at the
+# server's measured YouTube speed (2-4 MB/s on this VPS, sometimes far less:
+# a 1 GB file would take 5+ minutes, more than the section download).
+YOUTUBE_SECTION_FULL_MAX_SECONDS = 40
+YOUTUBE_DEFAULT_MB_PER_SECOND = 2.5
+
+
+def youtube_download_speed() -> float:
+    """MB/s the server gets from YouTube, learned from real downloads."""
+    try:
+        import estimator  # here: optional, and estimator is standalone
+        measured = estimator.throughput("youtube:video")
+    except Exception:
+        measured = None
+    return measured or YOUTUBE_DEFAULT_MB_PER_SECOND
 
 
 def youtube_section_strategy(video_id: str, choice: str) -> str:
     """"full" (download the whole file, then cut it here) or "ranges"
-    (only the section, through yt-dlp/ffmpeg)."""
+    (only the section, through yt-dlp/ffmpeg), whichever should be faster."""
     if choice == "audio":
         return "full"
     size = youtube_option_size(video_id, choice)
-    return "full" if size and size <= YOUTUBE_SECTION_FULL_MAX_BYTES else "ranges"
+    if not size:
+        return "ranges"
+    limit = min(YOUTUBE_SECTION_FULL_MAX_BYTES, youtube_download_speed() * YOUTUBE_SECTION_FULL_MAX_SECONDS * 1024 * 1024)
+    return "full" if size <= limit else "ranges"
 
 
 def _cut_audio_file(path: str, start: float, end: float) -> str:
@@ -2906,9 +2937,9 @@ def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=
     if section:
         size = youtube_option_size(video_id, height_or_audio)
         logger.info(
-            "YouTube section | %s | %s | %.0f-%.0fs | option %s | %s",
+            "YouTube section | %s | %s | %.0f-%.0fs | option %s | server speed %.1f MB/s | %s",
             video_id, height_or_audio, section[0], section[1],
-            f"{size / 1024 / 1024:.0f} MB" if size else "size unknown",
+            f"{size / 1024 / 1024:.0f} MB" if size else "size unknown", youtube_download_speed(),
             "whole file, then cut here" if full_then_cut else "yt-dlp section download (ffmpeg)",
         )
 
