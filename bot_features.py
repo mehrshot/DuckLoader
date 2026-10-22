@@ -30,6 +30,7 @@ from telebot.types import (
     InlineQueryResultCachedVideo,
     InlineQueryResultsButton,
     InputTextMessageContent,
+    MessageEntity,
     ReactionTypeEmoji,
     SwitchInlineQueryChosenChat,
 )
@@ -2763,12 +2764,26 @@ def register_features(bot):
         lines += ["", f"❌ {str(event.get('error') or '')[:700]}"]
         if repeats:
             lines += ["", f"🔁 {repeats} خطای مشابه دیگه از آخرین هشدار (بدون پیام جدا)"]
+        senddl = None
         if event.get("url") and isinstance(user_id, int) and user_id > 0:
-            lines += ["", f"اگه مشکل رو حل کردی، برای فرستادن فایل به کاربر:\n/senddl {user_id} {event['url']}"]
+            senddl = f"/senddl {user_id} {event['url']}"
+            lines += ["", "اگه مشکل رو حل کردی، برای فرستادن فایل به کاربر (بزن تا کپی بشه):", senddl]
+
+        text = "\n".join(lines)
+        entities = None
+        if senddl:
+            # Monospace: one tap copies the whole command. Offsets are in
+            # UTF-16 units (emoji count twice).
+            start = text.rindex(senddl)
+            entities = [MessageEntity(
+                "code",
+                len(text[:start].encode("utf-16-le")) // 2,
+                len(senddl.encode("utf-16-le")) // 2,
+            )]
 
         def send():
             try:
-                bot.send_message(owner_id, "\n".join(lines), disable_web_page_preview=True)
+                bot.send_message(owner_id, text, entities=entities, disable_web_page_preview=True)
             except Exception:
                 logger.warning("Could not send an error alert to the owner", exc_info=True)
 
