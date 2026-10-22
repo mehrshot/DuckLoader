@@ -1873,6 +1873,21 @@ def _ig_story_reel(ydl, url, username, path_id):
     raise IgRouteBroken("no story route worked (" + ", ".join(f"{n}: {o}" for n, o in tried) + ")")
 
 
+# Instagram media ids carry their creation time: (milliseconds since this
+# epoch) << 23. A story lives 24 hours, so an older story link can't work.
+_IG_ID_EPOCH_MS = 1314220021721
+IG_STORY_LIFETIME = 25 * 3600
+
+
+def ig_media_created_at(pk) -> float | None:
+    """Unix time an Instagram media id was created, or None."""
+    try:
+        seconds = ((int(pk) >> 23) + _IG_ID_EPOCH_MS) / 1000
+    except (TypeError, ValueError):
+        return None
+    return seconds if 1314220021 < seconds < time.time() + 86400 else None
+
+
 def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
     """Fetches story / highlight items straight from Instagram's web API.
     Unlike yt-dlp's story extractor this also returns *photo* stories, and
@@ -1881,6 +1896,17 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
     if not match:
         raise Exception("Not a story URL.")
     username, path_id = match.group(1), match.group(2)
+
+    # An expired story is known from its id alone: no request, the right
+    # message for the user, and no alert to the owner. (Highlights keep
+    # old stories, so they are not checked.)
+    created = ig_media_created_at(wanted_pk) if username.lower() != "highlights" else None
+    if created and time.time() - created > IG_STORY_LIFETIME:
+        days = (time.time() - created) / 86400
+        raise Exception(
+            f"This story item is no longer available (it expired: posted "
+            f"{days:.0f} day(s) ago, stories last 24 hours)."
+        )
 
     global _ig_story_blocked_until
     if time.time() < _ig_story_blocked_until:
