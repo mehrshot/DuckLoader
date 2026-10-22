@@ -8169,6 +8169,7 @@ def register_features(bot):
         return markup
 
     def _show_cancelled(chat_id_int, status_msg, t):
+        _finish_duck_download(chat_id_int)  # the "downloading" duck
         if status_msg is None:
             return
         try:
@@ -8229,6 +8230,7 @@ def register_features(bot):
             return
         bot.answer_callback_query(call.id, t["dl_cancelled"])
         # Shown right away; the download itself stops at its next step.
+        _finish_duck_download(call.message.chat.id)
         try:
             bot.edit_message_text(t["dl_cancelled"], call.message.chat.id, call.message.message_id, reply_markup=None)
         except Exception:
