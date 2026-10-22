@@ -180,6 +180,52 @@ class PreviewOnlyError(Exception):
     """The platform only served a short preview instead of the full track."""
 
 
+# A failure that says nothing about the link itself - ffmpeg dying midway,
+# a dropped connection, a platform's momentary 5xx - rarely happens twice in
+# a row, so the download runs once more after a short pause before the user
+# is shown an error.
+TRANSIENT_RETRY_DELAY = 3
+_TRANSIENT_HINTS = (
+    "ffmpeg exited with code", "could not join", "could not cut", "conversion failed",
+    "connection reset", "connection aborted", "connection refused", "remote end closed",
+    "broken pipe", "timed out", "timeout", "incompleteread", "incomplete read", "short read",
+    "eof occurred", "temporary failure", "network is unreachable", "unable to download video data",
+    "giving up after",
+)
+_TRANSIENT_HTTP_HINTS = ("http error 500", "http error 502", "http error 503", "http error 504")
+# ...unless the text also says something retrying can't change.
+_PERMANENT_HINTS = (
+    "429", "too many requests", "rate-limit", "private", "log in", "login", "sign in", "not a bot",
+    "cookies", "video unavailable", "no longer available", "has been removed", "not found", "drm",
+    "expired",
+)
+
+
+def is_transient_error(platform: str, error: Exception) -> bool:
+    if isinstance(error, (FileTooLargeError, UnsupportedLinkError, PreviewOnlyError, NoAudioError)):
+        return False
+    text = str(error).lower()
+    if any(h in text for h in _PERMANENT_HINTS):
+        return False
+    # Instagram's own 5xx already went through its story routes; another
+    # full round would only add requests to a rate-limited account.
+    hints = _TRANSIENT_HINTS if platform == "instagram" else _TRANSIENT_HINTS + _TRANSIENT_HTTP_HINTS
+    return any(h in text for h in hints)
+
+
+def _retry_transient(platform: str, what: str, run):
+    try:
+        return run()
+    except Exception as e:
+        if not is_transient_error(platform, e):
+            raise
+        logger.warning("Transient failure, retrying in %ds | %s | %s", TRANSIENT_RETRY_DELAY, what, str(e)[:300])
+    time.sleep(TRANSIENT_RETRY_DELAY)
+    result = run()
+    logger.info("Retry after a transient failure worked | %s", what)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Owner alerts for broken authentication
 # ---------------------------------------------------------------------------
@@ -2648,6 +2694,13 @@ def _generic_selector(tier: str):
 
 
 def download_direct(url: str, quality: str = "best", allow_fallback: bool = False, progress_hook=None):
+    """See _download_direct; a transient failure is retried once."""
+    return _retry_transient(
+        _platform_of_url(url), url, lambda: _download_direct(url, quality, allow_fallback, progress_hook),
+    )
+
+
+def _download_direct(url: str, quality: str = "best", allow_fallback: bool = False, progress_hook=None):
     """
     Download media from Instagram / TikTok / SoundCloud (and YouTube when the
     user always wants audio only).
@@ -3193,6 +3246,14 @@ def _section_opts(section, audio):
 
 
 def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=None, section=None):
+    """See _download_youtube_quality; a transient failure is retried once."""
+    return _retry_transient(
+        "youtube", f"{video_id} {height_or_audio}",
+        lambda: _download_youtube_quality(video_id, height_or_audio, progress_hook, section),
+    )
+
+
+def _download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=None, section=None):
     """Download one specific YouTube resolution (or the audio); with
     `section` = (start, end) seconds, only that part."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
@@ -3690,8 +3751,12 @@ def download_matching_audio(track: dict, progress_hook=None, sources=("ytmusic",
 
 
 def download_spotify_track(track: dict, progress_hook=None) -> str:
-    """Find and download the matching audio for one Spotify track."""
-    return download_matching_audio(track, progress_hook)
+    """Find and download the matching audio for one Spotify track; a
+    transient failure is retried once."""
+    return _retry_transient(
+        "spotify", f"{track.get('artists')} - {track.get('name')}",
+        lambda: download_matching_audio(track, progress_hook),
+    )
 
 
 # ---------------------------------------------------------------------------
