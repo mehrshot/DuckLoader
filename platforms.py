@@ -46,6 +46,7 @@ import urllib.parse
 import requests
 import yt_dlp
 from yt_dlp.networking import Request as YDLRequest
+from yt_dlp.networking.exceptions import HTTPError as YDLHTTPError
 
 logger = logging.getLogger(__name__)
 
@@ -1583,9 +1584,20 @@ def _ig_api(ydl, url: str, referer: str, data: bytes | None = None) -> dict:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = YDLRequest(url, data=data, headers=headers, method="POST" if data is not None else "GET")
     _ig_impersonate(ydl, request)
-    with ydl.urlopen(request) as response:
-        final_url = getattr(response, "url", "") or ""
-        body = response.read()
+    try:
+        with ydl.urlopen(request) as response:
+            final_url = getattr(response, "url", "") or ""
+            body = response.read()
+    except YDLHTTPError as e:
+        # Keep what Instagram said: "HTTP Error 500" alone doesn't tell a
+        # hiccup from a refusal. (The status stays first, so "429" checks
+        # still work.)
+        detail = ""
+        try:
+            detail = e.response.read()[:300].decode("utf-8", "replace")
+        except Exception:
+            pass
+        raise Exception(f"HTTP Error {e.status}: {e.reason}" + (f" | {detail}" if detail else "")) from e
     if "/accounts/login" in final_url or "/challenge" in final_url:
         raise Exception("Instagram login required: the session was redirected to the login page.")
     try:
@@ -1625,11 +1637,16 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
                 else:
                     reel_id = _ig_resolve_user_id(ydl, username, url)
 
-                payload = _ig_api(
-                    ydl,
-                    f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={urllib.parse.quote(reel_id)}",
-                    url,
-                )
+                feed_url = f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={urllib.parse.quote(reel_id)}"
+                try:
+                    payload = _ig_api(ydl, feed_url, url)
+                except Exception as e:
+                    if not re.match(r"HTTP Error 5\d\d", str(e)):
+                        raise
+                    # Instagram's own server error: usually gone a moment later.
+                    logger.info("Story feed answered %s for %s; retrying once", str(e)[:200], reel_id)
+                    time.sleep(2)
+                    payload = _ig_api(ydl, feed_url, url)
                 reels = payload.get("reels") or {}
                 reel = reels.get(reel_id) or next(iter(reels.values()), None)
                 if not reel:
@@ -1731,7 +1748,9 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
         except Exception as e:
             api_error = e
             logger.info("Instagram story API path failed, falling back to yt-dlp: %s", str(e)[:300])
-            if "no longer available" in str(e) or "429" in str(e):
+            # yt-dlp's story extractor asks the same feed, so after these it
+            # would only fail again with a misleading "log in" message.
+            if "no longer available" in str(e) or "429" in str(e) or re.match(r"HTTP Error 5\d\d", str(e)):
                 raise Exception(f"[instagram:story] {e}") from e
 
     wanted_ids = {_ig_pk_to_shortcode(wanted_pk)} if wanted_pk else None
