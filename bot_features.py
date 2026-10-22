@@ -2781,9 +2781,16 @@ def register_features(bot):
                 len(senddl.encode("utf-16-le")) // 2,
             )]
 
+        markup = None
+        if senddl:
+            # What the button sends, kept on disk so it works after a restart.
+            token = secrets.token_urlsafe(6)
+            media_cache[f"senddl:{token}"] = {"time": time.time(), "user_id": user_id, "url": event["url"]}
+            markup = _senddl_markup(token)
+
         def send():
             try:
-                bot.send_message(owner_id, text, entities=entities, disable_web_page_preview=True)
+                bot.send_message(owner_id, text, entities=entities, reply_markup=markup, disable_web_page_preview=True)
             except Exception:
                 logger.warning("Could not send an error alert to the owner", exc_info=True)
 
@@ -3143,6 +3150,13 @@ def register_features(bot):
             bot.reply_to(message, "❌ No supported link found.")
             return
 
+        report, _ = _send_downloads_to_user(target_id, urls)
+        bot.reply_to(message, report, disable_web_page_preview=True)
+
+    def _send_downloads_to_user(target_id, urls):
+        """Downloads each link and delivers it to that user as a normal
+        download, after a "your problem was fixed" notice. Used by /senddl
+        and the error alert's button. Returns (report, all_succeeded)."""
         target_user = store.get_user(user_settings, target_id)
         target_t = TEXTS.get(target_user.get("lang"), TEXTS[store.DEFAULT_LANGUAGE])
         results = []
@@ -3151,8 +3165,7 @@ def register_features(bot):
             bot.send_message(target_id, target_t["senddl_notice"])
         except Exception as e:
             # Usually "bot was blocked by the user" — nothing will reach them.
-            bot.reply_to(message, f"❌ Could not message {target_id}: {str(e)[:300]}")
-            return
+            return f"❌ Could not message {target_id}: {str(e)[:300]}", False
 
         for url in urls:
             platform = platforms.detect_platform(url)
@@ -3186,11 +3199,63 @@ def register_features(bot):
                 else f"❌ {url}\n{str(error)[:300]}"
             )
 
-        bot.reply_to(
-            message,
-            f"/senddl → {target_id}\n\n" + "\n\n".join(results),
-            disable_web_page_preview=True,
-        )
+        report = f"/senddl → {target_id}\n\n" + "\n\n".join(results)
+        return report, all(r.startswith("✅") for r in results)
+
+    _senddl_running = set()
+
+    def _senddl_markup(token, state="ready"):
+        label = {"ready": "📤 ارسال برای کاربر", "running": "⏳ در حال ارسال...", "done": "✅ برای کاربر ارسال شد"}[state]
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(label, callback_data=f"sendfix_{token}"))
+        return markup
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("sendfix_"))
+    def handle_alert_send_button(call):
+        """The error alert's "send to the user" button: /senddl in one tap."""
+        if not admin.is_owner(call.from_user.id):
+            bot.answer_callback_query(call.id)
+            return
+
+        token = call.data[len("sendfix_"):]
+        job = media_cache.get(f"senddl:{token}")
+        if not job:
+            bot.answer_callback_query(call.id, "این دکمه دیگه معتبر نیست؛ از دستور /senddl استفاده کن.", show_alert=True)
+            return
+        if job.get("done"):
+            bot.answer_callback_query(call.id, "✅ قبلاً برای کاربر ارسال شده.", show_alert=True)
+            return
+        if token in _senddl_running:
+            bot.answer_callback_query(call.id, "⏳ در حال ارسال...")
+            return
+
+        _senddl_running.add(token)
+        bot.answer_callback_query(call.id, "⏳ در حال دانلود و ارسال برای کاربر...")
+        chat_id, message_id = call.message.chat.id, call.message.message_id
+
+        def set_button(state):
+            try:
+                bot.edit_message_reply_markup(chat_id, message_id, reply_markup=_senddl_markup(token, state))
+            except Exception:
+                pass
+
+        set_button("running")
+        try:
+            report, ok = _send_downloads_to_user(job["user_id"], [job["url"]])
+        except Exception as e:
+            logger.exception("Alert send button failed")
+            report, ok = f"❌ {str(e)[:300]}", False
+        finally:
+            _senddl_running.discard(token)
+
+        if ok:
+            job["done"] = True
+            media_cache[f"senddl:{token}"] = job
+        set_button("done" if ok else "ready")
+        try:
+            bot.send_message(chat_id, report, reply_to_message_id=message_id, disable_web_page_preview=True)
+        except Exception:
+            logger.warning("Could not report the alert send result", exc_info=True)
 
     def _delete_duck_message(
         message_map,
