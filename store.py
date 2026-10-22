@@ -57,6 +57,8 @@ DEFAULT_FLAGS = {
     "video_to_audio": True,
     "song_finder": True,
     "error_alerts": True,
+    "song_search": True,
+    "media_tools": True,
 }
 
 

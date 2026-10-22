@@ -170,6 +170,8 @@ def _acrcloud(sample_path):
 def recognize(media_path):
     """The song in an audio/video file, or None. Raises NoAudioError for a
     silent video."""
+    if platforms.has_audio_stream(media_path) is False:
+        raise platforms.NoAudioError("This video has no sound track.")
     job_dir = platforms._new_job_dir()
     try:
         for index, offset in enumerate(_sample_offsets(_duration(media_path))):
@@ -339,6 +341,56 @@ def from_caption(text):
                 logger.info("Song found from the caption (%s): %s - %s", query, song["artist"], song["title"])
                 return song
     return None
+
+
+# --- search by name -------------------------------------------------------
+
+def search(query, limit=5):
+    """Songs on YouTube Music for a free-text query ("شادمهر تنها ماندم"),
+    as song dicts with their video id, best match first."""
+    if not platforms._ytmusic_available():
+        return []
+    from ytmusicapi import YTMusic
+
+    try:
+        results = YTMusic().search(query, filter="songs", limit=limit + 3)
+    except Exception as e:
+        logger.warning("Song search failed | %s | %s", query, str(e)[:200])
+        return []
+    songs = []
+    for result in results:
+        if not result.get("videoId") or not result.get("title"):
+            continue
+        thumbnails = result.get("thumbnails") or []
+        songs.append({
+            "title": result["title"].strip(),
+            "artist": ", ".join(a["name"] for a in result.get("artists") or [] if a.get("name")),
+            "album": (result.get("album") or {}).get("name"),
+            "cover_url": thumbnails[-1]["url"] if thumbnails else None,
+            "duration_ms": (result.get("duration_seconds") or 0) * 1000 or None,
+            "video_id": result["videoId"],
+            "engine": "search",
+        })
+        if len(songs) >= limit:
+            break
+    return songs
+
+
+def download(song):
+    """The full song as a tagged audio file: exactly the chosen YouTube
+    Music track when its id is known, otherwise found by name and artist
+    with the Spotify matcher."""
+    if not song.get("video_id"):
+        return platforms.download_matching_audio(as_track(song))
+    _, _, files = platforms._youtube_download(
+        f"https://www.youtube.com/watch?v={song['video_id']}", "bestaudio[ext=m4a]/bestaudio/best", True,
+    )
+    path = files[0]
+    platforms.tag_audio_file(
+        path, title=song["title"], artist=song.get("artist", ""), album=song.get("album") or "",
+        cover_url=song.get("cover_url"),
+    )
+    return path
 
 
 def as_track(song):

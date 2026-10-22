@@ -440,6 +440,26 @@ def fit_photo_for_telegram(path: str) -> str:
 _M4A_COPY_CODECS = {"aac", "mp3", "alac"}
 
 
+def has_audio_stream(path: str):
+    """True/False whether a file has a sound track, None if unknown (no
+    ffprobe). Checked up front: ffmpeg's error wording for a missing
+    stream differs between versions."""
+    ffprobe_exe = _ffmpeg_exe("ffprobe")
+    if not ffprobe_exe:
+        return None
+    try:
+        out = subprocess.run(
+            [ffprobe_exe, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+             "-print_format", "json", path],
+            capture_output=True, text=True, timeout=60,
+        )
+        if out.returncode != 0:
+            return None
+        return bool(json.loads(out.stdout or "{}").get("streams"))
+    except Exception:
+        return None
+
+
 def extract_audio_from_video(video_path: str, voice: bool = False):
     """Returns (audio_path, cover_path or None, duration_seconds or None).
 

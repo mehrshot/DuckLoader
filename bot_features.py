@@ -40,6 +40,7 @@ import ads
 import campaigns
 import estimator
 import media_store
+import media_tools
 import song_finder
 import platforms
 import store
@@ -716,6 +717,12 @@ TEXTS = {
             "هر ویدیویی رو اینجا بفرست یا فوروارد کن تا صداش رو به‌صورت فایل صوتی یا ویس برات جدا کنم.\n\n"
             "🎶 آهنگ این ویدیو (جدید)\n"
             "زیر ویدیوهای اینستاگرام، تیک‌تاک و یوتیوب دکمه‌ی «🎶 آهنگ این ویدیو» رو بزن تا آهنگش رو پیدا کنم و فایل کاملش رو بفرستم.\n\n"
+            "🎙 شازم داخل تلگرام (جدید)\n"
+            "یه ویس از آهنگی که دور و برت پخش میشه ضبط کن و بفرست؛ آهنگ کامل رو برات پیدا می‌کنم.\n\n"
+            "🔍 جستجوی آهنگ (جدید)\n"
+            "اسم خواننده و آهنگ رو بنویس (مثلاً: شادمهر تنها ماندم) و از بین نتیجه‌ها انتخاب کن.\n\n"
+            "✂️ برش، گیف و رینگتون (جدید)\n"
+            "زیر ویدیوها دکمه‌ی «✂️ برش، گیف، رینگتون» رو بزن و بازه‌ی زمانی رو بفرست.\n\n"
             "⚙️ /settings — زبان و کیفیت اینستاگرام\n"
             "💬 /feedback — پیشنهاد یا گزارش مشکل"
         ),
@@ -938,6 +945,46 @@ TEXTS = {
         'v2a_song_btn': "🎶 آهنگش چیه؟",
         'toggle_song_finder': "🎵 پیدا کردن آهنگ ویدیو",
         'toggle_error_alerts': "🚨 هشدار فوری خطاها برای ادمین",
+        'toggle_song_search': "🔍 جستجوی آهنگ با اسم",
+        'toggle_media_tools': "✂️ برش، گیف و رینگتون",
+        'song_steps_voice': [
+            "🎧 دارم به ویس گوش می‌دم...",
+            "🔎 در حال شناسایی آهنگ...",
+            "🎼 در حال مقایسه با میلیون‌ها آهنگ...",
+            "✨ تقریباً تمومه...",
+        ],
+        'song_not_found_voice': "🎵 آهنگی توی این ویس پیدا نکردم.\n\nنزدیک‌تر به منبع صدا، با سروصدای کمتر و حداقل ۱۰ ثانیه ضبط کن و دوباره بفرست.",
+        'voice_too_short': "🎙 این ویس خیلی کوتاهه؛ حداقل ۵ ثانیه از آهنگ رو ضبط کن.",
+        'search_searching': "🔍 در حال جستجوی «{query}»...",
+        'search_results': "🔍 نتیجه‌های «{query}»\nآهنگی که می‌خوای رو انتخاب کن 👇",
+        'search_none': "🔍 آهنگی با اسم «{query}» پیدا نکردم.\nاسم خواننده و آهنگ رو با هم بنویس؛ مثلاً: شادمهر تنها ماندم",
+        'search_expired': "⚠️ این نتیجه‌ها دیگه معتبر نیستن؛ دوباره اسم آهنگ رو بفرست.",
+        'search_slow_down': "⏳ خیلی پشت سر هم جستجو کردی؛ چند دقیقه دیگه دوباره امتحان کن.",
+        'tools_btn': "✂️ برش، گیف، رینگتون",
+        'tools_menu': "✂️ از این ویدیو چی بسازم؟",
+        'tool_cut_btn': "✂️ برش ویدیو",
+        'tool_gif_btn': "🎞 گیف",
+        'tool_ring_btn': "🔔 رینگتون",
+        'tool_cancel_btn': "❌ لغو",
+        'tool_ask_cut': "✂️ زمان شروع و پایان برش رو بفرست؛ مثلاً:\n0:15-0:45\n\n(حداکثر {limit} ثانیه)",
+        'tool_ask_gif': "🎞 بازه‌ی گیف رو بفرست؛ مثلاً:\n0:05-0:12\n\n(حداکثر {limit} ثانیه، بدون صدا)",
+        'tool_ask_ring': "🔔 رینگتون از کجای ویدیو شروع بشه؟ مثلاً:\n0:40\n(۳۰ ثانیه از همون‌جا)\n\nیا یه بازه‌ی دقیق: 0:40-1:05 (حداکثر {limit} ثانیه)",
+        'tool_cancelled': "❌ لغو شد.",
+        'tool_bad_time': "⚠️ زمان رو نفهمیدم. به این شکل بفرست: 0:15-0:45",
+        'tool_end_before_start': "⚠️ زمان پایان باید بعد از زمان شروع باشه.",
+        'tool_too_long': "⚠️ این بازه طولانیه؛ حداکثر {limit} ثانیه.",
+        'tool_after_end': "⚠️ این ویدیو فقط {duration} ثانیه‌ست؛ یه زمان شروع کوچیک‌تر بفرست.",
+        'tool_steps': [
+            "📥 در حال آماده کردن ویدیو...",
+            "⚙️ در حال ساختن...",
+            "✨ تقریباً آماده‌ست...",
+        ],
+        'tool_failed': "❌ ساختنش انجام نشد. یه بار دیگه امتحان کن.",
+        'tool_expired': "⚠️ این دکمه دیگه معتبر نیست؛ ویدیو یا لینک رو دوباره بفرست.",
+        'tool_disabled': "⚠️ این قابلیت فعلاً غیرفعاله.",
+        'tool_ring_title': "رینگتون",
+        'tool_ring_caption': "🔔 رینگتون ({range})\n🤖 اندروید: همین فایل رو به‌عنوان زنگ انتخاب کن.",
+        'tool_ring_iphone': "📱 نسخه‌ی آیفون (m4r): با GarageBand یا iTunes به‌عنوان رینگتون بذارش.",
         'song_btn': "🎶 آهنگ این ویدیو",
         'song_steps': [
             "🎧 دارم به ویدیو گوش می‌دم...",
@@ -1150,6 +1197,12 @@ TEXTS = {
             "Send or forward any video here and I'll extract its sound as an audio file or a voice message.\n\n"
             "🎶 Song in this video (new)\n"
             "Under Instagram, TikTok and YouTube videos, tap \"🎶 Song in this video\" and I'll find the song and send you the full track.\n\n"
+            "🎙 Shazam inside Telegram (new)\n"
+            "Record a voice message of a song playing around you and I'll find the full track.\n\n"
+            "🔍 Song search (new)\n"
+            "Write the artist and the song (e.g. Adele Hello) and pick from the results.\n\n"
+            "✂️ Cut, GIF and ringtone (new)\n"
+            "Tap \"✂️ Cut, GIF, ringtone\" under a video and send the time range.\n\n"
             "⚙️ /settings — language and Instagram quality\n"
             "💬 /feedback — suggestions and problem reports"
         ),
@@ -1371,6 +1424,46 @@ TEXTS = {
         'v2a_song_btn': "🎶 What's the song?",
         'toggle_song_finder': "🎵 Song in this video",
         'toggle_error_alerts': "🚨 Instant error alerts to the owner",
+        'toggle_song_search': "🔍 Song search by name",
+        'toggle_media_tools': "✂️ Cut, GIF and ringtone",
+        'song_steps_voice': [
+            "🎧 Listening to your voice message...",
+            "🔎 Recognizing the song...",
+            "🎼 Comparing with millions of songs...",
+            "✨ Almost done...",
+        ],
+        'song_not_found_voice': "🎵 I couldn't find a song in this voice message.\n\nRecord at least 10 seconds, closer to the music and with less noise, and send it again.",
+        'voice_too_short': "🎙 This voice message is too short; record at least 5 seconds of the song.",
+        'search_searching': "🔍 Searching for \"{query}\"...",
+        'search_results': "🔍 Results for \"{query}\"\nPick the song you want 👇",
+        'search_none': "🔍 I couldn't find a song called \"{query}\".\nWrite the artist and the song together, e.g.: Adele Hello",
+        'search_expired': "⚠️ These results have expired; send the song name again.",
+        'search_slow_down': "⏳ That's a lot of searches in a row; try again in a few minutes.",
+        'tools_btn': "✂️ Cut, GIF, ringtone",
+        'tools_menu': "✂️ What should I make from this video?",
+        'tool_cut_btn': "✂️ Cut the video",
+        'tool_gif_btn': "🎞 GIF",
+        'tool_ring_btn': "🔔 Ringtone",
+        'tool_cancel_btn': "❌ Cancel",
+        'tool_ask_cut': "✂️ Send the start and end of the cut, e.g.:\n0:15-0:45\n\n(up to {limit} seconds)",
+        'tool_ask_gif': "🎞 Send the GIF's range, e.g.:\n0:05-0:12\n\n(up to {limit} seconds, no sound)",
+        'tool_ask_ring': "🔔 Where in the video should the ringtone start? e.g.:\n0:40\n(30 seconds from there)\n\nor an exact range: 0:40-1:05 (up to {limit} seconds)",
+        'tool_cancelled': "❌ Cancelled.",
+        'tool_bad_time': "⚠️ I didn't understand the time. Send it like this: 0:15-0:45",
+        'tool_end_before_start': "⚠️ The end has to be after the start.",
+        'tool_too_long': "⚠️ That range is too long; up to {limit} seconds.",
+        'tool_after_end': "⚠️ This video is only {duration} seconds long; send an earlier start.",
+        'tool_steps': [
+            "📥 Preparing the video...",
+            "⚙️ Making it...",
+            "✨ Almost ready...",
+        ],
+        'tool_failed': "❌ Couldn't make it. Please try again.",
+        'tool_expired': "⚠️ This button has expired; send the video or link again.",
+        'tool_disabled': "⚠️ This feature is turned off for now.",
+        'tool_ring_title': "Ringtone",
+        'tool_ring_caption': "🔔 Ringtone ({range})\n🤖 Android: choose this file as your ringtone.",
+        'tool_ring_iphone': "📱 iPhone version (m4r): set it as a ringtone with GarageBand or iTunes.",
         'song_btn': "🎶 Song in this video",
         'song_steps': [
             "🎧 Listening to the video...",
@@ -3697,7 +3790,7 @@ def register_features(bot):
         finally:
             platforms.remove_download_files(files)
 
-    def _result_markup(t, url, post_id, has_thumb, offer_audio_button, show_ui, single_video, song=False):
+    def _result_markup(t, url, post_id, has_thumb, offer_audio_button, show_ui, single_video, song=False, tools=False):
         if show_ui:
             markup = InlineKeyboardMarkup()
 
@@ -3706,6 +3799,14 @@ def register_features(bot):
                     InlineKeyboardButton(
                         text=t["song_btn"],
                         callback_data=f"{SONG_PREFIX}{post_id}",
+                    )
+                )
+
+            if tools:
+                markup.add(
+                    InlineKeyboardButton(
+                        text=t["tools_btn"],
+                        callback_data=f"{TOOLS_PREFIX}{post_id}",
                     )
                 )
 
@@ -3788,7 +3889,8 @@ def register_features(bot):
         items = cached["items"]
         caption = cached["caption"] if show_ui else BOT_SIGNATURE
         song_button = _song_button_allowed(platform, show_ui, len(items) == 1 and items[0][0] == "video")
-        if song_button and not media_cache.get(f"songsrc:{post_id}"):
+        tools_button = _tools_button_allowed(show_ui, len(items) == 1 and items[0][0] == "video")
+        if (song_button or tools_button) and not media_cache.get(f"songsrc:{post_id}"):
             media_cache[f"songsrc:{post_id}"] = {
                 "time": time.time(), "url": url, "file_id": items[0][1], "music": cached.get("music"),
                 "text": cached.get("post_text") or _post_text_from_caption(cached.get("caption")),
@@ -3802,6 +3904,7 @@ def register_features(bot):
             show_ui,
             len(items) == 1 and items[0][0] == "video",
             song=song_button,
+            tools=tools_button,
         )
 
         if len(items) == 1:
@@ -3957,6 +4060,9 @@ def register_features(bot):
         song_button = _song_button_allowed(
             platform, show_ui, len(valid_files) == 1 and platforms.media_kind(valid_files[0]) == "video",
         )
+        tools_button = _tools_button_allowed(
+            show_ui, len(valid_files) == 1 and platforms.media_kind(valid_files[0]) == "video",
+        )
         markup = _result_markup(
             t,
             url,
@@ -3966,6 +4072,7 @@ def register_features(bot):
             show_ui,
             len(valid_files) == 1 and platforms.media_kind(valid_files[0]) == "video",
             song=song_button,
+            tools=tools_button,
         )
 
         sent_refs = []
@@ -4214,7 +4321,7 @@ def register_features(bot):
 
         _archive_to_cache_channel(cache_key, chat_id_int, [m.message_id for m in sent_messages if m])
 
-        if song_button and sent_refs and sent_refs[0]:
+        if (song_button or tools_button) and sent_refs and sent_refs[0]:
             # What the "🎵 Song in this video" button needs later, kept on
             # disk so the button still works after a restart.
             media_cache[f"songsrc:{post_id}"] = {
@@ -6112,6 +6219,10 @@ def register_features(bot):
         markup.add(*buttons)
         if flags.get("song_finder", True) and song_finder.available():
             markup.add(InlineKeyboardButton(t["v2a_song_btn"], callback_data=f"{V2A_PREFIX}s_{token}"))
+        if flags.get("media_tools", True) and getattr(media, "file_unique_id", None):
+            source_key = "tg:" + str(media.file_unique_id)
+            media_cache[f"songsrc:{source_key}"] = {"time": time.time(), "url": None, "file_id": media.file_id}
+            markup.add(InlineKeyboardButton(t["tools_btn"], callback_data=f"{TOOLS_PREFIX}{source_key}"))
 
         bot.reply_to(message, t["v2a_prompt"], reply_markup=markup)
 
@@ -6349,7 +6460,7 @@ def register_features(bot):
         files = []
         try:
             with _StatusCycler(edit, steps, interval=4):
-                path = platforms.download_matching_audio(song_finder.as_track(song))
+                path = song_finder.download(song)
             files.append(path)
             cover = platforms.make_thumbnail(song["cover_url"]) if song.get("cover_url") else None
             files.append(cover)
@@ -6402,7 +6513,8 @@ def register_features(bot):
 
         slot = None
         try:
-            steps = t["song_steps"]
+            voice = source.get("kind") == "voice"
+            steps = t["song_steps_voice"] if voice else t["song_steps"]
             status = bot.send_message(chat_id, steps[0], reply_to_message_id=reply_to_id)
 
             id_key = f"songid:{source['key']}"
@@ -6439,7 +6551,7 @@ def register_features(bot):
                 media_cache[id_key] = {"time": time.time(), "song": song}
 
             if not song:
-                edit(t["song_not_found"])
+                edit(t["song_not_found_voice"] if voice else t["song_not_found"])
                 return
 
             if slot is None:
@@ -6492,6 +6604,210 @@ def register_features(bot):
             "key": post_id, "file_id": source.get("file_id"), "url": source.get("url"), "music": source.get("music"),
             "text": source.get("text"),
         }, t)
+
+    # ------------------------------------------------------------------
+    # 🎙 Voice "Shazam": a voice message recorded near music is recognized
+    # and the full song is sent (the same pipeline as the video button).
+    # ------------------------------------------------------------------
+
+    @bot.message_handler(
+        func=lambda msg: msg.chat.type == "private" and getattr(msg, "voice", None) is not None,
+        content_types=["voice"],
+    )
+    def handle_voice_shazam(message):
+        user_id = message.from_user.id
+        if store.is_banned(user_id) or not flags.get("song_finder", True) or not song_finder.available():
+            return
+
+        store.track_user(message.chat.id)
+        store.record_active(user_id)
+        t = _texts_for(message.chat.id)
+
+        if (message.voice.duration or 0) < 4:
+            bot.reply_to(message, t["voice_too_short"])
+            return
+        if not _check_sponsor_channel_gate(message.chat.id, user_id, t):
+            return
+
+        _find_and_send_song(message.chat.id, user_id, message.message_id, {
+            "key": "tg:" + str(message.voice.file_unique_id), "file_id": message.voice.file_id,
+            "url": None, "music": None, "text": None, "kind": "voice",
+        }, t)
+
+    # ------------------------------------------------------------------
+    # ✂️ Cut / GIF / ringtone (media_tools.py does the ffmpeg work). The
+    # button under a video opens a small menu; after picking a tool the
+    # user sends a time range as a normal message.
+    # ------------------------------------------------------------------
+
+    TOOLS_PREFIX = "tools_"
+    TOOL_PREFIX = "tool_"
+    TOOL_PENDING_TTL = 15 * 60
+    _tool_pending = {}
+
+    def _tools_button_allowed(show_ui, single_video):
+        return bool(show_ui and single_video and flags.get("media_tools", True))
+
+    def _tool_source_video(source, cleanup):
+        """The video itself: by file_id, or downloaded again from its link
+        when Telegram won't hand it over (e.g. > 20 MB without local mode)."""
+        if source.get("file_id"):
+            try:
+                path, _ = _fetch_user_file(source["file_id"])
+                cleanup.append(path)
+                return path
+            except Exception as e:
+                if not source.get("url"):
+                    raise
+                logger.info("Media tools: video not available by file_id (%s); downloading it", str(e)[:200])
+        _, _, files, _ = platforms.download_direct(source["url"], quality="best")
+        cleanup.extend(files)
+        return files[0]
+
+    def _fmt_time(seconds):
+        seconds = int(round(seconds))
+        return f"{seconds // 60}:{seconds % 60:02d}"
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(TOOLS_PREFIX))
+    def handle_tools_button(call):
+        key = call.data[len(TOOLS_PREFIX):]
+        t = _texts_for(call.message.chat.id)
+        if not flags.get("media_tools", True):
+            bot.answer_callback_query(call.id, t["tool_disabled"], show_alert=True)
+            return
+        if not media_cache.get(f"songsrc:{key}"):
+            bot.answer_callback_query(call.id, t["tool_expired"], show_alert=True)
+            return
+        bot.answer_callback_query(call.id)
+        markup = InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            InlineKeyboardButton(t["tool_cut_btn"], callback_data=f"{TOOL_PREFIX}cut_{key}"),
+            InlineKeyboardButton(t["tool_gif_btn"], callback_data=f"{TOOL_PREFIX}gif_{key}"),
+            InlineKeyboardButton(t["tool_ring_btn"], callback_data=f"{TOOL_PREFIX}ring_{key}"),
+        )
+        bot.send_message(call.message.chat.id, t["tools_menu"], reply_to_message_id=call.message.message_id, reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(TOOL_PREFIX))
+    def handle_tool_choice(call):
+        tool, _, key = call.data[len(TOOL_PREFIX):].partition("_")
+        chat_id, user_id = call.message.chat.id, call.from_user.id
+        t = _texts_for(chat_id)
+
+        if tool == "x":
+            _tool_pending.pop(user_id, None)
+            bot.answer_callback_query(call.id)
+            try:
+                bot.edit_message_text(t["tool_cancelled"], chat_id, call.message.message_id)
+            except Exception:
+                pass
+            return
+        if tool not in media_tools.TOOLS or not media_cache.get(f"songsrc:{key}"):
+            bot.answer_callback_query(call.id, t["tool_expired"], show_alert=True)
+            return
+        if not _check_sponsor_channel_gate(chat_id, user_id, t):
+            bot.answer_callback_query(call.id)
+            return
+
+        bot.answer_callback_query(call.id)
+        _tool_pending[user_id] = {
+            "tool": tool, "key": key, "time": time.time(),
+            "video_message_id": getattr(call.message.reply_to_message, "message_id", None),
+        }
+        limit = {"cut": media_tools.MAX_CUT_SECONDS, "gif": media_tools.MAX_GIF_SECONDS,
+                 "ring": media_tools.MAX_RINGTONE_SECONDS}[tool]
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(t["tool_cancel_btn"], callback_data=f"{TOOL_PREFIX}x_{key}"))
+        try:
+            bot.edit_message_text(t[f"tool_ask_{tool}"].format(limit=limit), chat_id, call.message.message_id, reply_markup=markup)
+        except Exception:
+            bot.send_message(chat_id, t[f"tool_ask_{tool}"].format(limit=limit), reply_markup=markup)
+
+    def _tool_waiting(msg):
+        pending = _tool_pending.get(getattr(msg.from_user, "id", None))
+        if not pending or msg.chat.type != "private" or not msg.text:
+            return False
+        if time.time() - pending["time"] > TOOL_PENDING_TTL:
+            _tool_pending.pop(msg.from_user.id, None)
+            return False
+        return True
+
+    @bot.message_handler(func=_tool_waiting)
+    def handle_tool_time(message):
+        user_id, chat_id = message.from_user.id, message.chat.id
+        t = _texts_for(chat_id)
+        pending = _tool_pending.get(user_id)
+        if message.text.strip().startswith("/"):
+            _tool_pending.pop(user_id, None)
+            bot.reply_to(message, t["tool_cancelled"])
+            return
+        try:
+            start, end = media_tools.parse_range(message.text, pending["tool"])
+        except media_tools.RangeError as e:
+            bot.reply_to(message, t[e.key].format(**e.values))
+            return  # still waiting for a valid range
+
+        source = media_cache.get(f"songsrc:{pending['key']}")
+        _tool_pending.pop(user_id, None)
+        if not source:
+            bot.reply_to(message, t["tool_expired"])
+            return
+        if _is_rate_limited(user_id):
+            bot.reply_to(message, t["rate_limited"].format(limit=RATE_LIMIT_COUNT))
+            return
+        _run_media_tool(chat_id, user_id, message.message_id, pending["tool"], source, start, end, t)
+
+    def _run_media_tool(chat_id, user_id, reply_to_id, tool, source, start, end, t):
+        steps = t["tool_steps"]
+        status = bot.send_message(chat_id, steps[0], reply_to_message_id=reply_to_id)
+
+        def edit(text):
+            try:
+                bot.edit_message_text(text, chat_id, status.message_id)
+            except Exception:
+                pass
+
+        slot = _acquire_download_slot(bot, chat_id, status, t, show_ui=True, platform="convert")
+        if slot is None:
+            edit(t["server_busy"])
+            return
+        cleanup, outputs = [], []
+        try:
+            with _StatusCycler(edit, steps, interval=3):
+                video = _tool_source_video(source, cleanup)
+                start, end = media_tools.fit_range(start, end, media_tools.duration_of(video))
+                outputs = media_tools.make(tool, video, start, end)
+            label = f"{_fmt_time(start)}-{_fmt_time(end)}"
+
+            if tool == "cut":
+                with open(outputs[0], "rb") as f:
+                    bot.send_video(chat_id, f, supports_streaming=True, caption=f"✂️ {label}\n\n{BOT_SIGNATURE}",
+                                   reply_to_message_id=reply_to_id, timeout=600)
+            elif tool == "gif":
+                with open(outputs[0], "rb") as f:
+                    bot.send_animation(chat_id, f, caption=BOT_SIGNATURE, reply_to_message_id=reply_to_id, timeout=600)
+            else:
+                with open(outputs[0], "rb") as f:
+                    bot.send_audio(chat_id, f, title=t["tool_ring_title"], performer="DuckLoader",
+                                   duration=int(end - start), caption=t["tool_ring_caption"].format(range=label),
+                                   reply_to_message_id=reply_to_id, timeout=600)
+                with open(outputs[1], "rb") as f:
+                    bot.send_document(chat_id, f, visible_file_name="ringtone.m4r",
+                                      caption=t["tool_ring_iphone"], timeout=600)
+
+            _delete_quietly(chat_id, status.message_id)
+            store.record_download("media_tools", user_id)
+            _maybe_send_ad(chat_id)
+        except media_tools.RangeError as e:
+            edit(t[e.key].format(**e.values))
+        except platforms.NoAudioError:
+            edit(t["v2a_no_audio"])
+        except Exception as e:
+            store.record_error(platform="media_tools", url=source.get("url") or "", user_id=user_id, error=f"[{tool}] {e}")
+            logger.exception("Media tool failed")
+            edit(t["tool_failed"])
+        finally:
+            platforms.remove_download_files(cleanup + outputs)
+            slot.release()
 
     @bot.message_handler(func=lambda msg: bool(msg.text) and platforms.detect_platform(msg.text) is not None)
     def handle_media_link(message):
@@ -8242,4 +8558,124 @@ def register_features(bot):
             if job is not None:
                 job.close()
             platforms.remove_download_files(files)
+            slot.release()
+
+
+    # ------------------------------------------------------------------
+    # 🔍 Song search by name: in a private chat, any other text (not a
+    # link, command, button or a greeting) is searched on YouTube Music and
+    # the results are shown as buttons; the chosen one is downloaded and
+    # sent. Registered last, so every stateful handler (feedback, the ad
+    # form, the admin panel, the tools' time input) gets its text first.
+    # ------------------------------------------------------------------
+
+    SEARCH_PREFIX = "srch_"
+    SEARCH_LIMIT, SEARCH_WINDOW = 15, 10 * 60
+    _search_results = _BoundedCache(max_items=3000)
+    _search_times = defaultdict(list)
+    _SEARCH_SKIP = {
+        "سلام", "salam", "hi", "hello", "hey", "مرسی", "ممنون", "merci", "thanks", "thank you", "thx",
+        "ok", "okay", "باشه", "اوکی", "خوبی", "چطوری", "خداحافظ", "bye", "start", "help",
+    }
+
+    def _looks_like_search(msg):
+        if msg.chat.type != "private" or not msg.text:
+            return False
+        text = msg.text.strip()
+        if text.startswith("/") or text in FEEDBACK_BUTTON_TEXTS or text == AD_BUTTON_TEXT:
+            return False
+        if "http" in text.lower() or platforms.extract_url(text):
+            return False
+        if not 2 <= len(text) <= 100 or text.count("\n") > 1:
+            return False
+        return platforms._normalize_text(text) not in _SEARCH_SKIP
+
+    def _song_button_label(song):
+        label = _song_label(song)
+        if song.get("duration_ms"):
+            label += f" ({_fmt_time(song['duration_ms'] / 1000)})"
+        return ("🎵 " + label)[:64]
+
+    @bot.message_handler(func=_looks_like_search)
+    def handle_song_search(message):
+        user_id = message.from_user.id
+        if store.is_banned(user_id) or not flags.get("song_search", True):
+            return
+        store.track_user(message.chat.id)
+        store.record_active(user_id)
+        t = _texts_for(message.chat.id)
+        query = message.text.strip()
+
+        now = time.time()
+        recent = [ts for ts in _search_times[user_id] if now - ts < SEARCH_WINDOW]
+        if len(recent) >= SEARCH_LIMIT and not admin.is_owner(user_id):
+            bot.reply_to(message, t["search_slow_down"])
+            return
+        _search_times[user_id] = recent + [now]
+
+        status = bot.reply_to(message, t["search_searching"].format(query=query[:60]))
+        songs = song_finder.search(query)
+        if not songs:
+            try:
+                bot.edit_message_text(t["search_none"].format(query=query[:60]), message.chat.id, status.message_id)
+            except Exception:
+                pass
+            return
+
+        token = secrets.token_urlsafe(6)
+        _search_results[token] = {"songs": songs, "user_id": user_id}
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(*[
+            InlineKeyboardButton(_song_button_label(song), callback_data=f"{SEARCH_PREFIX}{token}_{index}")
+            for index, song in enumerate(songs)
+        ])
+        try:
+            bot.edit_message_text(t["search_results"].format(query=query[:60]), message.chat.id,
+                                  status.message_id, reply_markup=markup)
+        except Exception:
+            bot.reply_to(message, t["search_results"].format(query=query[:60]), reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(SEARCH_PREFIX))
+    def handle_search_pick(call):
+        token, _, index = call.data[len(SEARCH_PREFIX):].rpartition("_")
+        chat_id, user_id = call.message.chat.id, call.from_user.id
+        t = _texts_for(chat_id)
+        entry = _search_results.get(token)
+        if not entry or entry["user_id"] != user_id or not index.isdigit() or int(index) >= len(entry["songs"]):
+            bot.answer_callback_query(call.id, t["search_expired"], show_alert=True)
+            return
+        if not _check_sponsor_channel_gate(chat_id, user_id, t):
+            bot.answer_callback_query(call.id)
+            return
+        if _is_rate_limited(user_id):
+            bot.answer_callback_query(call.id, t["rate_limited"].format(limit=RATE_LIMIT_COUNT), show_alert=True)
+            return
+        bot.answer_callback_query(call.id)
+        _deliver_chosen_song(chat_id, user_id, call.message.message_id, entry["songs"][int(index)], t)
+
+    def _deliver_chosen_song(chat_id, user_id, reply_to_id, song, t):
+        status = bot.send_message(
+            chat_id, t["song_found"].format(song=_song_label(song), step=t["song_fetch_steps"][0]),
+            reply_to_message_id=reply_to_id,
+        )
+
+        def edit(text):
+            try:
+                bot.edit_message_text(text, chat_id, status.message_id)
+            except Exception:
+                pass
+
+        slot = _acquire_download_slot(bot, chat_id, status, t, show_ui=True, platform="song")
+        if slot is None:
+            edit(t["server_busy"])
+            return
+        try:
+            if _send_song(chat_id, reply_to_id, song, t, edit, status.message_id):
+                store.record_download("song_search", user_id)
+                _maybe_send_ad(chat_id)
+        except Exception as e:
+            store.record_error(platform="song_search", url=song.get("video_id") or "", user_id=user_id, error=str(e))
+            logger.exception("Song search download failed")
+            edit(t["song_failed"])
+        finally:
             slot.release()

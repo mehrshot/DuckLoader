@@ -327,6 +327,12 @@ Videos downloaded from Instagram, TikTok and YouTube (private chats) get a **�
 
 The answer for each video and the song file are cached (`media_cache.db` and the cache channel), so a trending song is recognized and downloaded once. Recognitions that call Shazam/ACRCloud are capped per user per day (`SONG_DAILY_LIMIT`, default 20; the owner is exempt). The owner can turn the feature off in the admin panel (General settings → 🎵 Song in this video) or with `/toggle song_finder`. `tools/find_song.py <file>` runs the recognizer on a file to check it works on the server.
 
+### Voice Shazam, song search, cut / GIF / ringtone
+
+- **🎙 Voice Shazam** — a voice message (private chat, at least 4 s) recorded near music goes through the same recognizer as "Song in this video" and the full track is sent. Switched with the song finder (`song_finder`).
+- **🔍 Song search** — in a private chat, any text that isn't a link, a command, a keyboard button or a greeting is searched on YouTube Music; the results (up to 5, with their length) are buttons and the chosen track is downloaded exactly and sent. Searches are capped at 15 per user per 10 minutes. This handler is registered last, so the feedback, ad-request and admin flows always get their text first. Toggle: `song_search`.
+- **✂️ Cut / GIF / ringtone** — videos (downloaded or sent to the bot) get a button that opens a small menu; the user then sends a time range such as `0:15-0:45` (Persian digits and "۱۰ تا ۲۰" work too). A cut is at most 180 s (re-encoded for an exact start up to 60 s, stream-copied above that), a GIF at most 15 s (silent MP4, 480 px), a ringtone 30 s from a start time or up to 40 s, as an MP3 plus an iPhone `.m4r`, with fades. ffmpeg work lives in `media_tools.py`. Toggle: `media_tools`.
+
 ### Campaign links
 
 Give every ad campaign its own start link, e.g. `https://t.me/DuckDownloader_Bot?start=insta_ali`. New users who arrive through it are counted per source, and `/stats` (or 📊 in the admin panel) shows the last 7 days of new users, active users and downloads — the numbers advertisers ask for.

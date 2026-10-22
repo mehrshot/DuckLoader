@@ -37,6 +37,8 @@ TOGGLE_KEYS = {
     "video_to_audio",
     "song_finder",
     "error_alerts",
+    "song_search",
+    "media_tools",
 }
 
 TOGGLE_LABELS = {
@@ -46,6 +48,8 @@ TOGGLE_LABELS = {
     "video_to_audio": "toggle_video_to_audio",
     "song_finder": "toggle_song_finder",
     "error_alerts": "toggle_error_alerts",
+    "song_search": "toggle_song_search",
+    "media_tools": "toggle_media_tools",
 }
 # user_id -> which text-input action a /settings panel button is waiting on
 _pending_action = {}
