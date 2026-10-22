@@ -36,6 +36,7 @@ import os
 import random
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
@@ -2903,7 +2904,8 @@ def _youtube_download(url: str, selector: str, extract_audio: bool, progress_hoo
 # cut, i.e. re-encoded); longer ones start at the nearest keyframe, fast.
 YOUTUBE_EXACT_SECTION_SECONDS = 60
 
-# How a section of a YouTube video is fetched. yt-dlp's own section download
+# How a section of a YouTube video is fetched when only its bytes can't be
+# (see _download_youtube_section_direct; audio, non-H.264 videos). yt-dlp's own section download
 # hands the streams to ffmpeg: one plain connection that YouTube throttles,
 # and no progress reports (a 1:50 part of a 29-minute video took 3 minutes,
 # mostly sitting at "97%"). Downloading the whole file the normal way
@@ -2982,6 +2984,200 @@ def _download_full_then_cut(url, selector, extract_audio, progress_hook, section
     return info, entries, [clip]
 
 
+# A section of a long video, fetched the way YouTube's own player does it.
+# Its DASH files (H.264 MP4 / M4A) start with an index (sidx) saying where
+# each few seconds of the file begin, so only the bytes of the wanted part
+# are downloaded, in short requests at full speed. (yt-dlp's section
+# download goes through ffmpeg instead: one long connection that YouTube
+# throttles - 25 MB took 85 s, ~0.3 MB/s, on a server that gets 3 MB/s.)
+YOUTUBE_RANGE_CHUNK_BYTES = 10 * 1024 * 1024
+_MP4_HEAD_BYTES = 256 * 1024
+_MP4_HEAD_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _http_range(ydl, url, headers, first, last) -> bytes:
+    request = YDLRequest(url, headers={**(headers or {}), "Range": f"bytes={first}-{last}"})
+    with ydl.urlopen(request) as response:
+        if getattr(response, "status", 206) != 206:
+            raise Exception(f"byte range not supported (HTTP {response.status})")
+        return response.read(last - first + 1)
+
+
+def _mp4_dash_index(head: bytes):
+    """From the start of a DASH MP4: (end of the init part, [(start_s,
+    end_s, first_byte, last_byte), ...] per fragment), the number of bytes
+    needed if `head` is too short, or None if the file isn't laid out so."""
+    pos, init_end = 0, None
+    while pos + 16 <= len(head):
+        size, kind = struct.unpack(">I4s", head[pos:pos + 8])
+        header = 8
+        if size == 1:
+            size, header = struct.unpack(">Q", head[pos + 8:pos + 16])[0], 16
+        if size < header:
+            return None
+        if kind == b"moov":
+            init_end = pos + size
+        elif kind == b"sidx":
+            if init_end is None:
+                return None
+            if pos + size > len(head):
+                return pos + size
+            box = head[pos + header:pos + size]
+            timescale = struct.unpack(">I", box[8:12])[0]
+            if box[0] == 0:
+                time_, first_offset = struct.unpack(">II", box[12:20])
+                p = 20
+            else:
+                time_, first_offset = struct.unpack(">QQ", box[12:28])
+                p = 28
+            count = struct.unpack(">H", box[p + 2:p + 4])[0]
+            p += 4
+            if not timescale or len(box) < p + 12 * count:
+                return None
+            offset = pos + size + first_offset
+            fragments = []
+            for _ in range(count):
+                reference, duration, _sap = struct.unpack(">III", box[p:p + 12])
+                p += 12
+                if reference >> 31:  # an index of indexes: not YouTube's layout
+                    return None
+                length = reference & 0x7FFFFFFF
+                fragments.append((time_ / timescale, (time_ + duration) / timescale, offset, offset + length - 1))
+                time_ += duration
+                offset += length
+            return init_end, fragments
+        elif kind in (b"moof", b"mdat"):
+            return None
+        if pos + size > len(head):
+            return pos + size + 1024
+        pos += size
+    return None
+
+
+def _dash_plan(ydl, fmt, start, end):
+    """Which bytes of one DASH stream cover start..end seconds: (init bytes,
+    first byte, last byte, time the part starts at), or None if the stream
+    isn't laid out for this."""
+    url, headers = fmt.get("url"), fmt.get("http_headers")
+    head = _http_range(ydl, url, headers, 0, _MP4_HEAD_BYTES - 1)
+    index = _mp4_dash_index(head)
+    if isinstance(index, int) and index <= _MP4_HEAD_MAX_BYTES:
+        head = _http_range(ydl, url, headers, 0, index - 1)
+        index = _mp4_dash_index(head)
+    if not isinstance(index, tuple):
+        return None
+    init_end, fragments = index
+    chosen = [f for f in fragments if f[1] > start and f[0] < end]
+    if not chosen:
+        return None
+    return head[:init_end], chosen[0][2], chosen[-1][3], chosen[0][0]
+
+
+def _dash_fetch(ydl, fmt, plan, path, progress):
+    """Writes init + the planned fragments to `path`: a playable file."""
+    init, first, last, _ = plan
+    url, headers = fmt.get("url"), fmt.get("http_headers")
+    with open(path, "wb") as out:
+        out.write(init)  # ftyp + moov; the index itself is left out
+        for chunk_start in range(first, last + 1, YOUTUBE_RANGE_CHUNK_BYTES):
+            chunk_end = min(chunk_start + YOUTUBE_RANGE_CHUNK_BYTES - 1, last)
+            data = _http_range(ydl, url, headers, chunk_start, chunk_end)
+            if len(data) != chunk_end - chunk_start + 1:
+                raise Exception("short read from YouTube")
+            out.write(data)
+            progress(path, chunk_end - chunk_start + 1)
+    return path
+
+
+def _download_youtube_section_direct(url, height, progress_hook, section):
+    """Only the bytes of `section` of the H.264 video + M4A audio. Returns
+    (info, entries, [clip]), or None when this video isn't served in a form
+    this works with (the caller then uses yt-dlp's section download)."""
+    import concurrent.futures
+    import media_tools  # here: media_tools imports this module
+
+    start, end = float(section[0]), float(section[1])
+    opts = _base_opts(
+        format=f"bestvideo[height<={height}][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]",
+        format_sort=["lang", "res", "fps", "codec:avc:m4a", "size"],
+        noplaylist=True,
+    )
+
+    def attempt(plan):
+        job_dir = _new_job_dir()
+        try:
+            with _open_ydl({**opts, **plan["opts"]}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                formats = (info or {}).get("requested_formats") or []
+                if len(formats) != 2 or any(not str(f.get("protocol", "")).startswith("http") for f in formats):
+                    logger.info("YouTube direct section: no plain H.264+M4A streams (%s)",
+                                [f"{f.get('format_id')}:{f.get('protocol')}" for f in formats])
+                    _remove_tree(job_dir)
+                    return None
+
+                video_fmt, audio_fmt = sorted(formats, key=lambda f: f.get("vcodec") in (None, "none"))
+                # The video part starts at a keyframe at or before `start`;
+                # the audio part from there too, so both can be lined up.
+                video_plan = _dash_plan(ydl, video_fmt, start, end)
+                audio_plan = video_plan and _dash_plan(ydl, audio_fmt, video_plan[3], end)
+                if not audio_plan:
+                    logger.info("YouTube direct section: the streams have no usable index")
+                    _remove_tree(job_dir)
+                    return None
+
+                total = sum(p[2] - p[1] + 1 for p in (video_plan, audio_plan))
+                got, lock = [0], threading.Lock()
+
+                def progress(_path, count):
+                    with lock:
+                        got[0] += count
+                        so_far = got[0]
+                    if progress_hook:
+                        progress_hook({
+                            "status": "downloading", "downloaded_bytes": so_far, "total_bytes": total,
+                            "_percent_str": f"{100 * so_far / total:.1f}%",
+                        })
+
+                with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                    video_job = pool.submit(_dash_fetch, ydl, video_fmt, video_plan, os.path.join(job_dir, "video.mp4"), progress)
+                    audio_job = pool.submit(_dash_fetch, ydl, audio_fmt, audio_plan, os.path.join(job_dir, "audio.m4a"), progress)
+                    video = (video_job.result(), video_plan[3])
+                    audio = (audio_job.result(), audio_plan[3])
+                logger.info("YouTube direct section: %.1f MB in %d+%d byte ranges", total / 1048576,
+                            -(-(video_plan[2] - video_plan[1] + 1) // YOUTUBE_RANGE_CHUNK_BYTES),
+                            -(-(audio_plan[2] - audio_plan[1] + 1) // YOUTUBE_RANGE_CHUNK_BYTES))
+            return info, job_dir, video, audio
+        except BaseException:
+            _remove_tree(job_dir)
+            raise
+
+    result = _run_plans(url, _youtube_download_plans(), attempt)
+    if not result:
+        return None
+    info, job_dir, (video_path, video_start), (audio_path, audio_start) = result
+    try:
+        ffmpeg_exe = _ffmpeg_exe("ffmpeg")
+        if not ffmpeg_exe:
+            raise Exception("ffmpeg not found.")
+        merged = os.path.join(job_dir, "section_source.mp4")
+        joined = subprocess.run(
+            [ffmpeg_exe, "-y", "-v", "error", "-i", video_path,
+             "-ss", f"{max(0.0, video_start - audio_start):.3f}", "-i", audio_path,
+             "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", merged],
+            capture_output=True, text=True, timeout=600,
+        )
+        if joined.returncode != 0:
+            raise Exception(f"Could not join the section's streams: {(joined.stderr or '').strip()[-300:]}")
+        cut_start, cut_end = media_tools.fit_range(start - video_start, end - video_start, media_tools.duration_of(merged))
+        clip = _ensure_h264_mp4(media_tools.make("cut", merged, cut_start, cut_end))
+    finally:
+        _remove_tree(job_dir)
+    metadata = {k: v for k, v in info.items()
+                if not k.startswith("_") and k not in ("formats", "requested_downloads", "requested_formats")}
+    metadata["duration"] = round(cut_end - cut_start, 2)
+    return metadata, [metadata], [clip]
+
+
 def _section_opts(section, audio):
     """yt-dlp options that download only (start, end) of a video - only
     that part is fetched from YouTube, not the whole file."""
@@ -3002,6 +3198,20 @@ def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
         raise ValueError("Invalid YouTube video id.")
     url = f"https://www.youtube.com/watch?v={video_id}"
+
+    if section and height_or_audio != "audio":
+        started = time.monotonic()
+        try:
+            result = _download_youtube_section_direct(url, int(height_or_audio), progress_hook, section)
+        except (FileTooLargeError, UnsupportedLinkError):
+            raise
+        except Exception as e:
+            logger.warning("YouTube direct section failed | %s | %s", video_id, str(e)[:300])
+            result = None
+        if result:
+            logger.info("YouTube section | %s | %s | %.0f-%.0fs | only its bytes, done in %.1fs",
+                        video_id, height_or_audio, section[0], section[1], time.monotonic() - started)
+            return result
 
     full_then_cut = bool(section) and youtube_section_strategy(video_id, height_or_audio) == "full"
     if section:
