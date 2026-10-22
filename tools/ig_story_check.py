@@ -7,7 +7,7 @@ and prints what each returned, plus each route's recorded health.
     /home/mahshot/venv/bin/python tools/ig_story_check.py <username> [<username> ...]
 
 Use an account that surely has a story right now (e.g. "instagram") as a
-control. Each username costs ~5 requests to Instagram; don't loop it.
+control. Each username costs ~7 requests to Instagram; don't loop it.
 """
 
 import os
@@ -26,13 +26,14 @@ import platforms  # noqa: E402
 
 def check(ydl, username):
     print(f"\n=== {username}")
-    profile_url = f"https://www.instagram.com/{urllib.parse.quote(username)}/"
+    story_url = f"https://www.instagram.com/stories/{urllib.parse.quote(username)}/"
     try:
-        html = platforms._ig_page(ydl, profile_url)
-        private = platforms.ig_account_privacy(html, username)
-        print("Private account:", {True: "yes", False: "no", None: "unknown (not in the page)"}[private])
+        user_id = platforms._ig_resolve_user_id(ydl, username, story_url)
+        print("User id:", user_id)
+        for source, private, note in platforms.ig_privacy_checks(ydl, user_id, username, story_url):
+            print(f"  private? {source:17} {({True: 'yes', False: 'no', None: '?'})[private]:4} {note}")
     except Exception as e:
-        print("Profile page:", str(e)[:300])
+        print("Privacy check:", str(e)[:300])
 
     ctx = {"url": f"https://www.instagram.com/stories/{username}/", "username": username, "reel_id": None,
            "page_url": f"https://www.instagram.com/stories/{username}/"}

@@ -1825,7 +1825,7 @@ def _ig_route_page(ydl, ctx):
     if reels:
         # The page carries story data, just none for this account.
         return "empty", None
-    if not ctx.get("reel_id") and _ig_page_says_private(ydl, html, ctx["username"]):
+    if not ctx.get("reel_id") and ig_account_privacy(html, ctx["username"]) is True:
         # No story data at all because the bot's account may not see them.
         return "private", None
     return "inconclusive", None
@@ -1867,20 +1867,39 @@ def ig_account_privacy(html: str, username: str):
     return False if flags else None
 
 
-def _ig_page_says_private(ydl, html: str, username: str) -> bool:
-    """Whether `username` is a private account: from the story page, or,
-    when that page doesn't say, from the profile page (one more request,
-    only in this failure case)."""
-    private = ig_account_privacy(html, username)
-    if private is None:
+IG_PRIVATE_STORY_ERROR = "This story isn't available: private account (the bot's Instagram account doesn't follow it)."
+
+
+def ig_privacy_checks(ydl, user_id: str, username: str, referer: str):
+    """Asks Instagram whether the bot's account can't see `username`
+    (private and not followed). Story and profile pages often leave
+    is_private out; these API answers always carry it. Yields
+    (source, True/False/None, note) per endpoint; callers stop at the
+    first True/False."""
+    for source, url, headers in (
+        ("friendships/show", f"https://www.instagram.com/api/v1/friendships/show/{user_id}/", None),
+        ("users/info", f"https://i.instagram.com/api/v1/users/{user_id}/info/", _IG_ANDROID_HEADERS),
+    ):
         try:
-            private = ig_account_privacy(_ig_page(ydl, f"https://www.instagram.com/{urllib.parse.quote(username)}/"), username)
+            payload = _ig_api(ydl, url, referer, headers_override=headers)
         except Exception as e:
             if "429" in str(e):
                 raise
-            logger.info("Profile page for the privacy check failed: %s", str(e)[:200])
-    logger.info("Story: %s is %s", username, {True: "private", False: "public", None: "unknown (not in the pages)"}[private])
-    return private is True
+            yield source, None, str(e)[:150]
+            continue
+        user = payload.get("user") if isinstance(payload.get("user"), dict) else payload
+        if user is not payload and str(user.get("username", username)).lower() != username.lower():
+            yield source, None, f"answered for {user.get('username')}"
+            continue
+        flag = user.get("is_private")
+        if not isinstance(flag, bool):
+            yield source, None, "no is_private in the answer"
+            continue
+        following = (user.get("friendship_status") or {}).get("following", payload.get("following"))
+        if flag and following is True:
+            yield source, False, "private, but the bot's account follows it"
+        else:
+            yield source, flag, "private" if flag else "public"
 
 
 def _ig_route_feed(host, headers_override=None):
@@ -1950,10 +1969,19 @@ def _ig_story_reel(ydl, url, username, path_id):
             return None
         if outcome == "private":
             _ig_route_record(name, True)
-            raise Exception(
-                "This story isn't available: private account (the bot's Instagram account doesn't follow it)."
-            )
+            raise Exception(IG_PRIVATE_STORY_ERROR)
         tried.append((name, outcome))
+
+    # Nothing found anywhere: a private account the bot doesn't follow looks
+    # exactly like this, so ask (one or two requests, only in this case).
+    user_id = None if highlight else ctx.get("reel_id_for_api") or _ig_cached_user_id(username)
+    if user_id:
+        for source, private, note in ig_privacy_checks(ydl, user_id, username, url):
+            logger.info("Story: privacy of %s via %s: %s", username, source, note)
+            if private is True:
+                raise Exception(IG_PRIVATE_STORY_ERROR)
+            if private is False:
+                break
     # The page route works (it found stories within the last day) and the
     # API answered "ok" with nothing: the story was deleted, expired early
     # or is for close friends only - not a broken route, and yt-dlp would
