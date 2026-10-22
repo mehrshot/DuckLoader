@@ -1825,7 +1825,20 @@ def _ig_route_page(ydl, ctx):
     if reels:
         # The page carries story data, just none for this account.
         return "empty", None
+    if not ctx.get("reel_id") and _ig_page_says_private(html, ctx["username"]):
+        # No story data at all because the bot's account may not see them.
+        return "private", None
     return "inconclusive", None
+
+
+def _ig_page_says_private(html: str, username: str) -> bool:
+    """Whether the page marks `username` as a private account."""
+    text = html.replace('\\"', '"')
+    name = re.escape(username)
+    return bool(
+        re.search(rf'"username":\s*"{name}"[^{{}}]{{0,2000}}?"is_private":\s*true', text, re.IGNORECASE)
+        or re.search(rf'"is_private":\s*true[^{{}}]{{0,2000}}?"username":\s*"{name}"', text, re.IGNORECASE)
+    )
 
 
 def _ig_route_feed(host, headers_override=None):
@@ -1893,6 +1906,11 @@ def _ig_story_reel(ydl, url, username, path_id):
         if outcome == "empty":
             _ig_route_record(name, True)
             return None
+        if outcome == "private":
+            _ig_route_record(name, True)
+            raise Exception(
+                "This story isn't available: private account (the bot's Instagram account doesn't follow it)."
+            )
         tried.append((name, outcome))
     raise IgRouteBroken("no story route worked (" + ", ".join(f"{n}: {o}" for n, o in tried) + ")")
 
@@ -2018,7 +2036,7 @@ def _download_instagram_story_via_api(url: str, wanted_pk, progress_hook=None):
                 # only stretches the limit. Pause story requests briefly.
                 _ig_story_blocked_until = time.time() + IG_STORY_COOLDOWN
                 break
-            if "no longer available" in str(e) or "no downloadable media" in str(e):
+            if "no longer available" in str(e) or "no downloadable media" in str(e) or "private account" in str(e):
                 break
     raise last_error or Exception("Instagram login required: no Instagram session is configured.")
 
@@ -2046,7 +2064,7 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
             # A story that is gone, or a rate limit: yt-dlp can't help. When
             # all our routes are broken it is the last resort (updated
             # independently, it may already know Instagram's new way).
-            if "no longer available" in str(e) or "429" in str(e):
+            if "no longer available" in str(e) or "429" in str(e) or "private account" in str(e):
                 raise Exception(f"[instagram:story] {e}") from e
 
     wanted_ids = {_ig_pk_to_shortcode(wanted_pk)} if wanted_pk else None
@@ -2885,6 +2903,14 @@ def download_youtube_quality(video_id: str, height_or_audio: str, progress_hook=
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     full_then_cut = bool(section) and youtube_section_strategy(video_id, height_or_audio) == "full"
+    if section:
+        size = youtube_option_size(video_id, height_or_audio)
+        logger.info(
+            "YouTube section | %s | %s | %.0f-%.0fs | option %s | %s",
+            video_id, height_or_audio, section[0], section[1],
+            f"{size / 1024 / 1024:.0f} MB" if size else "size unknown",
+            "whole file, then cut here" if full_then_cut else "yt-dlp section download (ffmpeg)",
+        )
 
     if height_or_audio == "audio":
         if full_then_cut:
