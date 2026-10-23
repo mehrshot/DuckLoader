@@ -2535,6 +2535,129 @@ def _resolve_tiktok_photo(url: str) -> dict:
     raise ValueError("Could not extract photos from this TikTok post.")
 
 
+# TikTok's age-restricted posts ("may not be comfortable for some
+# audiences") need a logged-in account the bot doesn't have. tikwm.com, a
+# public TikTok download API, still serves them; it's used only for these
+# posts (only the link is sent to it), and can be switched off with the
+# "tiktok_fallback" flag.
+TIKWM_API = "https://www.tikwm.com/api/"
+TIKWM_ALERT_COOLDOWN = 6 * 3600
+_tikwm_alert_last = [0.0]
+
+
+def _tiktok_needs_login(error) -> bool:
+    text = str(error).lower()
+    return "comfortable for some audiences" in text or "log in for access" in text
+
+
+def _tiktok_fallback_enabled() -> bool:
+    import store  # here: platforms doesn't otherwise depend on the bot's storage
+
+    return store.load_flags().get("tiktok_fallback", True)
+
+
+def _download_tiktok_via_tikwm(url: str, quality: str, progress_hook=None):
+    """An age-restricted TikTok video through tikwm. Same return shape as
+    _download_direct."""
+    response = requests.get(
+        TIKWM_API, params={"url": url, "hd": 1}, timeout=30, headers={"User-Agent": USER_AGENT},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data") or {}
+    if payload.get("code") != 0 or not data:
+        raise Exception(f"tikwm: {payload.get('msg') or 'no data'}")
+    if data.get("images"):
+        raise Exception("tikwm: a photo post (only videos are fetched this way)")
+
+    media_url = data.get("hdplay") or data.get("play")
+    if not media_url:
+        raise Exception("tikwm: no video link in the answer")
+    if media_url.startswith("/"):
+        media_url = "https://www.tikwm.com" + media_url
+    expected = data.get("hd_size") or data.get("size") or 0
+    if expected > MAX_TELEGRAM_BYTES:
+        raise FileTooLargeError(format_size(expected))
+
+    job_dir = _new_job_dir()
+    try:
+        path = os.path.join(job_dir, f"{data.get('id') or 'tiktok'}.mp4")
+        with requests.get(media_url, stream=True, timeout=60, headers={"User-Agent": USER_AGENT}) as media:
+            media.raise_for_status()
+            total = int(media.headers.get("Content-Length") or expected or 0)
+            got = 0
+            with open(path, "wb") as out:
+                for chunk in media.iter_content(chunk_size=1024 * 256):
+                    out.write(chunk)
+                    got += len(chunk)
+                    if got > MAX_TELEGRAM_BYTES:
+                        raise FileTooLargeError(format_size(got))
+                    if progress_hook and total:
+                        progress_hook({
+                            "status": "downloading", "downloaded_bytes": got, "total_bytes": total,
+                            "_percent_str": f"{100 * got / total:.1f}%",
+                        })
+        _check_file_size(path, MIN_VALID_FILE_BYTES)
+        report_phase(progress_hook, "processing")
+
+        if quality == "audio":
+            ffmpeg_exe = _ffmpeg_exe("ffmpeg")
+            if not ffmpeg_exe:
+                raise Exception("ffmpeg not found.")
+            audio_path = os.path.join(job_dir, f"{data.get('id') or 'tiktok'}.mp3")
+            result = subprocess.run(
+                [ffmpeg_exe, "-y", "-v", "error", "-i", path, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", audio_path],
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode != 0:
+                raise Exception(f"Could not extract the audio: {(result.stderr or '').strip()[-300:]}")
+            os.remove(path)
+            path = audio_path
+        else:
+            path = _ensure_h264_mp4(path)
+    except BaseException:
+        _remove_tree(job_dir)
+        raise
+
+    author = data.get("author") or {}
+    entry = {
+        "id": str(data.get("id") or ""),
+        "extractor": "TikTok",
+        "extractor_key": "TikTok",
+        "webpage_url": url,
+        "title": data.get("title") or "",
+        "description": data.get("title") or "",
+        "uploader": author.get("unique_id") or author.get("nickname"),
+        "channel": author.get("unique_id"),
+        "duration": data.get("duration"),
+        "thumbnail": data.get("cover") or data.get("origin_cover"),
+        "timestamp": data.get("create_time"),
+        "view_count": data.get("play_count"),
+        "like_count": data.get("digg_count"),
+        "comment_count": data.get("comment_count"),
+    }
+    return entry, [entry], [path], "audio" if quality == "audio" else "best"
+
+
+def _tikwm_failed(error) -> None:
+    """The fallback stopped working: tell the owner (at most every 6 h) -
+    users just see the age-restriction message, which raises no alert."""
+    logger.warning("TikTok age-restricted fallback (tikwm) failed: %s", str(error)[:300])
+    now = time.time()
+    if now - _tikwm_alert_last[0] < TIKWM_ALERT_COOLDOWN or not _route_alert_handler:
+        return
+    _tikwm_alert_last[0] = now
+    try:
+        _route_alert_handler(
+            "⚠️ دانلود ویدیوهای محدودیت سنی تیک‌تاک (از راه tikwm.com) کار نکرد:\n"
+            f"{str(error)[:300]}\n\n"
+            "کاربرها پیغام «محدودیت سنی» رو می‌بینن. اگه این سرویس از کار افتاده، "
+            "می‌تونی از پنل ادمین خاموشش کنی."
+        )
+    except Exception:
+        logger.exception("Could not send the tikwm alert")
+
+
 def download_tiktok_photo(url: str, progress_hook=None):
     """Downloads every image in a TikTok photo/slideshow post.
     Returns (info, entries, filepaths)."""
@@ -2764,10 +2887,31 @@ def _download_direct(url: str, quality: str = "best", allow_fallback: bool = Fal
                 raise UnsupportedLinkError("tiktok_photo_audio")
             info, entries, filepaths = download_tiktok_photo(url, progress_hook)
             return info, entries, filepaths, "best"
+        try:
+            return _download_by_tiers(url, platform, quality, allow_fallback, progress_hook)
+        except Exception as e:
+            if not _tiktok_needs_login(e) or not _tiktok_fallback_enabled():
+                raise
+            logger.info("TikTok post needs a login; trying tikwm | %s", url)
+            try:
+                result = _download_tiktok_via_tikwm(url, quality, progress_hook)
+            except (FileTooLargeError, DownloadCancelled):
+                raise
+            except Exception as fallback_error:
+                _tikwm_failed(fallback_error)
+                raise e from fallback_error
+            logger.info("TikTok age-restricted post fetched via tikwm | %s", url)
+            return result
 
     if platform == "spotify":
         raise UnsupportedLinkError("spotify_direct")
 
+    return _download_by_tiers(url, platform, quality, allow_fallback, progress_hook)
+
+
+def _download_by_tiers(url, platform, quality, allow_fallback, progress_hook):
+    """yt-dlp at the wanted quality (and lower ones, with allow_fallback,
+    when the file is too large for Telegram)."""
     start = QUALITY_LADDER.index(quality) if quality in QUALITY_LADDER else 0
     tiers = QUALITY_LADDER[start:] if allow_fallback else [quality if quality in VIDEO_TIER_HEIGHTS or quality == "audio" else "best"]
 

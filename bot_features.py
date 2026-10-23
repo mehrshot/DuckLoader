@@ -1029,6 +1029,7 @@ TEXTS = {
         'toggle_error_alerts': "🚨 هشدار فوری خطاها برای ادمین",
         'toggle_song_search': "🔍 جستجوی آهنگ با اسم",
         'toggle_media_tools': "✂️ برش، گیف و رینگتون",
+        'toggle_tiktok_fallback': "🔞 تیک‌تاک‌های محدودیت سنی (tikwm)",
         'song_steps_voice': [
             "🎧 دارم به ویس گوش می‌دم...",
             "🔎 در حال شناسایی آهنگ...",
@@ -1558,6 +1559,7 @@ TEXTS = {
         'toggle_error_alerts': "🚨 Instant error alerts to the owner",
         'toggle_song_search': "🔍 Song search by name",
         'toggle_media_tools': "✂️ Cut, GIF and ringtone",
+        'toggle_tiktok_fallback': "🔞 Age-restricted TikToks (tikwm)",
         'song_steps_voice': [
             "🎧 Listening to your voice message...",
             "🔎 Recognizing the song...",

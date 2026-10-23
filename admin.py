@@ -39,6 +39,7 @@ TOGGLE_KEYS = {
     "error_alerts",
     "song_search",
     "media_tools",
+    "tiktok_fallback",
 }
 
 TOGGLE_LABELS = {
@@ -50,6 +51,7 @@ TOGGLE_LABELS = {
     "error_alerts": "toggle_error_alerts",
     "song_search": "toggle_song_search",
     "media_tools": "toggle_media_tools",
+    "tiktok_fallback": "toggle_tiktok_fallback",
 }
 # user_id -> which text-input action a /settings panel button is waiting on
 _pending_action = {}

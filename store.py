@@ -59,6 +59,7 @@ DEFAULT_FLAGS = {
     "error_alerts": True,
     "song_search": True,
     "media_tools": True,
+    "tiktok_fallback": True,
 }
 
 
