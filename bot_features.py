@@ -1791,7 +1791,11 @@ def _podcast_caption(entry: dict):
     """(caption, chapters that didn't fit) for a podcast episode. Chapter
     times are written so Telegram turns them into seek links."""
     podcast = entry.get("duck_podcast") or {}
-    head = [f"🎙 {podcast.get('show') or entry.get('album') or ''}".rstrip(), f"🎧 {entry.get('title') or ''}"]
+    show = podcast.get("show") or entry.get("album") or ""
+    # The show as a hashtag (like 🆔 #username for Instagram): tapping it
+    # lists every episode of that podcast the user got in this chat.
+    tag = re.sub(r"\W+", "_", show).strip("_")
+    head = [f"🎙 #{tag}" if tag and not tag.isdigit() else f"🎙 {show}".rstrip(), f"🎧 {entry.get('title') or ''}"]
     facts = []
     try:
         if entry.get("timestamp"):

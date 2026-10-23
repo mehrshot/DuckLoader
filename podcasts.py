@@ -228,16 +228,33 @@ def _castbox_state(url):
 _CASTBOX_EPISODE_RE = re.compile(r"/episode/(?P<slug>.*?)-?id(?P<cid>\d+)-id(?P<eid>\d+)")
 
 
+def _castbox_episode_id(url):
+    """The episode id in any Castbox link: /ep/<id>, /vb/<id>, the app's
+    player link, an eid= parameter, or a dynamic link wrapping one of
+    them (link=...)."""
+    url = urllib.parse.unquote(url)
+    for pattern in (r"/(?:ep|vb)/(\d{5,})", r"[?&]eid=(\d{5,})", r"/player/id\d+/id(\d{5,})", r"-id\d+-id(\d{5,})"):
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _resolve_castbox(url):
     path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
     ids = _CASTBOX_EPISODE_RE.search(path)
     if not ids:
-        # Share links (castbox.fm/ep/<id>, /vb/<id>) redirect to the full
-        # /episode/<title>-id<channel>-id<episode> page.
-        path = urllib.parse.unquote(urllib.parse.urlparse(platforms._resolve_redirects(url)).path)
-        ids = _CASTBOX_EPISODE_RE.search(path)
+        # Every other kind of episode link: its id, then castbox.fm/ep/<id>,
+        # which redirects to the full /episode/<title>-id<channel>-id<episode>
+        # page. (Share links like /vb/<id> lead to a "dynamic link" page
+        # instead of redirecting.)
+        episode_id = _castbox_episode_id(url) or _castbox_episode_id(platforms._resolve_redirects(url))
+        if episode_id:
+            path = urllib.parse.unquote(urllib.parse.urlparse(
+                platforms._resolve_redirects(f"https://castbox.fm/ep/{episode_id}")).path)
+            ids = _CASTBOX_EPISODE_RE.search(path)
     if not ids:
-        if "/channel/" in path:
+        if "/channel/" in path or "/ch/" in path:
             raise platforms.UnsupportedLinkError("podcast_show")
         raise platforms.UnsupportedLinkError("podcast_unsupported")
     state = _castbox_state(f"https://castbox.fm/channel/id{ids.group('cid')}")
@@ -300,22 +317,75 @@ def resolve(url):
 
 # ---------------------------------------------------------------- chapters
 
-_TIMESTAMP_LINE = re.compile(
-    r"^[\s\-–—•*▪️🔹🔸◾️⏱⏰🕐]*\(?\[?(?P<t>(?:\d{1,2}:)?\d{1,2}:\d{2})\]?\)?\s*[-–—:|.)]?\s*(?P<title>\S.{0,90})$"
-)
+# A time in the show notes: "05:12", "1:02:30", "(08:01)", "▶ (08:01)".
+_TIMESTAMP = re.compile(r"(?<![\d:/.])(?P<t>(?:\d{1,2}:)?\d{1,2}:\d{2})(?![\d:])")
+# What surrounds a time but isn't part of its title.
+_TITLE_EDGE = re.compile(r"^[\s\-–—•*|:.,)(\[\]▶►▸⏯⏱⏰🕐🔹🔸▪◾️\ufe0f]+|[\s\-–—•*|:.,(\[\]▶►▸⏯\ufe0f]+$")
+# "1:", "02-", "3)", "4." numbering before a title (not a time: no digits after).
+_NUMBERING = re.compile(r"(?:^|\s)\d{1,2}\s*[:\-.)]\s*(?=\D)")
 
 
-def _chapters_from_notes(notes):
-    text = re.sub(r"<br\s*/?>|</p>|</li>|</div>", "\n", notes or "", flags=re.IGNORECASE)
-    text = html.unescape(re.sub(r"<[^>]+>", "", text)).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+def _clean_title(text):
+    text = _TITLE_EDGE.sub("", text.strip())
+    text = _NUMBERING.sub(" ", " " + text, count=1).strip() if _NUMBERING.match(" " + text) else text
+    return _TITLE_EDGE.sub("", text)[:90]
+
+
+def _chapters_from_notes(notes, duration=None):
+    """Chapters written in the show notes, in any of the usual shapes:
+    "05:12 Title" (time first), "Title ▶ (05:12)" (time after, on the same
+    or the next line), or a whole list in one paragraph "1: A ▶(6:54) 2: B
+    ▶(11:34)". This is also what Castbox and other apps show as sections:
+    they make these times in the notes tappable."""
+    text = re.sub(r"<br\s*/?>|</p>|</li>|</div>|</h\d>", "\n", notes or "", flags=re.IGNORECASE)
+    text = html.unescape(re.sub(r"<[^>]+>", "", text)).replace("\xa0", " ")
+    text = text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+    stamps = list(_TIMESTAMP.finditer(text))
+    if len(stamps) < 3:
+        return []
+    times = [_seconds(m.group("t")) for m in stamps]
+
+    def same_line_after(i):
+        end = stamps[i + 1].start() if i + 1 < len(stamps) else len(text)
+        return text[stamps[i].end():end].split("\n", 1)[0]
+
+    def text_before(i):
+        start = stamps[i - 1].end() if i else 0
+        segment = text[start:stamps[i].start()]
+        lines = [line for line in segment.split("\n") if _clean_title(line)]
+        last = lines[-1] if lines else ""
+        # A whole paragraph before the first time: keep what follows its
+        # last "1:"-style numbering.
+        numbered = list(re.finditer(r"(?:^|\s)\d{1,2}\s*[:\-.)]\s*(?=\D)", last))
+        return last[numbered[-1].end():] if numbered else last[-90:]
+
+    def starts_line(i):
+        line_start = text.rfind("\n", 0, stamps[i].start()) + 1
+        return not _clean_title(text[line_start:stamps[i].start()])
+
+    # Which side the titles are on: "05:12 Title" starts lines with the time
+    # and has words after it ("Title ▶(05:12)" and one-paragraph lists don't).
+    time_first = sum(
+        starts_line(i) and bool(re.search(r"\w{2}", same_line_after(i))) for i in range(len(stamps))
+    ) > len(stamps) * 0.6
     found = []
-    for line in text.splitlines():
-        match = _TIMESTAMP_LINE.match(line.strip())
-        if match:
-            found.append((_seconds(match.group("t")), match.group("title").strip()))
-    times = [t for t, _ in found]
-    # A real chapter list: at least three, in order.
-    return found if len(found) >= 3 and times == sorted(times) else []
+    for i, seconds in enumerate(times):
+        title = _clean_title(same_line_after(i) if time_first else text_before(i))
+        if title and (not duration or seconds < duration):
+            found.append((seconds, title))
+    found = _in_order(found)
+    return found if len(found) >= 3 else []
+
+
+def _in_order(chapters):
+    """The longest run of chapters in time order: a typo in one time
+    ("58:50" for "28:50", a time written twice) drops only that one."""
+    best = [[c] for c in chapters]
+    for i in range(len(chapters)):
+        for j in range(i):
+            if chapters[j][0] < chapters[i][0] and len(best[j]) + 1 > len(best[i]):
+                best[i] = best[j] + [chapters[i]]
+    return max(best, key=len) if best else []
 
 
 def _chapters_from_json(url):
@@ -345,7 +415,7 @@ def chapters(item, audio_path=None):
         sources.append(lambda: _chapters_from_json(item["chapters_url"]))
     if audio_path:
         sources.append(lambda: _chapters_from_id3(audio_path))
-    sources.append(lambda: _chapters_from_notes(item.get("notes")))
+    sources.append(lambda: _chapters_from_notes(item.get("notes"), item.get("duration")))
     for source in sources:
         try:
             found = [(t, title) for t, title in source() if title]

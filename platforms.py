@@ -2901,7 +2901,25 @@ def download_podcast_episode(url: str, progress_hook=None):
     download_direct; info["duck_podcast"] carries chapters and series."""
     import podcasts  # here: podcasts imports this module
 
-    feed, item = podcasts.resolve(url)
+    try:
+        feed, item = podcasts.resolve(url)
+    except (FileTooLargeError, DownloadCancelled):
+        raise
+    except Exception as e:
+        if isinstance(e, UnsupportedLinkError) and e.kind != "podcast_unsupported":
+            raise  # a show link: the user is asked for an episode
+        # A link shape or page the resolver doesn't know (yet): the page's
+        # own audio through yt-dlp, before the user sees an error.
+        logger.warning("Podcast link not resolved (%s); trying yt-dlp | %s", str(e)[:200], url)
+        try:
+            info, entries, files = _download_with_selector(url, "bestaudio/best", True, progress_hook, noplaylist=True)
+        except Exception:
+            raise e
+        info["duck_podcast"] = {
+            "show": info.get("uploader") or info.get("channel") or info.get("extractor_key") or "",
+            "chapters": [], "series": [], "feed": {},
+        }
+        return info, entries, files, "audio"
     info, path = podcasts.download(feed, item, progress_hook)
     info["duck_podcast"]["series"] = podcasts.series(feed, item)
     info["duck_podcast"]["feed"] = {k: feed.get(k) for k in ("title", "author", "image")}
