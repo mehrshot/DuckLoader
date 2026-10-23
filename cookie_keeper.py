@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 import os
+import shutil
 from pathlib import Path
 from urllib import parse, request
 
@@ -32,6 +33,11 @@ REFRESH_INTERVAL = max(
             "900",
         )
     ),
+)
+
+BROWSER_CHANNEL = os.environ.get(
+    "COOKIE_KEEPER_BROWSER_CHANNEL",
+    "chrome" if shutil.which("google-chrome") else "chromium",
 )
 
 BOT_TOKEN = os.environ.get(
@@ -120,15 +126,20 @@ async def launch_browser(
         profile,
     )
 
+    # The installed Google Chrome, without Playwright's automation flags:
+    # Playwright's own "Chrome for Testing" with navigator.webdriver set
+    # looks like a bot to Instagram and gets stuck in its checks at login.
     context = (
         await playwright.chromium
         .launch_persistent_context(
             user_data_dir=str(profile),
             headless=headless,
-            channel="chromium",
+            channel=BROWSER_CHANNEL,
+            ignore_default_args=["--enable-automation"],
             args=[
                 "--password-store=basic",
                 "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
             ],
             viewport={
                 "width": 1440,
