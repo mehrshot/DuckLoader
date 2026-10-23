@@ -225,9 +225,17 @@ def _castbox_state(url):
     return urllib.parse.unquote(match.group(1))
 
 
+_CASTBOX_EPISODE_RE = re.compile(r"/episode/(?P<slug>.*?)-?id(?P<cid>\d+)-id(?P<eid>\d+)")
+
+
 def _resolve_castbox(url):
     path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
-    ids = re.search(r"/episode/(?P<slug>.*?)-?id(?P<cid>\d+)-id(?P<eid>\d+)", path)
+    ids = _CASTBOX_EPISODE_RE.search(path)
+    if not ids:
+        # Share links (castbox.fm/ep/<id>, /vb/<id>) redirect to the full
+        # /episode/<title>-id<channel>-id<episode> page.
+        path = urllib.parse.unquote(urllib.parse.urlparse(platforms._resolve_redirects(url)).path)
+        ids = _CASTBOX_EPISODE_RE.search(path)
     if not ids:
         if "/channel/" in path:
             raise platforms.UnsupportedLinkError("podcast_show")
