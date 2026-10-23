@@ -467,22 +467,133 @@ def _part_of(title):
     return None, None
 
 
-def series(feed, item, limit=10):
-    """The parts of the story `item` belongs to, in order (including it),
-    or [] if it isn't one of several parts."""
-    base, _ = _part_of(item["title"])
-    if not base:
+# Separators between a title's parts: "Book - Chapter 2 - 03", "Show | Ep",
+# "Story: part one".
+_TITLE_SPLIT = re.compile(r"\s*[-–—|]+\s+|\s+[-–—|]+\s*|\s*\|\s*|\s*[:：]\s+")
+# What ends a series' base name but isn't part of it: a number, a Roman
+# numeral, "part 2", "(3/5)".
+_TRAILING_PART = re.compile(
+    r"(?:\s+(?:\d{1,3}|[ivx]{1,5}|(?:part|pt|chapter|قسمت|بخش|پارت|فصل)\s*\S+))+\s*$", re.IGNORECASE,
+)
+_JUST_NUMBERING = re.compile(r"^(?:#|ep|episode|e|no|قسمت|اپیزود|بخش|شماره|part)?\s*\d{1,4}$", re.IGNORECASE)
+
+
+_NUMBER_WORDS = {
+    "یک", "یکم", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه", "ده", "یازده", "دوازده", "سیزده", "چهارده",
+    "پانزده", "شانزده", "هفده", "هجده", "نوزده", "بیست", "سی", "چهل", "پنجاه", "شصت", "هفتاد", "هشتاد", "نود",
+    "صد", "یکصد", "دویست", "سیصد", "و", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "twenty", "thirty", "forty", "fifty",
+}
+# A show's own episode number at the start: "567. ", "#12 ", "Ep 4 - ",
+# "اپیزود سی و سه - " - different on every episode, so never a series name.
+_LEADING_NUMBER = re.compile(r"^\s*(?:#?\d{1,4}\s*[.):\-–—|]\s*|#\d{1,4}\s+|(?:ep|episode|e)\.?\s*\d{1,4}\s*[.:\-–—|]?\s+)", re.IGNORECASE)
+# Signs that a title is one part of something.
+_PART_WORDS = re.compile(r"(?:^|\s)(?:قسمت|بخش|فصل|پارت|part|pt|chapter|chap|vol|volume|مقدمه|پیشگفتار|پایانی|آخر|finale)(?:\s|$|\d)", re.IGNORECASE)
+
+
+def _is_episode_number(segment):
+    words = segment.split()
+    return bool(words) and words[0] in ("اپیزود", "قسمت", "episode", "ep", "show", "no") and all(
+        w in _NUMBER_WORDS or w.isdigit() for w in words[1:]
+    )
+
+
+def _title_segments(title):
+    """A title's named segments, without the show's episode numbering."""
+    title = _LEADING_NUMBER.sub("", title or "")
+    return [seg for seg in _TITLE_SPLIT.split(title) if seg.strip() and not _is_episode_number(_norm(seg))]
+
+
+def _series_base(title, show_prefix=None):
+    """(base name, is clearly one part of something) of an episode title:
+    "کتاب فقر احمق می‌کند - فصل دوم - 03" -> "کتاب فقر احمق میکند",
+    "داستان زندگی راسپوتین قسمت دوم" -> "داستان زندگی راسپوتین",
+    "713. King Arthur: The Once & Future King (Part 1)" -> "king arthur".
+    `show_prefix`: a first segment the show puts on every title."""
+    segments = _title_segments(title)
+    if show_prefix and len(segments) > 1 and _norm(segments[0]) == show_prefix:
+        segments = segments[1:]
+    joined = " - ".join(segments)
+    part_base, _ = _part_of(joined)
+    normalized = [_norm(seg) for seg in segments]
+    named = [seg for seg in normalized if seg and not _JUST_NUMBERING.match(seg)]
+    if not named:
+        return None, False
+    if part_base:
+        # "Story (Part 2)" or "Story: Episode name (Part 2)": the story is
+        # the first segment (or the whole title before the part word).
+        first = _norm(_TITLE_SPLIT.split(part_base)[0]) if len(segments) > 1 else _norm(part_base)
+        return first or named[0], True
+    first = _TRAILING_PART.sub("", named[0]).strip() or named[0]
+    # One part of something: "Name - Chapter 2", "Name - Intro - 01",
+    # "Name - 03" (a part word, or a number of its own at the end), or
+    # "Name VI" / "Name 3" (a number ending the name itself).
+    is_part = first != named[0] or len(segments) >= 2 and (
+        any(_PART_WORDS.search(seg) for seg in normalized[1:]) or bool(_JUST_NUMBERING.match(normalized[-1]))
+    )
+    return first, is_part
+
+
+def _show_prefix(items):
+    """The first title segment most episodes share (the show's own name),
+    if there is one."""
+    firsts = [_norm(segs[0]) for segs in (_title_segments(it["title"]) for it in items) if len(segs) > 1]
+    if len(items) < 5 or not firsts:
+        return None
+    common = max(set(firsts), key=firsts.count)
+    return common if firsts.count(common) > len(items) * 0.4 else None
+
+
+def _same_series(a, b):
+    """Same base name, or one is the other plus a word or two ("کتاب اسب
+    سیاه" / "اسب سیاه", "معرفی کتاب X" / "کتاب X")."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    if len(short.split()) < 2 or short not in long_:
+        return False
+    return len(long_.split()) - len(short.split()) <= 2
+
+
+def series(feed, item, limit=12):
+    """The parts of the story `item` belongs to, oldest first (including
+    it), or [] if it isn't one of several parts. Parts share a base name
+    and were published one after another; a name nearly every episode
+    shares is the show's own (not a story)."""
+    items = feed.get("items") or []
+    prefix = _show_prefix(items)
+    base, is_part = _series_base(item["title"], prefix)
+    if not base or not is_part or len(base.split()) < 2 and len(base) < 8:
         return []
-    parts = {}
-    for other in feed.get("items") or []:
-        other_base, number = _part_of(other["title"])
-        if other_base and _similar(base, other_base) >= 0.9 and number not in parts:
-            parts[number] = other
-    # Every episode numbered the same way is the show's own numbering, not
-    # one story told in parts.
-    if len(parts) < 2 or len(parts) > max(12, len(feed.get("items") or []) // 2):
+    bases = [_series_base(other["title"], prefix) for other in items]
+    members = [i for i, (other_base, other_is_part) in enumerate(bases)
+               if _same_series(base, other_base) and (other_is_part or items[i] is item)]
+    if len(members) > max(12, len(items) // 2):
         return []
-    return [parts[n] for n in sorted(parts)][:limit]
+    # Only the run of neighbouring episodes around this one (a gap of up to
+    # two unrelated episodes is fine).
+    try:
+        here = next(i for i in members if items[i] is item or items[i]["audio"] == item["audio"])
+    except StopIteration:
+        return []
+    run = [here]
+    for step in (-1, 1):
+        last = here
+        for i in (members[::-1] if step < 0 else members):
+            if (step < 0 and i < last and last - i <= 3) or (step > 0 and i > last and i - last <= 3):
+                run.append(i)
+                last = i
+    if len(run) < 2:
+        return []
+    parts = [items[i] for i in sorted(set(run))]
+    # Feeds list the newest first; a story is told oldest first.
+    if all(p["date"] for p in parts):
+        parts.sort(key=lambda p: p["date"])
+    else:
+        parts.reverse()
+    return parts[:limit]
 
 
 # ---------------------------------------------------------------- download
