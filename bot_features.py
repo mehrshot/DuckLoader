@@ -2963,6 +2963,9 @@ def register_features(bot):
     _EXPECTED_ERROR_KINDS = {
         "ig_not_found", "ig_private", "ig_expired", "ig_restricted", "not_found",
         "yt_private", "yt_age", "drm", "too_large", "spotify_not_found",
+        # TikTok's age-restricted posts need a logged-in TikTok account,
+        # which the bot doesn't have (see TIKTOK_COOKIES_BROWSER).
+        "tiktok_login",
     }
     _alert_state = {"last": {}, "suppressed": {}, "sent": []}
     _alert_lock = threading.Lock()
