@@ -226,6 +226,20 @@ async def touch_site(
 
     cookies = await context.cookies()
 
+    # Logged out, instagram.com shows its login form at the same address
+    # (no redirect to /accounts/login), so the URL alone can miss it. The
+    # session cookie can't: Instagram removes it when it ends the session.
+    if site_name == "instagram" and not any(
+        cookie.get("name") == "sessionid"
+        and cookie.get("value")
+        and "instagram.com" in (cookie.get("domain") or "")
+        for cookie in cookies
+    ):
+        logger.error(
+            "instagram session appears logged out (no sessionid cookie).",
+        )
+        return "logged_out"
+
     logger.info(
         "%s session looks active "
         "(browser cookies available: %d).",
@@ -409,7 +423,7 @@ async def maintain_site(
                 send_owner_message(
                     f"⚠️ DuckLoader {site_name} "
                     "browser session is logged out "
-                    "(the site redirected to its login page).\n\n"
+                    "(login page or no session cookie).\n\n"
                     "Run cookie_keeper.py bootstrap "
                     f"{site_name} to log in again."
                 )

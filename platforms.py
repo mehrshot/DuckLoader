@@ -250,6 +250,9 @@ AUTH_ALERT_COOLDOWN = 6 * 3600
 _auth_alert_handler = None
 _auth_alert_last = {}
 _auth_alert_lock = threading.Lock()
+# Which login source the current attempt uses ("instagram:browser", ...),
+# so an expired-cookies warning says whose cookies they were.
+_attempt_context = threading.local()
 
 
 def set_auth_alert_handler(handler) -> None:
@@ -291,7 +294,8 @@ class _YtdlpLogger:
     def warning(self, msg):
         logger.warning("yt-dlp: %s", msg)
         if "cookies are no longer valid" in msg.lower():
-            _report_auth_problem("instagram", msg)
+            source = getattr(_attempt_context, "label", None)
+            _report_auth_problem("instagram", f"[{source}] {msg}" if source else msg)
 
     def error(self, msg):
         # The exception that follows is logged by whoever catches it.
@@ -998,12 +1002,20 @@ def _run_plans(url: str, plans: list, attempt) -> object:
     """Runs `attempt(plan)` for each plan until one succeeds. Non-retryable
     errors stop immediately; a YouTube bot check skips the remaining
     cookie-less plans and goes straight to the authenticated ones."""
+    try:
+        return _run_plans_in_order(url, plans, attempt)
+    finally:
+        _attempt_context.label = None
+
+
+def _run_plans_in_order(url: str, plans: list, attempt) -> object:
     last_error = None
     skip_public = False
     for index, plan in enumerate(plans, start=1):
         if skip_public and not plan.get("auth"):
             continue
         started = time.monotonic()
+        _attempt_context.label = plan["label"]
         try:
             result = attempt(plan)
             logger.info(
