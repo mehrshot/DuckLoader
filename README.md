@@ -1,6 +1,6 @@
 # 🦆 DuckLoader
 
-> A friendly Telegram media downloader for Instagram, TikTok, YouTube, SoundCloud, and Spotify.
+> A friendly Telegram media downloader for Instagram, TikTok, YouTube, Pinterest, SoundCloud, and Spotify.
 
 DuckLoader turns supported links into downloadable media inside Telegram. It combines a simple user experience with per-user settings, a full owner-only admin panel, sponsor-channel monetization, advertising requests, download protection, error logging, and configurable Duck reactions.
 
@@ -11,10 +11,13 @@ DuckLoader turns supported links into downloadable media inside Telegram. It com
 - Instagram
 - TikTok
 - YouTube
+- Pinterest
 - SoundCloud
 - Spotify
 
 Instagram, TikTok, YouTube, and SoundCloud use `yt-dlp` for extraction. Instagram stories go through a chain of independent routes (the story page's embedded data, the web, app and Android-app feed APIs, then yt-dlp's own extractor): a route that keeps failing is paused for 6 hours and the owner is told when one breaks or recovers (`ig_story_routes.json`, checked with `tools/ig_story_check.py`). Instagram photo posts, photo carousels, photo/video stories and highlight share links (`instagram.com/s/...`) are also supported.
+
+Pinterest pins (including `pin.it` short links) are read through Pinterest's own pin API, no login needed: video pins are downloaded with `yt-dlp`, image and carousel pins at their original size. TikTok's age-restricted posts, which need a logged-in account, are fetched through tikwm.com's public API instead (only the link is sent; switch off with the `tiktok_fallback` toggle).
 
 Spotify is handled through its Web API for track metadata. The matching audio is searched on YouTube Music first (it carries the official label-supplied recordings), then YouTube, then SoundCloud. Every candidate is scored on title, artists and duration; covers, remixes, live/sped-up/instrumental versions and same-titled songs by other artists are rejected, and the downloaded file's real length is verified before it is sent. Spotify's protected streams are never touched. Protected (DRM / Go+ preview-only) SoundCloud tracks use the same matcher to find the song elsewhere.
 
@@ -442,6 +445,7 @@ Stores persistent state in small JSON files: users, settings, feature flags, ban
 | Instagram | ✅ Enabled |
 | TikTok | ✅ Enabled |
 | YouTube | ❌ Disabled |
+| Pinterest | ✅ Enabled |
 | SoundCloud | ✅ Enabled |
 | Spotify | ✅ Enabled |
 | Auto quality fallback | ❌ Disabled |

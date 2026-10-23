@@ -49,6 +49,7 @@ DEFAULT_SECONDS = {
     "soundcloud": 12,
     "youtube": 25,
     "spotify": 20,
+    "pinterest": 8,
 }
 
 _lock = threading.RLock()

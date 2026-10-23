@@ -64,6 +64,7 @@ PLATFORM_NAMES = {
     "tiktok": "TikTok",
     "soundcloud": "SoundCloud",
     "spotify": "Spotify",
+    "pinterest": "Pinterest",
 }
 
 _PLATFORM_DOMAINS = {
@@ -72,6 +73,11 @@ _PLATFORM_DOMAINS = {
     "tiktok": ("tiktok.com",),
     "soundcloud": ("soundcloud.com", "snd.sc"),
     "spotify": ("spotify.com", "spotify.link"),
+    "pinterest": (
+        "pinterest.com", "pin.it", "pinterest.ca", "pinterest.co.uk", "pinterest.de", "pinterest.fr",
+        "pinterest.es", "pinterest.it", "pinterest.com.au", "pinterest.com.mx", "pinterest.jp",
+        "pinterest.ru", "pinterest.nz", "pinterest.ch", "pinterest.at", "pinterest.pt", "pinterest.cl",
+    ),
 }
 
 # Any sub-domain (www., m., music., vm., vt., on., open. ...) and an optional
@@ -2712,6 +2718,150 @@ def download_tiktok_photo(url: str, progress_hook=None):
 
 
 # ---------------------------------------------------------------------------
+# Pinterest
+# ---------------------------------------------------------------------------
+#
+# yt-dlp handles video pins only, and most pins are images (or carousels of
+# images). Pinterest's own pin API answers without a login: video pins go
+# to yt-dlp, image pins are fetched here at their original size.
+
+_PINTEREST_PIN_RE = re.compile(r"/pin/(?:[\w-]+--)?(\d+)", re.IGNORECASE)
+_PINTEREST_API = "https://www.pinterest.com/resource/PinResource/get/"
+
+
+def resolve_pinterest_url(url: str) -> tuple:
+    """(canonical pin URL, pin id); pin.it short links are followed."""
+    if _host(url) == "pin.it":
+        url = _resolve_redirects(url)
+    match = _PINTEREST_PIN_RE.search(urllib.parse.urlparse(url).path)
+    if not match:
+        raise UnsupportedLinkError("pinterest_unsupported")  # a board, a profile, the home page...
+    return f"https://www.pinterest.com/pin/{match.group(1)}/", match.group(1)
+
+
+def _pinterest_pin(pin_id: str) -> dict:
+    response = requests.get(
+        _PINTEREST_API,
+        params={"data": json.dumps({"options": {"field_set_key": "unauth_react_main_pin", "id": pin_id}})},
+        headers={"User-Agent": USER_AGENT, "X-Pinterest-PWS-Handler": "www/[username].js"},
+        timeout=20,
+    )
+    if response.status_code == 404:
+        raise Exception("Pinterest pin not found (404)")
+    response.raise_for_status()
+    data = (response.json().get("resource_response") or {}).get("data")
+    if not data:
+        raise Exception("Pinterest pin not found (no data)")
+    return data
+
+
+def _pinterest_is_video(data: dict) -> bool:
+    if (data.get("videos") or {}).get("video_list"):
+        return True
+    for page in (data.get("story_pin_data") or {}).get("pages") or []:
+        for block in page.get("blocks") or []:
+            if (block.get("video") or {}).get("video_list"):
+                return True
+    # A pin of a YouTube/Vimeo video: yt-dlp follows it there.
+    return bool((data.get("embed") or {}).get("src")) and str(data.get("domain", "")).lower() != "uploaded by user"
+
+
+def _pinterest_best_image(images: dict) -> str | None:
+    """The largest version: "orig" if there, else the widest size."""
+    if not isinstance(images, dict):
+        return None
+    for key in ("orig", "originals"):
+        if (images.get(key) or {}).get("url"):
+            return images[key]["url"]
+
+    def width(item):
+        key, value = item
+        return (value or {}).get("width") or int(re.match(r"\d*", key).group(0) or 0)
+
+    sized = [item for item in images.items() if isinstance(item[1], dict) and item[1].get("url")]
+    return max(sized, key=width)[1]["url"] if sized else None
+
+
+def _pinterest_image_urls(data: dict) -> list:
+    slots = (data.get("carousel_data") or {}).get("carousel_slots") or []
+    urls = [_pinterest_best_image(slot.get("images")) for slot in slots]
+    if not any(urls):
+        for page in (data.get("story_pin_data") or {}).get("pages") or []:
+            for block in page.get("blocks") or []:
+                urls.append(_pinterest_best_image((block.get("image") or {}).get("images")))
+    if not any(urls):
+        urls = [_pinterest_best_image(data.get("images"))]
+    seen, result = set(), []
+    for url in urls:
+        if url and url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+
+def download_pinterest(url: str, quality: str, allow_fallback: bool = False, progress_hook=None):
+    """A pin: its video (yt-dlp) or its image(s). Same return shape as
+    download_direct."""
+    canonical, pin_id = resolve_pinterest_url(url)
+    data = _pinterest_pin(pin_id)
+    attribution = data.get("closeup_attribution") or data.get("pinner") or {}
+    reactions = sum(v for v in (data.get("reaction_counts") or {}).values() if isinstance(v, int))
+
+    if _pinterest_is_video(data):
+        info, entries, files, tier = _download_by_tiers(canonical, "pinterest", quality, allow_fallback, progress_hook)
+        for entry in [info, *(entries or [])]:
+            if isinstance(entry, dict):  # yt-dlp leaves these out for many pins
+                entry["uploader"] = entry.get("uploader") or attribution.get("full_name") or attribution.get("username")
+                entry["channel"] = entry.get("channel") or attribution.get("username")
+                entry["like_count"] = entry.get("like_count") or reactions or None
+        return info, entries, files, tier
+    if quality == "audio":
+        raise UnsupportedLinkError("pinterest_photo_audio")
+
+    image_urls = _pinterest_image_urls(data)[:MAX_PLAYLIST_ENTRIES]
+    if not image_urls:
+        raise Exception("Pinterest pin has no image or video")
+    info = {
+        "id": pin_id,
+        "extractor": "Pinterest",
+        "extractor_key": "Pinterest",
+        "webpage_url": canonical,
+        "title": (data.get("title") or data.get("grid_title") or "").strip(),
+        "description": (data.get("description") or data.get("seo_description") or "").strip(),
+        "uploader": attribution.get("full_name") or attribution.get("username"),
+        "channel": attribution.get("username"),
+        "like_count": reactions or None,
+        "comment_count": data.get("comment_count"),
+        "thumbnail": image_urls[0],
+    }
+
+    job_dir = _new_job_dir()
+    filepaths, entries = [], []
+    try:
+        for index, image_url in enumerate(image_urls, start=1):
+            response = requests.get(
+                image_url, timeout=30, headers={"User-Agent": USER_AGENT, "Referer": "https://www.pinterest.com/"},
+            )
+            response.raise_for_status()
+            ext = _image_extension(image_url, response.headers.get("Content-Type", ""))
+            path = os.path.join(job_dir, f"{pin_id}_{index}.{ext}")
+            with open(path, "wb") as fh:
+                fh.write(response.content)
+            _check_file_size(path, MIN_VALID_IMAGE_BYTES)
+            filepaths.append(path)
+            entries.append({**info, "id": f"{pin_id}_{index}", "url": image_url, "thumbnail": image_url})
+            if progress_hook:
+                progress_hook({
+                    "status": "downloading",
+                    "_percent_str": f"{round(index / len(image_urls) * 100)}%",
+                })
+    except BaseException:
+        _remove_tree(job_dir)
+        raise
+    return info, entries, filepaths, "best"
+
+
+# ---------------------------------------------------------------------------
 # SoundCloud
 # ---------------------------------------------------------------------------
 
@@ -2905,6 +3055,9 @@ def _download_direct(url: str, quality: str = "best", allow_fallback: bool = Fal
 
     if platform == "spotify":
         raise UnsupportedLinkError("spotify_direct")
+
+    if platform == "pinterest":
+        return download_pinterest(url, quality, allow_fallback, progress_hook)
 
     return _download_by_tiers(url, platform, quality, allow_fallback, progress_hook)
 
@@ -4099,6 +4252,11 @@ def media_cache_key(url: str, quality: str) -> str | None:
             if not re.search(r"/(?:video|photo)/\d+", parsed.path):
                 return None  # vm./vt. short links: resolved later
             canonical = f"tiktok:{re.search(r'/(?:video|photo)/(\d+)', parsed.path).group(1)}"
+        elif platform == "pinterest":
+            match = _PINTEREST_PIN_RE.search(parsed.path)
+            if not match:
+                return None  # pin.it short links: resolved later
+            canonical = f"pinterest:{match.group(1)}"
         else:
             return None
     except UnsupportedLinkError:
@@ -4159,6 +4317,10 @@ def classify_error(platform: str, error: Exception) -> str:
         if "age" in text and ("restricted" in text or "confirm your age" in text):
             return "yt_age"
         return "youtube_failed"
+    if platform == "pinterest":
+        if "404" in text or "not found" in text:
+            return "not_found"
+        return "pinterest_failed"
     if platform == "soundcloud":
         if "404" in text or "not found" in text:
             return "not_found"

@@ -386,6 +386,7 @@ DEFAULT_EXPECTED_SECONDS = {
     "soundcloud": 12,
     "youtube": 25,
     "spotify": 20,
+    "pinterest": 8,
 }
 
 
@@ -670,7 +671,7 @@ TEXTS = {
             "🦆 <b>داکلودر</b>\n"
             "لینک بفرست، فایلش رو تحویل بگیر.\n"
             "\n"
-            "📥 اینستاگرام، یوتیوب، تیک‌تاک، اسپاتیفای و ساندکلاد\n"
+            "📥 اینستاگرام، یوتیوب، تیک‌تاک، پینترست، اسپاتیفای و ساندکلاد\n"
             "🎵 اسم یا ویس یه آهنگ رو بفرست تا پیداش کنم\n"
             "✂️ از هر ویدیو یه تیکه، گیف یا رینگتون بساز\n"
             "\n"
@@ -776,7 +777,7 @@ TEXTS = {
         'already_downloading': "⏳ این لینک در حال دانلوده؛ چند لحظه صبر کن تا برسه.",
         'yt_not_yours': "🦆 فقط کسی که لینک رو فرستاده می‌تونه کیفیت رو انتخاب کنه.",
         'yt_pick_for': "👤 انتخاب کیفیت فقط با {name}",
-        'group_intro': "🦆 سلام! من داکلودرم.\n\nهر لینک اینستاگرام، تیک‌تاک، یوتیوب، ساندکلاد یا اسپاتیفای که توی این گروه فرستاده بشه، فایلش رو همین‌جا میارم. لازم نیست کار دیگه‌ای بکنید، فقط لینک بفرستید!",
+        'group_intro': "🦆 سلام! من داکلودرم.\n\nهر لینک اینستاگرام، تیک‌تاک، یوتیوب، پینترست، ساندکلاد یا اسپاتیفای که توی این گروه فرستاده بشه، فایلش رو همین‌جا میارم. لازم نیست کار دیگه‌ای بکنید، فقط لینک بفرستید!",
         'group_intro_needs_admin': "\n\n⚠️ برای اینکه لینک‌های گروه رو ببینم، باید منو ادمین گروه کنید (هیچ دسترسی خاصی لازم نیست).",
         'group_album_private': "🎵 آلبوم و پلی‌لیست اسپاتیفای رو توی چت خصوصی ربات بفرست تا گروه شلوغ نشه.",
         'open_bot_btn': "🦆 باز کردن داکلودر",
@@ -819,6 +820,9 @@ TEXTS = {
         'tiktok_blocked': "🌍 تیک‌تاک دسترسی به این ویدیو رو از منطقه‌ی سرور ربات بسته و فعلاً قابل دریافت نیست.",
         'tiktok_login': "🔞 تیک‌تاک این ویدیو رو فقط برای کاربران واردشده نمایش می‌ده (محدودیت سنی) و فعلاً قابل دریافت نیست.",
         'tiktok_photo_audio': "ℹ️ این پست تیک‌تاک عکسیه و صدای جداگانه‌ای برای دانلود نداره.",
+        'pinterest_failed': "❌ دریافت این پین پینترست در حال حاضر انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
+        'pinterest_unsupported': "ℹ️ فقط لینک خود پین پینترست دانلود می‌شه (نه بُرد یا پروفایل). پین رو باز کن و لینک همون رو بفرست.",
+        'pinterest_photo_audio': "ℹ️ این پین عکسه و صدایی برای دانلود نداره.",
         'drm': "🔒 این ترک توسط ناشرش محافظت شده و نسخه‌ی جایگزینی هم ازش پیدا نشد.",
         'yt_private': "🔒 این ویدیوی یوتیوب خصوصی یا مخصوص اعضای کاناله.",
         'yt_age': "🔞 این ویدیوی یوتیوب محدودیت سنی داره و فعلاً قابل دریافت نیست.",
@@ -1201,7 +1205,7 @@ TEXTS = {
             "🦆 <b>DuckLoader</b>\n"
             "Send a link, get the file.\n"
             "\n"
-            "📥 Instagram, YouTube, TikTok, Spotify and SoundCloud\n"
+            "📥 Instagram, YouTube, TikTok, Pinterest, Spotify and SoundCloud\n"
             "🎵 Send a song's name or a voice clip of it and I'll find it\n"
             "✂️ Make a clip, a GIF or a ringtone from any video\n"
             "\n"
@@ -1307,7 +1311,7 @@ TEXTS = {
         'already_downloading': "⏳ This link is already downloading — it'll arrive in a moment.",
         'yt_not_yours': "🦆 Only the person who sent the link can choose the quality.",
         'yt_pick_for': "👤 Only {name} can choose the quality",
-        'group_intro': "🦆 Hi! I'm DuckLoader.\n\nSend any Instagram, TikTok, YouTube, SoundCloud or Spotify link in this group and I'll bring the file right here. Nothing else to do — just send links!",
+        'group_intro': "🦆 Hi! I'm DuckLoader.\n\nSend any Instagram, TikTok, YouTube, Pinterest, SoundCloud or Spotify link in this group and I'll bring the file right here. Nothing else to do — just send links!",
         'group_intro_needs_admin': "\n\n⚠️ To see the group's links, please make me an admin (no special permissions needed).",
         'group_album_private': "🎵 Send Spotify albums and playlists in a private chat with the bot, so the group doesn't get flooded.",
         'open_bot_btn': "🦆 Open DuckLoader",
@@ -1350,6 +1354,9 @@ TEXTS = {
         'tiktok_blocked': "🌍 TikTok blocks this video in the bot server's region, so it can't be downloaded right now.",
         'tiktok_login': "🔞 TikTok only shows this video to logged-in users (age restriction), so it can't be downloaded right now.",
         'tiktok_photo_audio': "ℹ️ This TikTok post is a photo slideshow and has no separate audio to download.",
+        'pinterest_failed': "❌ We couldn't download this Pinterest pin right now. Please check the link and try again.",
+        'pinterest_unsupported': "ℹ️ Only links to a pin itself work (not boards or profiles). Open the pin and send its link.",
+        'pinterest_photo_audio': "ℹ️ This pin is an image and has no sound to download.",
         'drm': "🔒 This track is protected by its publisher and no alternative copy could be found.",
         'yt_private': "🔒 This YouTube video is private or members-only.",
         'yt_age': "🔞 This YouTube video is age-restricted and can't be downloaded right now.",
@@ -8159,7 +8166,7 @@ def register_features(bot):
     # Errors a second try may fix. Private, deleted, too large, age-gated
     # and the like get no button: trying again can't change them.
     RETRYABLE_ERRORS = {
-        "download_failed", "youtube_failed", "tiktok_failed", "soundcloud_failed", "spotify_failed",
+        "download_failed", "youtube_failed", "tiktok_failed", "soundcloud_failed", "spotify_failed", "pinterest_failed",
         "instagram_failed", "platform_unavailable", "ig_login", "ig_story_login",
     }
     _retry_jobs = _BoundedCache(max_items=3000)
