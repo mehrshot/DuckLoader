@@ -952,7 +952,25 @@ def _youtube_download_plans() -> list:
     if _youtube_cookie_opts():
         auth = _client_attempts() if override else YOUTUBE_AUTH_DOWNLOAD_CLIENTS
         plans += [_youtube_plan(clients, True) for clients in auth]
+    if override:
+        # YouTube now and then answers a client's download links with 403
+        # (it passes a minute later, or with another client): other
+        # clients get a turn before the user sees an error.
+        tried = {client for clients in _client_attempts() for client in clients}
+        plans += [_youtube_plan([client], False) for client in _youtube_fallback_clients() if client not in tried]
     return plans
+
+
+def _youtube_fallback_clients() -> list:
+    """Clients for a second chance, those this yt-dlp version knows."""
+    try:
+        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+    except Exception:
+        try:
+            from yt_dlp.extractor.youtube import INNERTUBE_CLIENTS
+        except Exception:
+            INNERTUBE_CLIENTS = {}
+    return [c for c in ("tv_samsung", "tv", "mweb") if not INNERTUBE_CLIENTS or c in INNERTUBE_CLIENTS]
 
 
 def _default_plans(url: str) -> list:
