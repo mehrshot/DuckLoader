@@ -2016,15 +2016,11 @@ def _build_caption(
     # Statistics
     # ---------------------------------------------------------------
 
-    likes = (
-        entry.get("like_count")
-        or 0
-    )
-
-    comments = (
-        entry.get("comment_count")
-        or 0
-    )
+    # A number the platform doesn't give (None) is left out of the caption
+    # rather than shown as 0 (Pinterest has no public view count, ...).
+    likes = entry.get("like_count")
+    comments = entry.get("comment_count")
+    saves = entry.get("save_count")  # Pinterest
 
     views = None
 
@@ -2048,9 +2044,6 @@ def _build_caption(
             views = value
             break
 
-    if views is None:
-        views = 0
-
     def format_num(n):
         return (
             f"{n:,}"
@@ -2058,10 +2051,10 @@ def _build_caption(
             else n
         )
 
-    stats_line = (
-        f"❤️ {format_num(likes)} | "
-        f"💬 {format_num(comments)} | "
-        f"👁‍🗨 {format_num(views)}"
+    stats_line = " | ".join(
+        f"{icon} {format_num(value)}"
+        for icon, value in (("❤️", likes), ("💬", comments), ("📌", saves), ("👁‍🗨", views))
+        if value is not None and not isinstance(value, bool)
     )
 
     # ---------------------------------------------------------------
@@ -2087,7 +2080,7 @@ def _build_caption(
             f"📅 {date_str}"
         )
 
-    if not is_instagram_story:
+    if not is_instagram_story and stats_line:
         lines.append(
             stats_line
         )
@@ -6605,7 +6598,7 @@ def register_features(bot):
     # ------------------------------------------------------------------
 
     SONG_PREFIX = "song_"
-    SONG_PLATFORMS = {"instagram", "tiktok", "youtube"}
+    SONG_PLATFORMS = {"instagram", "tiktok", "youtube", "pinterest"}
     SONG_DAILY_LIMIT = int(os.environ.get("SONG_DAILY_LIMIT", "20"))
     SONG_ID_TTL = 30 * 86400
     _song_usage = {}

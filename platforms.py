@@ -28,6 +28,7 @@ just because it happened to come first.
 import base64
 import contextlib
 import difflib
+import email.utils
 import itertools
 import json
 import math
@@ -2805,15 +2806,29 @@ def download_pinterest(url: str, quality: str, allow_fallback: bool = False, pro
     canonical, pin_id = resolve_pinterest_url(url)
     data = _pinterest_pin(pin_id)
     attribution = data.get("closeup_attribution") or data.get("pinner") or {}
+    # Pinterest has no public view count. The real comment and save counts
+    # are in aggregated_pin_data (the pin's own comment_count is usually 0).
+    aggregated = data.get("aggregated_pin_data") or {}
     reactions = sum(v for v in (data.get("reaction_counts") or {}).values() if isinstance(v, int))
+    stats = {
+        "uploader": attribution.get("full_name") or attribution.get("username"),
+        "channel": attribution.get("username"),
+        "like_count": reactions or None,
+        "comment_count": aggregated.get("comment_count") if aggregated.get("comment_count") is not None else data.get("comment_count"),
+        "save_count": (aggregated.get("aggregated_stats") or {}).get("saves") or data.get("repin_count"),
+        "view_count": None,
+    }
+    try:
+        created = email.utils.parsedate_to_datetime(data["created_at"]).timestamp()
+    except Exception:
+        created = None
 
     if _pinterest_is_video(data):
         info, entries, files, tier = _download_by_tiers(canonical, "pinterest", quality, allow_fallback, progress_hook)
         for entry in [info, *(entries or [])]:
-            if isinstance(entry, dict):  # yt-dlp leaves these out for many pins
-                entry["uploader"] = entry.get("uploader") or attribution.get("full_name") or attribution.get("username")
-                entry["channel"] = entry.get("channel") or attribution.get("username")
-                entry["like_count"] = entry.get("like_count") or reactions or None
+            if isinstance(entry, dict):
+                entry.update({k: v for k, v in stats.items() if k not in ("uploader", "channel") or not entry.get(k)})
+                entry["timestamp"] = entry.get("timestamp") or created
         return info, entries, files, tier
     if quality == "audio":
         raise UnsupportedLinkError("pinterest_photo_audio")
@@ -2828,11 +2843,9 @@ def download_pinterest(url: str, quality: str, allow_fallback: bool = False, pro
         "webpage_url": canonical,
         "title": (data.get("title") or data.get("grid_title") or "").strip(),
         "description": (data.get("description") or data.get("seo_description") or "").strip(),
-        "uploader": attribution.get("full_name") or attribution.get("username"),
-        "channel": attribution.get("username"),
-        "like_count": reactions or None,
-        "comment_count": data.get("comment_count"),
+        "timestamp": created,
         "thumbnail": image_urls[0],
+        **stats,
     }
 
     job_dir = _new_job_dir()
