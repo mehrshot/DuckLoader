@@ -66,6 +66,7 @@ PLATFORM_NAMES = {
     "soundcloud": "SoundCloud",
     "spotify": "Spotify",
     "pinterest": "Pinterest",
+    "podcast": "Podcasts",
 }
 
 _PLATFORM_DOMAINS = {
@@ -79,6 +80,9 @@ _PLATFORM_DOMAINS = {
         "pinterest.es", "pinterest.it", "pinterest.com.au", "pinterest.com.mx", "pinterest.jp",
         "pinterest.ru", "pinterest.nz", "pinterest.ch", "pinterest.at", "pinterest.pt", "pinterest.cl",
     ),
+    # Spotify episodes are podcasts too, but their links are Spotify's:
+    # see podcast_episode_url().
+    "podcast": ("podcasts.apple.com", "castbox.fm"),
 }
 
 # Any sub-domain (www., m., music., vm., vt., on., open. ...) and an optional
@@ -2875,6 +2879,36 @@ def download_pinterest(url: str, quality: str, allow_fallback: bool = False, pro
 
 
 # ---------------------------------------------------------------------------
+# Podcasts (podcasts.py): Apple Podcasts, Castbox and Spotify episodes
+# ---------------------------------------------------------------------------
+
+def podcast_episode_url(url: str) -> str | None:
+    """`url` (a spotify.link short link followed) if it's a podcast episode
+    or show link, else None."""
+    platform = _platform_of_url(url)
+    if platform == "podcast":
+        return url
+    if platform == "spotify":
+        if "spotify.link" in _host(url):
+            url = _resolve_redirects(url)
+        if re.search(r"spotify\.com/(?:intl-[a-z_-]+/)?episode/", url, re.IGNORECASE):
+            return url
+    return None
+
+
+def download_podcast_episode(url: str, progress_hook=None):
+    """An episode from its own host (see podcasts.py). Same return shape as
+    download_direct; info["duck_podcast"] carries chapters and series."""
+    import podcasts  # here: podcasts imports this module
+
+    feed, item = podcasts.resolve(url)
+    info, path = podcasts.download(feed, item, progress_hook)
+    info["duck_podcast"]["series"] = podcasts.series(feed, item)
+    info["duck_podcast"]["feed"] = {k: feed.get(k) for k in ("title", "author", "image")}
+    return info, [info], [path], "audio"
+
+
+# ---------------------------------------------------------------------------
 # SoundCloud
 # ---------------------------------------------------------------------------
 
@@ -3065,6 +3099,10 @@ def _download_direct(url: str, quality: str = "best", allow_fallback: bool = Fal
                 raise e from fallback_error
             logger.info("TikTok age-restricted post fetched via tikwm | %s", url)
             return result
+
+    episode_url = podcast_episode_url(url)
+    if episode_url:
+        return download_podcast_episode(episode_url, progress_hook)
 
     if platform == "spotify":
         raise UnsupportedLinkError("spotify_direct")
@@ -4254,9 +4292,18 @@ def media_cache_key(url: str, quality: str) -> str | None:
             canonical = f"youtube:{video_id}"
         elif platform == "spotify":
             match = _SPOTIFY_URL_RE.search(url)
-            if not match or match.group(1).lower() != "track":
+            if not match or match.group(1).lower() not in ("track", "episode"):
                 return None  # albums/playlists aren't single files; spotify.link needs a request
             canonical = f"spotify:{match.group(2)}"
+        elif platform == "podcast":
+            apple_episode = (urllib.parse.parse_qs(parsed.query).get("i") or [None])[0]
+            castbox_episode = re.search(r"-id\d+-id(\d+)", urllib.parse.unquote(parsed.path))
+            if apple_episode and apple_episode.isdigit():
+                canonical = f"podcast:apple:{apple_episode}"
+            elif castbox_episode:
+                canonical = f"podcast:castbox:{castbox_episode.group(1)}"
+            else:
+                return None
         elif platform == "soundcloud":
             if _host(url) in _SOUNDCLOUD_SHORT_HOSTS:
                 return None
@@ -4340,6 +4387,12 @@ def classify_error(platform: str, error: Exception) -> str:
         if "503" in text or "service unavailable" in text or "could not resolve soundcloud" in text:
             return "platform_unavailable"
         return "soundcloud_failed"
+    if platform == "podcast" or "podcast" in text or "spotify episode" in text:
+        if "spotify exclusive" in text:
+            return "podcast_exclusive"
+        if "not found" in text or "404" in text:
+            return "not_found"
+        return "podcast_failed"
     if platform == "spotify":
         if "404" in text or "resource not found" in text or "invalid id" in text:
             return "spotify_not_found"

@@ -52,6 +52,7 @@ DEFAULT_FLAGS = {
     "youtube": False,
     "tiktok": True,
     "pinterest": True,
+    "podcast": True,
     "auto_quality_fallback": False,
     "ad_requests_button": True,
     "sponsor_channel_gate": True,

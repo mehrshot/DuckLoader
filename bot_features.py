@@ -41,6 +41,7 @@ import campaigns
 import estimator
 import media_store
 import media_tools
+import podcasts
 import song_finder
 import platforms
 import store
@@ -387,6 +388,7 @@ DEFAULT_EXPECTED_SECONDS = {
     "youtube": 25,
     "spotify": 20,
     "pinterest": 8,
+    "podcast": 40,
 }
 
 
@@ -673,6 +675,7 @@ TEXTS = {
             "\n"
             "📥 اینستاگرام، یوتیوب، تیک‌تاک، پینترست، اسپاتیفای و ساندکلاد\n"
             "🎵 اسم یا ویس یه آهنگ رو بفرست تا پیداش کنم\n"
+            "🎙 اپیزودهای پادکست از اپل پادکست، کست‌باکس و اسپاتیفای\n"
             "✂️ از هر ویدیو یه تیکه، گیف یا رینگتون بساز\n"
             "\n"
             "هر کدوم رو بزن تا ببینی چطوری کار می‌کنه 👇"
@@ -823,6 +826,15 @@ TEXTS = {
         'pinterest_failed': "❌ دریافت این پین پینترست در حال حاضر انجام نشد. لطفاً لینک رو بررسی کن و دوباره امتحان کن.",
         'pinterest_unsupported': "ℹ️ فقط لینک خود پین پینترست دانلود می‌شه (نه بُرد یا پروفایل). پین رو باز کن و لینک همون رو بفرست.",
         'pinterest_photo_audio': "ℹ️ این پین عکسه و صدایی برای دانلود نداره.",
+        'podcast_failed': "❌ دریافت این اپیزود پادکست در حال حاضر انجام نشد. لطفاً چند لحظه بعد دوباره امتحان کن.",
+        'podcast_show': "ℹ️ این لینک کل پادکسته. اپیزودی که می‌خوای رو باز کن و لینک همون رو بفرست.",
+        'podcast_unsupported': "ℹ️ لینک یه اپیزود پادکست از اپل پادکست، کست‌باکس یا اسپاتیفای رو بفرست.",
+        'podcast_exclusive': "🔒 این پادکست انحصاری اسپاتیفایه و نسخه‌ی عمومی‌ای نداره که بشه دانلودش کرد.",
+        'podcast_series_offer': "📚 این اپیزود قسمت {k} از یه روایت {n} قسمتیه: «{name}»\nبقیه‌ی قسمت‌ها رو هم برات بفرستم؟",
+        'podcast_series_btn': "📚 بفرست {m} قسمت دیگه",
+        'podcast_series_progress': "⬇️ در حال دریافت قسمت {i} از {n}...",
+        'podcast_series_sending': "📤 در حال ارسال {n} قسمت...",
+        'podcast_more_chapters': "📑 بقیه‌ی بخش‌های این اپیزود (روی زمان بزن تا همون‌جا پخش بشه):",
         'drm': "🔒 این ترک توسط ناشرش محافظت شده و نسخه‌ی جایگزینی هم ازش پیدا نشد.",
         'yt_private': "🔒 این ویدیوی یوتیوب خصوصی یا مخصوص اعضای کاناله.",
         'yt_age': "🔞 این ویدیوی یوتیوب محدودیت سنی داره و فعلاً قابل دریافت نیست.",
@@ -1211,6 +1223,7 @@ TEXTS = {
             "\n"
             "📥 Instagram, YouTube, TikTok, Pinterest, Spotify and SoundCloud\n"
             "🎵 Send a song's name or a voice clip of it and I'll find it\n"
+            "🎙 Podcast episodes from Apple Podcasts, Castbox and Spotify\n"
             "✂️ Make a clip, a GIF or a ringtone from any video\n"
             "\n"
             "Tap one to see how it works 👇"
@@ -1361,6 +1374,15 @@ TEXTS = {
         'pinterest_failed': "❌ We couldn't download this Pinterest pin right now. Please check the link and try again.",
         'pinterest_unsupported': "ℹ️ Only links to a pin itself work (not boards or profiles). Open the pin and send its link.",
         'pinterest_photo_audio': "ℹ️ This pin is an image and has no sound to download.",
+        'podcast_failed': "❌ We couldn't download this podcast episode right now. Please try again in a moment.",
+        'podcast_show': "ℹ️ That's a link to the whole podcast. Open the episode you want and send its link.",
+        'podcast_unsupported': "ℹ️ Send a link to a podcast episode on Apple Podcasts, Castbox or Spotify.",
+        'podcast_exclusive': "🔒 This podcast is a Spotify exclusive, with no public version that can be downloaded.",
+        'podcast_series_offer': "📚 This episode is part {k} of a {n}-part story: \"{name}\"\nShall I send you the other parts too?",
+        'podcast_series_btn': "📚 Send the other {m} parts",
+        'podcast_series_progress': "⬇️ Getting part {i} of {n}...",
+        'podcast_series_sending': "📤 Sending {n} parts...",
+        'podcast_more_chapters': "📑 The rest of this episode's sections (tap a time to play from there):",
         'drm': "🔒 This track is protected by its publisher and no alternative copy could be found.",
         'yt_private': "🔒 This YouTube video is private or members-only.",
         'yt_age': "🔞 This YouTube video is age-restricted and can't be downloaded right now.",
@@ -1765,6 +1787,34 @@ def _quality_label(t: dict, quality: str) -> str:
     }
     return labels.get(quality, quality)
 
+def _podcast_caption(entry: dict):
+    """(caption, chapters that didn't fit) for a podcast episode. Chapter
+    times are written so Telegram turns them into seek links."""
+    podcast = entry.get("duck_podcast") or {}
+    head = [f"🎙 {podcast.get('show') or entry.get('album') or ''}".rstrip(), f"🎧 {entry.get('title') or ''}"]
+    facts = []
+    try:
+        if entry.get("timestamp"):
+            facts.append("📅 " + datetime.fromtimestamp(entry["timestamp"]).strftime("%Y/%m/%d"))
+    except (TypeError, ValueError, OSError):
+        pass
+    if entry.get("duration"):
+        facts.append("⏱ " + podcasts.clock(entry["duration"]))
+    if facts:
+        head.append(" | ".join(facts))
+    text = "\n".join(head)
+    footer = f"\n\n{BOT_SIGNATURE}"
+    chapters = podcast.get("chapters") or []
+    shown = 0
+    for seconds, title in chapters:
+        line = f"{podcasts.clock(seconds)} {title}"[:80]
+        candidate = text + ("\n\n" if shown == 0 else "\n") + line
+        if len((candidate + footer).encode("utf-16-le")) // 2 > MAX_CAPTION_LENGTH:
+            break
+        text, shown = candidate, shown + 1
+    return text + footer, chapters[shown:]
+
+
 def _build_caption(
     entry: dict,
     source_url: str = "",
@@ -1786,6 +1836,9 @@ def _build_caption(
     Other platforms:
         - Keep the existing uploader-based hashtag behavior.
     """
+
+    if entry.get("duck_podcast"):
+        return _podcast_caption(entry)[0]
 
     platform = (
         entry.get("extractor_key")
@@ -3933,6 +3986,115 @@ def register_features(bot):
         return False
 
 
+    # ------------------------------------------------------------------
+    # Podcasts: after an episode, the chapters that didn't fit in its
+    # caption (as a reply: their times still seek that audio), and, for a
+    # story told over several episodes, an offer to send all the parts.
+    # ------------------------------------------------------------------
+    PODCAST_SERIES_PREFIX = "podall_"
+    PODCAST_SERIES_OFFER_SECONDS = 90  # then the offer deletes itself
+    _podcast_series = _BoundedCache(max_items=2000)
+
+    def _after_podcast_episode(chat_id, sent_message, metadata, t):
+        podcast = metadata["duck_podcast"]
+        _, rest = _podcast_caption(metadata)
+        if rest:
+            text = t["podcast_more_chapters"]
+            for seconds, title in rest:
+                line = f"\n{podcasts.clock(seconds)} {title}"[:90]
+                if len(text) + len(line) > 4000:
+                    break
+                text += line
+            try:
+                bot.send_message(chat_id, text, reply_to_message_id=sent_message.message_id)
+            except Exception:
+                logger.warning("Could not send the rest of the podcast chapters", exc_info=True)
+
+        parts = podcast.get("series") or []
+        current = [i for i, part in enumerate(parts) if part["title"] == metadata.get("title")]
+        others = [part for part in parts if part["title"] != metadata.get("title")]
+        if len(parts) >= 2 and others:
+            base = podcasts._part_of(metadata.get("title") or "")[0] or metadata.get("title") or ""
+            token = secrets.token_urlsafe(6)
+            _podcast_series[token] = {"user_id": chat_id, "parts": others, "feed": podcast.get("feed") or {}}
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(
+                t["podcast_series_btn"].format(m=_digits(t, len(others))),
+                callback_data=PODCAST_SERIES_PREFIX + token,
+            ))
+            try:
+                offer = bot.send_message(
+                    chat_id,
+                    t["podcast_series_offer"].format(
+                        k=_digits(t, current[0] + 1 if current else "?"), n=_digits(t, len(parts)), name=base,
+                    ),
+                    reply_markup=markup, reply_to_message_id=sent_message.message_id,
+                )
+            except Exception:
+                logger.warning("Could not offer the podcast series", exc_info=True)
+                return
+
+            def withdraw():
+                if _podcast_series.pop(token, None) is not None:  # not taken up
+                    _delete_quietly(chat_id, offer.message_id)
+            timer = threading.Timer(PODCAST_SERIES_OFFER_SECONDS, withdraw)
+            timer.daemon = True
+            timer.start()
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(PODCAST_SERIES_PREFIX))
+    def handle_podcast_series(call):
+        chat_id, user_id = call.message.chat.id, call.from_user.id
+        t = _texts_for(chat_id)
+        token = call.data[len(PODCAST_SERIES_PREFIX):]
+        job = _podcast_series.get(token)
+        if not job or job["user_id"] != user_id or store.is_banned(user_id):
+            bot.answer_callback_query(call.id, t["retry_expired"], show_alert=True)
+            return
+        _podcast_series.pop(token, None)
+        bot.answer_callback_query(call.id)
+
+        def edit(text):
+            try:
+                bot.edit_message_text(text, chat_id, call.message.message_id, reply_markup=None)
+            except Exception:
+                pass
+
+        parts, feed = job["parts"], job["feed"]
+        slot = _acquire_download_slot(bot, chat_id, call.message, t, show_ui=True, platform="podcast")
+        if slot is None:
+            edit(t["server_busy"])
+            return
+        paths, medias, handles = [], [], []
+        try:
+            # All parts first, then one album (Telegram groups up to 10
+            # audio files and plays them one after another).
+            for index, item in enumerate(parts, start=1):
+                edit(t["podcast_series_progress"].format(i=_digits(t, index), n=_digits(t, len(parts))))
+                info, path = podcasts.download(feed, item)
+                paths.append(path)
+                platforms.tag_audio_file(path, title=item["title"], artist=feed.get("author") or "",
+                                         album=feed.get("title") or "")
+                handle = open(path, "rb")
+                handles.append(handle)
+                medias.append(InputMediaAudio(
+                    handle, caption=_podcast_caption(info)[0], title=item["title"],
+                    performer=feed.get("title") or None, duration=int(item.get("duration") or 0) or None,
+                ))
+            edit(t["podcast_series_sending"].format(n=_digits(t, len(parts))))
+            for start in range(0, len(medias), 10):
+                bot.send_media_group(chat_id, medias[start:start + 10], timeout=1800)
+            _delete_quietly(chat_id, call.message.message_id)
+            store.record_download("podcast", chat_id)
+        except Exception as e:
+            store.record_error(platform="podcast", url=feed.get("title") or "", user_id=user_id, error=str(e))
+            logger.exception("Podcast series failed")
+            edit(_friendly_download_error("podcast", e, t))
+        finally:
+            for handle in handles:
+                handle.close()
+            platforms.remove_download_files(paths)
+            slot.release()
+
     def _send_download_result(
         chat_id_int,
         reply_to_id,
@@ -4416,6 +4578,9 @@ def register_features(bot):
 
                     sent_refs.append(_file_ref(sent_message))
                     sent_messages.append(sent_message)
+
+            if show_ui and metadata_source.get("duck_podcast") and sent_messages:
+                _after_podcast_episode(chat_id_int, sent_messages[0], metadata_source, t)
 
         elif len(valid_files) > 1:
             chunks = [valid_files[idx:idx + 10] for idx in range(0, len(valid_files), 10)]
@@ -7399,7 +7564,7 @@ def register_features(bot):
             bot.reply_to(message, t['rate_limited'].format(limit=_digits(t, RATE_LIMIT_COUNT)))
             return False
 
-        if platform == "spotify":
+        if platform == "spotify" and not platforms.podcast_episode_url(url):
             # A single track that was already delivered: send it again by
             # file_id (albums and playlists aren't cached as a whole) -
             # instantly, without a progress message.
@@ -8293,7 +8458,7 @@ def register_features(bot):
     # Errors a second try may fix. Private, deleted, too large, age-gated
     # and the like get no button: trying again can't change them.
     RETRYABLE_ERRORS = {
-        "download_failed", "youtube_failed", "tiktok_failed", "soundcloud_failed", "spotify_failed", "pinterest_failed",
+        "download_failed", "youtube_failed", "tiktok_failed", "soundcloud_failed", "spotify_failed", "pinterest_failed", "podcast_failed",
         "instagram_failed", "platform_unavailable", "ig_login", "ig_story_login",
     }
     _retry_jobs = _BoundedCache(max_items=3000)
