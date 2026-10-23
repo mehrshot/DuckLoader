@@ -167,6 +167,45 @@ def _acrcloud(sample_path):
     }
 
 
+def song_key(song):
+    """Same song, however it was found: normalized artist + title."""
+    return platforms._normalize_text(song.get("artist") or "") + "|" + platforms._normalize_text(song.get("title") or "")
+
+
+def recognize_all(media_path, exclude=(), spots=5, limit=4):
+    """For "that's not the song": every distinct song heard at more spots of
+    the file, by both engines, except the songs in `exclude` (song_key)."""
+    if platforms.has_audio_stream(media_path) is False:
+        raise platforms.NoAudioError("This video has no sound track.")
+    duration = _duration(media_path)
+    if not duration or duration <= SAMPLE_SECONDS + 2:
+        offsets = [0.0]
+    else:
+        last_start = max(0.0, duration - SAMPLE_SECONDS)
+        offsets = sorted({round(min(duration * f, last_start), 1) for f in (0.05, 0.25, 0.45, 0.65, 0.85)})[:spots]
+    found, seen = [], set(exclude)
+    job_dir = platforms._new_job_dir()
+    try:
+        for index, offset in enumerate(offsets):
+            sample = _cut_sample(media_path, offset, os.path.join(job_dir, f"sample{index}.wav"))
+            for engine in (_shazam, _acrcloud):
+                try:
+                    song = engine(sample)
+                except Exception as e:
+                    logger.warning("Song recognition (%s) failed: %s", engine.__name__.strip("_"), str(e)[:200])
+                    continue
+                if song and song_key(song) not in seen:
+                    seen.add(song_key(song))
+                    logger.info("Another song heard at %.0fs by %s: %s - %s",
+                                offset, song["engine"], song["artist"], song["title"])
+                    found.append(song)
+            if len(found) >= limit:
+                break
+        return found
+    finally:
+        platforms._remove_tree(job_dir)
+
+
 def recognize(media_path):
     """The song in an audio/video file, or None. Raises NoAudioError for a
     silent video."""

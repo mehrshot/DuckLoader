@@ -1123,6 +1123,10 @@ TEXTS = {
         'song_found_no_file': "🎵 آهنگ این ویدیو: {song}\n\nولی نتونستم فایل کاملش رو پیدا کنم.",
         'song_limit': "⚠️ امروز به سقف {limit} بار شناسایی آهنگ رسیدی. فردا دوباره امتحان کن.",
         'song_expired': "⚠️ این دکمه دیگه معتبر نیست؛ لینک رو دوباره بفرست.",
+        'song_wrong_btn': "❌ این آهنگ نیست",
+        'song_retry_searching': "🔎 باشه، دارم دوباره و با دقت بیشتر به ویدیو گوش می‌دم...",
+        'song_retry_pick': "🎵 این‌ها رو هم توی ویدیو پیدا کردم؛ کدومه؟ 👇\n\nاگه هیچ‌کدوم نیست، اسم آهنگ رو بنویس تا جستجو کنم.",
+        'song_retry_none': "🤷 آهنگ دیگه‌ای توی این ویدیو پیدا نکردم.\n\nاگه اسمش رو می‌دونی (حتی تقریبی) بنویس تا جستجو کنم.",
         'song_disabled': "⚠️ پیدا کردن آهنگ فعلاً غیرفعاله.",
         'song_failed': "❌ شناسایی آهنگ انجام نشد. یه بار دیگه امتحان کن.",
         'progress_converting': "🎧 در حال جدا کردن صدا",
@@ -1656,6 +1660,10 @@ TEXTS = {
         'song_found_no_file': "🎵 The song in this video: {song}\n\nBut I couldn't find the full song file.",
         'song_limit': "⚠️ You've reached today's limit of {limit} song searches. Try again tomorrow.",
         'song_expired': "⚠️ This button has expired; send the link again.",
+        'song_wrong_btn': "❌ Not this song",
+        'song_retry_searching': "🔎 OK, listening to the video again more closely...",
+        'song_retry_pick': "🎵 I also heard these in the video; which one is it? 👇\n\nIf none of them, write the song's name and I'll search for it.",
+        'song_retry_none': "🤷 I couldn't find another song in this video.\n\nIf you know its name (even roughly), write it and I'll search for it.",
         'song_disabled': "⚠️ Song search is turned off for now.",
         'song_failed': "❌ Couldn't recognize the song. Please try again.",
         'progress_converting': "🎧 Extracting the audio",
@@ -6598,6 +6606,9 @@ def register_features(bot):
     # ------------------------------------------------------------------
 
     SONG_PREFIX = "song_"
+    SONG_WRONG_PREFIX = "songno_"
+    SONG_WRONG_SECONDS = 120  # the button goes away after this: enough to hear the start
+    _song_rejects = _BoundedCache(max_items=3000)  # token -> what to search again
     SONG_PLATFORMS = {"instagram", "tiktok", "youtube", "pinterest"}
     SONG_DAILY_LIMIT = int(os.environ.get("SONG_DAILY_LIMIT", "20"))
     SONG_ID_TTL = 30 * 86400
@@ -6653,17 +6664,46 @@ def register_features(bot):
         cleanup.extend(files)
         return files[0]
 
-    def _send_song(chat_id, reply_to_id, song, t, edit, status_id):
+    def _song_wrong_markup(t, song, reject_job):
+        """"Not this song" under a song found in a video or a voice clip."""
+        if not reject_job:
+            return None, None
+        token = secrets.token_urlsafe(6)
+        _song_rejects[token] = {**reject_job, "song": song}
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(t["song_wrong_btn"], callback_data=SONG_WRONG_PREFIX + token))
+        return markup, token
+
+    def _expire_song_button(chat_id, message_id, token):
+        """Takes the "not this song" button away after a while, so old songs
+        in the chat don't keep carrying it."""
+        def expire():
+            if _song_rejects.pop(token, None) is None:
+                return  # already used
+            try:
+                bot.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+            except Exception:
+                pass
+        timer = threading.Timer(SONG_WRONG_SECONDS, expire)
+        timer.daemon = True
+        timer.start()
+
+    def _send_song(chat_id, reply_to_id, song, t, edit, status_id, reject_job=None):
         """Sends the full song (from the cache when it was sent before).
-        Returns False if it was recognized but no file could be found."""
+        Returns False if it was recognized but no file could be found.
+        With `reject_job` it carries a "not this song" button."""
         label = _song_label(song)
         caption = f"🎵 {label}\n\n{BOT_SIGNATURE}"
         file_key = _song_file_key(song)
+        markup, token = _song_wrong_markup(t, song, reject_job)
 
         cached = media_cache.get(file_key)
         if cached and time.time() - cached["time"] < MEDIA_CACHE_TTL:
             try:
-                bot.send_audio(chat_id, cached["items"][0][1], caption=caption, reply_to_message_id=reply_to_id)
+                sent = bot.send_audio(chat_id, cached["items"][0][1], caption=caption, reply_to_message_id=reply_to_id,
+                                      reply_markup=markup)
+                if token:
+                    _expire_song_button(chat_id, sent.message_id, token)
                 _delete_quietly(chat_id, status_id)
                 return True
             except Exception:
@@ -6687,7 +6727,7 @@ def register_features(bot):
                         chat_id, audio_file,
                         title=song["title"], performer=song.get("artist") or None,
                         thumbnail=thumb_file, caption=caption,
-                        reply_to_message_id=reply_to_id, timeout=600,
+                        reply_to_message_id=reply_to_id, timeout=600, reply_markup=markup,
                     )
                 finally:
                     if thumb_file:
@@ -6699,6 +6739,8 @@ def register_features(bot):
         finally:
             platforms.remove_download_files(files)
 
+        if token:
+            _expire_song_button(chat_id, sent.message_id, token)
         ref = _file_ref(sent)
         if ref:
             media_cache[file_key] = {
@@ -6776,7 +6818,8 @@ def register_features(bot):
                     edit(t["server_busy"])
                     return
 
-            if _send_song(chat_id, reply_to_id, song, t, edit, status.message_id):
+            reject_job = {"user_id": user_id, "source": source, "rejected": [], "reply_to_id": reply_to_id}
+            if _send_song(chat_id, reply_to_id, song, t, edit, status.message_id, reject_job=reject_job):
                 store.record_download("song_finder", user_id)
                 _maybe_send_ad(chat_id)
 
@@ -6820,6 +6863,97 @@ def register_features(bot):
             "key": post_id, "file_id": source.get("file_id"), "url": source.get("url"), "music": source.get("music"),
             "text": source.get("text"),
         }, t)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith(SONG_WRONG_PREFIX))
+    def handle_song_wrong(call):
+        chat_id, user_id = call.message.chat.id, call.from_user.id
+        t = _texts_for(chat_id)
+        job = _song_rejects.get(call.data[len(SONG_WRONG_PREFIX):])
+        if not job or job["user_id"] != user_id or store.is_banned(user_id):
+            bot.answer_callback_query(call.id, t["song_expired"], show_alert=True)
+            return
+        _song_rejects.pop(call.data[len(SONG_WRONG_PREFIX):], None)
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        _find_other_songs(chat_id, user_id, job, t)
+
+    def _find_other_songs(chat_id, user_id, job, t):
+        """The user says the song found isn't the one in the video: listen
+        to more spots with both engines and read the caption again, leave
+        out every song they rejected, and let them pick."""
+        source = job["source"]
+        rejected = list(job["rejected"]) + [song_finder.song_key(job["song"])]
+        # Don't hand the same wrong answer to the next person tapping 🎶.
+        id_key = f"songid:{source['key']}"
+        known = media_cache.get(id_key)
+        if known and known.get("song") and song_finder.song_key(known["song"]) in rejected:
+            media_cache.pop(id_key, None)
+
+        run_key = (user_id, source["key"])
+        if run_key in _song_running:
+            return
+        _song_running.add(run_key)
+        status = bot.send_message(chat_id, t["song_retry_searching"], reply_to_message_id=job["reply_to_id"])
+
+        def edit(text, markup=None):
+            try:
+                bot.edit_message_text(text, chat_id, status.message_id, reply_markup=markup)
+            except Exception:
+                pass
+
+        slot = None
+        try:
+            day = store.iran_time("%Y-%m-%d")
+            used = _song_usage.get((user_id, day), 0)
+            if used >= SONG_DAILY_LIMIT and not admin.is_owner(user_id):
+                edit(t["song_limit"].format(limit=_digits(t, SONG_DAILY_LIMIT)))
+                return
+            _song_usage[(user_id, day)] = used + 1
+            slot = _acquire_download_slot(bot, chat_id, status, t, show_ui=True, platform="song")
+            if slot is None:
+                edit(t["server_busy"])
+                return
+
+            songs = []
+            if source.get("file_id") or source.get("url"):
+                cleanup = []
+                try:
+                    songs = song_finder.recognize_all(_song_source_file(source, cleanup), exclude=rejected)
+                finally:
+                    platforms.remove_download_files(cleanup)
+            if source.get("text") and len(songs) < 4:
+                from_text = song_finder.from_caption(source["text"])
+                keys = set(rejected) | {song_finder.song_key(s) for s in songs}
+                if from_text and song_finder.song_key(from_text) not in keys:
+                    songs.append(from_text)
+
+            if not songs:
+                edit(t["song_retry_none"])
+                return
+            token = secrets.token_urlsafe(6)
+            _search_results[token] = {
+                "songs": songs[:5], "user_id": user_id,
+                "reject_job": {**job, "rejected": rejected},
+            }
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(*[
+                InlineKeyboardButton(_song_button_label(song), callback_data=f"{SEARCH_PREFIX}{token}_{index}")
+                for index, song in enumerate(songs[:5])
+            ])
+            edit(t["song_retry_pick"], markup)
+        except platforms.NoAudioError:
+            edit(t["v2a_no_audio"])
+        except Exception as e:
+            store.record_error(platform="song_finder", url=source.get("url") or "", user_id=user_id, error=str(e))
+            logger.exception("Song finder (another try) failed")
+            edit(t["song_failed"])
+        finally:
+            if slot is not None:
+                slot.release()
+            _song_running.discard(run_key)
 
     # ------------------------------------------------------------------
     # 🎙 Voice "Shazam": a voice message recorded near music is recognized
@@ -9194,9 +9328,10 @@ def register_features(bot):
             bot.answer_callback_query(call.id, t["rate_limited"].format(limit=_digits(t, RATE_LIMIT_COUNT)), show_alert=True)
             return
         bot.answer_callback_query(call.id)
-        _deliver_chosen_song(chat_id, user_id, call.message.message_id, entry["songs"][int(index)], t)
+        _deliver_chosen_song(chat_id, user_id, call.message.message_id, entry["songs"][int(index)], t,
+                             reject_job=entry.get("reject_job"))
 
-    def _deliver_chosen_song(chat_id, user_id, reply_to_id, song, t):
+    def _deliver_chosen_song(chat_id, user_id, reply_to_id, song, t, reject_job=None):
         status = bot.send_message(
             chat_id, t["song_found"].format(song=_song_label(song), step=t["song_fetch_steps"][0]),
             reply_to_message_id=reply_to_id,
@@ -9213,7 +9348,7 @@ def register_features(bot):
             edit(t["server_busy"])
             return
         try:
-            if _send_song(chat_id, reply_to_id, song, t, edit, status.message_id):
+            if _send_song(chat_id, reply_to_id, song, t, edit, status.message_id, reject_job=reject_job):
                 store.record_download("song_search", user_id)
                 _maybe_send_ad(chat_id)
         except Exception as e:
