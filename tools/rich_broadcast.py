@@ -12,6 +12,7 @@ The owner can't type rich messages without Telegram Premium; bots can.
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,7 +46,12 @@ def main() -> None:
     if not owner:
         raise SystemExit("OWNER_ID is not set.")
 
-    preview = call(token, "sendRichMessage", {"chat_id": owner, "rich_message": {"markdown": markdown}})
+    # Persian text must be laid out right-to-left (headings, lists and
+    # alignment); Telegram doesn't guess it for rich messages.
+    rtl = len(re.findall(r"[؀-ۿ]", markdown)) > len(re.findall(r"[A-Za-z]", markdown))
+    preview = call(token, "sendRichMessage", {
+        "chat_id": owner, "rich_message": {"markdown": markdown, "is_rtl": rtl},
+    })
 
     # The broadcast copies this preview to everyone: make sure a rich
     # message survives copying (a test copy, deleted right away).
