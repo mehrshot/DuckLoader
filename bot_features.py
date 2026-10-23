@@ -351,6 +351,8 @@ def _acquire_download_slot(
     return _DownloadSlot(acquired)
 
 def _is_rate_limited(user_id) -> bool:
+    if admin.is_owner(user_id):
+        return False  # the owner is never limited
     now = time.time()
     recent = [ts for ts in _recent_downloads[user_id] if now - ts < RATE_LIMIT_WINDOW]
     recent.append(now)
@@ -3894,7 +3896,7 @@ def register_features(bot):
 
         if store.is_exempt(
             user_id
-        ):
+        ) or admin.is_owner(user_id):
             return True
 
         unjoined = (
