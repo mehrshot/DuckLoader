@@ -3951,6 +3951,9 @@ def _score_candidate(track: dict, cand: dict) -> float:
                 best = max(best, _token_coverage(tokens, cand_tokens), ratio if ratio >= 0.85 else 0.0)
         else:
             best = _token_coverage(tokens, context_tokens)
+        # Re-uploads name the real artist in the title ("Song - Artist
+        # (slowed)") while the uploader is someone else.
+        best = max(best, _token_coverage(tokens, _normalize_text(cand_title_raw).split()))
         artist_score = max(artist_score, best if position == 0 else best * 0.8)
 
     # Duration
@@ -3980,8 +3983,11 @@ def _score_candidate(track: dict, cand: dict) -> float:
 
     # A cover/remix/live take, or the same title by a different artist, is
     # the wrong song — those must fall below the acceptance threshold even
-    # with a perfect title and duration.
-    mismatch = 60 * penalties
+    # with a perfect title and duration. Unless it's the same artist and
+    # the same length to the second: then the track itself is that version
+    # ("slowed", "remix") and only its title on Spotify doesn't say so.
+    same_recording = expected and duration and abs(float(duration) - expected) <= 2 and artist_score >= 0.8
+    mismatch = (15 if same_recording else 60) * penalties
     if artist_score < 0.4:
         mismatch += 40
     if title_score < 0.4:
