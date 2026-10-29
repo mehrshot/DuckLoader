@@ -920,7 +920,7 @@ _YOUTUBE_BOT_CHECK_HINTS = ("sign in to confirm", "not a bot", "confirm you")
 _INSTAGRAM_RETRY_HINTS = (
     "log in", "login", "cookies", "empty media response", "unreachable",
     "rate-limit", "not available to everyone", "certain audiences", "401", "429",
-    "media info not found",
+    "media info not found", "failed to parse json",
     # "Media not found or unavailable": another configured account (e.g.
     # the browser session) may still be allowed to see the post.
     "http error 400",
@@ -978,10 +978,16 @@ def _default_plans(url: str) -> list:
     if platform == "youtube":
         return [_youtube_plan(clients, True) for clients in _client_attempts()]
     if platform == "instagram":
-        return [
+        plans = [
             {"label": f"instagram:{label}", "opts": opts, "auth": label != "anonymous"}
             for label, opts in _instagram_auth_sources()
         ]
+        # The authenticated media API can redirect to an HTML page even
+        # while the same public Reel works through logged-out extraction.
+        # Keep account-only stories on their existing authenticated routes.
+        if "/stories/" not in url.lower() and all(plan["auth"] for plan in plans):
+            plans.append({"label": "instagram:public", "opts": {}, "auth": False})
+        return plans
     if platform == "tiktok":
         plans = [{"label": "tiktok", "opts": _tiktok_cookie_opts(), "auth": False}]
         proxy = _get_random_proxy()
@@ -994,6 +1000,11 @@ def _default_plans(url: str) -> list:
 def _is_retryable(url: str, error: Exception) -> bool:
     text = str(error).lower()
     platform = _platform_of_url(url)
+    if platform == "instagram" and any(hint in text for hint in (
+        "429", "too many requests", "rate-limit", "please wait a few minutes",
+    )):
+        # Another route would add traffic to an account/IP being throttled.
+        return False
     hints = {
         "youtube": _YOUTUBE_RETRY_HINTS,
         "instagram": _INSTAGRAM_RETRY_HINTS,
