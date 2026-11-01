@@ -1346,13 +1346,31 @@ def _download_with_selector(
 
     def attempt(plan):
         job_dir = _new_job_dir()
+        succeeded = False
         try:
             opts = {**ydl_opts, **plan["opts"], "outtmpl": os.path.join(job_dir, "%(id)s.%(ext)s")}
             with _open_ydl(opts) as ydl:
-                return _download_entries(ydl, url, job_dir, extract_audio, wanted_ids)
-        except BaseException:
-            _remove_tree(job_dir)
+                result = _download_entries(ydl, url, job_dir, extract_audio, wanted_ids)
+            succeeded = True
+            return result
+        except Exception as error:
+            if is_instagram:
+                access_error = _instagram_access_error(error)
+                if access_error is not None:
+                    raise access_error from error
+            # Some extractors do not declare the audio codec. Only call a
+            # postprocessing failure "silent" when ffprobe confirms that
+            # the downloaded, readable file really has no audio stream.
+            if extract_audio and "unable to obtain file audio codec with ffprobe" in str(error).lower():
+                path = _find_downloaded_file({}, job_dir, None, False)
+                if path and has_audio_stream(path) is False:
+                    raise NoAudioError("This video has no sound track.") from error
             raise
+        finally:
+            # Successful files are returned to the caller; failed attempts
+            # must be removed even when the error above is translated.
+            if not succeeded:
+                _remove_tree(job_dir)
 
     return _run_plans(url, plans or _default_plans(url), attempt)
 
@@ -1458,6 +1476,40 @@ def _download_entries(ydl, url, job_dir, extract_audio, wanted_ids):
 # ---------------------------------------------------------------------------
 
 _IG_APP_ID = "936619743392459"
+
+
+def _instagram_access_error(error):
+    """Recover explicit API access decisions hidden by yt-dlp's HTTP 400.
+
+    Inspect the existing response; do not send another request or infer
+    account expiration from a post's empty public response.
+    """
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, YDLHTTPError):
+            try:
+                body = json.loads(current.response.read(65536))
+                message = str(body.get("message") or "").lower()
+            except (ValueError, AttributeError, OSError):
+                continue
+            if current.status == 429 or "please wait a few minutes" in message:
+                return Exception("HTTP Error 429: Instagram rate-limit; please wait a few minutes.")
+            if message == "geoblock_required" or body.get("gating_type"):
+                return UnsupportedLinkError("ig_restricted", "Instagram restricted this content by age or region.")
+            if "media not found or unavailable" in message:
+                return UnsupportedLinkError("ig_not_found", "Instagram media not found or unavailable.")
+        for name in ("cause", "__cause__", "__context__"):
+            child = getattr(current, name, None)
+            if child is not None:
+                pending.append(child)
+        exc_info = getattr(current, "exc_info", None)
+        if exc_info and exc_info[1] is not None:
+            pending.append(exc_info[1])
+    return None
 _IG_SHORTCODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _IG_MEDIA_PATHS = {"p", "reel", "reels", "tv"}
 _IG_NON_PROFILE_PATHS = {
@@ -2252,7 +2304,10 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
     is_story = "/stories/" in url
 
     if quality == "audio":
-        selector, extract_audio, tier, format_sort = AUDIO_SELECTOR, True, "audio", None
+        # Instagram may mark a progressive MP4 as audio-less even though it
+        # contains AAC. Prefer that ready-made H.264 file over a higher-res
+        # video-only DASH fallback when no separate audio format exists.
+        selector, extract_audio, tier, format_sort = AUDIO_SELECTOR, True, "audio", _video_format_sort()
     else:
         tier = quality if quality in VIDEO_TIER_HEIGHTS else "best"
         height = VIDEO_TIER_HEIGHTS[tier]
@@ -2294,10 +2349,10 @@ def _download_instagram(url: str, quality: str, progress_hook=None):
             "media info not found" in error_text or "login" in error_text
         ) else e
         failure_text = str(failure).lower()
-        # These only come from Instagram's *logged-out* code paths, so seeing
-        # them while cookies are configured means the session isn't working.
+        # Empty media can mean an unavailable post or an extractor failure.
+        # Only explicit session evidence should trigger a login alert.
         if any(h in failure_text for h in (
-            "empty media response", "has no session cookie", "redirected to the login page",
+            "has no session cookie", "redirected to the login page",
         )) and any(label != "anonymous" for label, _ in _instagram_auth_sources()):
             _report_auth_problem("instagram", str(failure))
         shortcode = re.search(r"instagram\.com/(?:p|reel|tv)/([^/?#]+)", url)
@@ -4388,6 +4443,8 @@ def classify_error(platform: str, error: Exception) -> str:
         return error.kind
     if isinstance(error, FileTooLargeError):
         return "too_large"
+    if isinstance(error, NoAudioError):
+        return "v2a_no_audio"
     text = str(error).lower()
 
     if "drm" in text or isinstance(error, PreviewOnlyError):
@@ -4397,6 +4454,10 @@ def classify_error(platform: str, error: Exception) -> str:
     if any(h in text for h in ("http error 502", "http error 503", "http error 504", "service unavailable", "bad gateway")):
         return "platform_unavailable"
     if platform == "instagram":
+        # yt-dlp appends generic login/cookie advice to this error even for
+        # authenticated browsers. It does not establish a broken session.
+        if "empty media response" in text or "unreachable" in text:
+            return "instagram_failed"
         if "instagram media not found or unavailable" in text:
             return "ig_not_found"
         if "registered users who follow" in text or "private" in text:

@@ -4913,12 +4913,13 @@ def register_features(bot):
                     show_ui=show_ui,
                 )
 
-            if isinstance(e, platforms.UnsupportedLinkError):
-                # The user sent a profile/audio page etc. — not a bot error.
+            if isinstance(e, (platforms.UnsupportedLinkError, platforms.NoAudioError)):
+                # Unavailable/unsupported content and a confirmed silent
+                # video are expected outcomes, not broken bot operations.
                 logger.info(
-                    "Unsupported link | platform=%s | kind=%s | url=%s",
+                    "Media unavailable | platform=%s | kind=%s | url=%s",
                     platform,
-                    e.kind,
+                    platforms.classify_error(platform, e),
                     url,
                 )
             else:
